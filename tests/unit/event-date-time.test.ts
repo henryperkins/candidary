@@ -97,17 +97,59 @@ describe('calendar dates render as days', () => {
     expect(formatEventDate(value)).toBeNull();
   });
 
-  it('keeps a calendar date and an instant on separate entry points', () => {
+  it('keeps a calendar date and an explicit-offset event zone instant on separate entry points', () => {
     // The two functions exist because the inputs are different kinds of thing.
-    // Handing a calendar date to the instant formatter reads it as UTC midnight,
-    // which in a negative-offset zone is the evening before — the whole reason
-    // formatEventDate never constructs a Date at all.
+    // Handing a calendar date to the instant formatter used to read it as UTC
+    // midnight, which in a negative-offset zone became the evening before. The
+    // instant entry point now fails closed unless its input carries an offset.
     expect(formatEventDate('2026-09-19')).toBe('September 19, 2026');
-    expect(formatEventDay('2026-09-19', 'America/Chicago')).toBe('September 18, 2026');
+    expect(formatEventDay('2026-09-19', 'America/Chicago')).toBeNull();
   });
 });
 
 describe('instants render in the event zone', () => {
+  it.each([
+    '2026-09-19',
+    '2026-09-19T05:00:00',
+    '2026-02-30T05:00:00Z',
+    '2027-02-29T05:00:00Z',
+  ])('rejects the non-instant event-zone value %j instead of normalizing it', (iso) => {
+    expect(formatEventDateTime(iso, 'America/Chicago')).toBeNull();
+    expect(formatEventDay(iso, 'America/Chicago')).toBeNull();
+    expect(formatRetentionDate(iso, 'America/Chicago')).toBeNull();
+    expect(eventDateTimeDisplay(iso, 'America/Chicago')).toEqual({
+      value: TIME_UNAVAILABLE,
+      dateTime: null,
+    });
+  });
+
+  it('accepts explicit offsets and a real leap day in the event zone', () => {
+    const expected = 'September 19, 2026 at 5:00 PM CDT';
+    expect(formatEventDateTime('2026-09-19T22:00:00Z', 'America/Chicago')).toBe(expected);
+    expect(formatEventDateTime('2026-09-19T22:00:00+00:00', 'America/Chicago')).toBe(expected);
+    expect(formatEventDateTime('2026-09-19T17:00:00-05:00', 'America/Chicago')).toBe(expected);
+    expect(formatEventDay('2028-02-29T12:00:00Z', 'America/Chicago'))
+      .toBe('February 29, 2028');
+  });
+
+  it.each([
+    ['spring-forward', '2026-03-08T05:30:00Z', 'March 7, 2026', 'March 8, 2026'],
+    ['fall-back', '2026-11-01T04:30:00Z', 'October 31, 2026', 'November 1, 2026'],
+  ] as const)(
+    'keeps the Chicago event-zone day across the %s boundary when the viewer is in UTC',
+    (_boundary, iso, chicagoDay, utcDay) => {
+      const original = process.env.TZ;
+      try {
+        process.env.TZ = 'UTC';
+        expect(formatEventDay(iso, 'America/Chicago')).toBe(chicagoDay);
+        expect(formatEventDay(iso, 'UTC')).toBe(utcDay);
+      } finally {
+        if (original === undefined) delete process.env.TZ;
+        else process.env.TZ = original;
+      }
+    },
+  );
+
   it.each<[string, string, string]>([
     ['UTC', '2026-09-19T22:00:00.000Z', 'September 19, 2026 at 10:00 PM UTC'],
     ['America/Chicago', '2026-09-19T22:00:00.000Z', 'September 19, 2026 at 5:00 PM CDT'],

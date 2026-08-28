@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventCoverPreparationView } from '../../shared/event-cover';
 import type { EventView } from '../../shared/contracts';
@@ -62,6 +62,149 @@ function envelope(
   });
 }
 
+type XhrListener = EventListenerOrEventListenerObject;
+
+class ControlledEventTarget {
+  private readonly listeners = new Map<string, Set<XhrListener>>();
+
+  addEventListener(type: string, listener: XhrListener | null) {
+    if (!listener) return;
+    const listeners = this.listeners.get(type) ?? new Set<XhrListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: XhrListener | null) {
+    if (listener) this.listeners.get(type)?.delete(listener);
+  }
+
+  dispatch(event: Event) {
+    for (const listener of this.listeners.get(event.type) ?? []) {
+      if (typeof listener === 'function') listener.call(this, event);
+      else listener.handleEvent(event);
+    }
+  }
+}
+
+class ControlledCoverXMLHttpRequest extends ControlledEventTarget {
+  static instances: ControlledCoverXMLHttpRequest[] = [];
+
+  status = 0;
+  responseText = '';
+  withCredentials = false;
+  readonly upload = new ControlledEventTarget();
+  method = '';
+  url = '';
+  body: Document | XMLHttpRequestBodyInit | null = null;
+  readonly headers = new Map<string, string>();
+  readonly abort = vi.fn();
+
+  constructor() {
+    super();
+    ControlledCoverXMLHttpRequest.instances.push(this);
+  }
+
+  open(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  getResponseHeader() {
+    return null;
+  }
+
+  send(body: Document | XMLHttpRequestBodyInit | null) {
+    this.body = body;
+  }
+
+  progress(loaded: number, total: number) {
+    this.upload.dispatch(new ProgressEvent('progress', {
+      lengthComputable: true,
+      loaded,
+      total,
+    }));
+  }
+
+  respond(data: unknown, status = 200) {
+    this.status = status;
+    this.responseText = JSON.stringify(data);
+    this.dispatch(new Event('load'));
+  }
+
+  fail() {
+    this.dispatch(new Event('error'));
+  }
+
+  settleAbort() {
+    this.dispatch(new Event('abort'));
+  }
+}
+
+class FetchBackedCoverXMLHttpRequest extends ControlledEventTarget {
+  status = 0;
+  responseText = '';
+  withCredentials = false;
+  readonly upload = new ControlledEventTarget();
+  private method = '';
+  private url = '';
+  private aborted = false;
+  private readonly headers = new Headers();
+
+  open(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.headers.set(name, value);
+  }
+
+  getResponseHeader() {
+    return null;
+  }
+
+  abort() {
+    if (this.aborted) return;
+    this.aborted = true;
+    this.dispatch(new Event('abort'));
+  }
+
+  send(body: Document | XMLHttpRequestBodyInit | null) {
+    const total = body instanceof File ? body.size : 0;
+    if (total > 0) {
+      this.upload.dispatch(new ProgressEvent('progress', {
+        lengthComputable: true,
+        loaded: total,
+        total,
+      }));
+    }
+    void fetch(this.url, {
+      method: this.method,
+      headers: this.headers,
+      body: body as BodyInit,
+    }).then(async (response) => {
+      if (this.aborted) return;
+      this.status = response.status;
+      this.responseText = await response.text();
+      if (!this.aborted) this.dispatch(new Event('load'));
+    }, () => {
+      if (!this.aborted) this.dispatch(new Event('error'));
+    });
+  }
+}
+
+function installControlledCoverXhr() {
+  ControlledCoverXMLHttpRequest.instances = [];
+  vi.stubGlobal(
+    'XMLHttpRequest',
+    ControlledCoverXMLHttpRequest as unknown as typeof XMLHttpRequest,
+  );
+}
+
 function managerEvent(
   config: EventView['cover']['config'],
   revision = 3,
@@ -100,6 +243,13 @@ function reconciler(
     ...patch,
   };
 }
+
+beforeEach(() => {
+  vi.stubGlobal(
+    'XMLHttpRequest',
+    FetchBackedCoverXMLHttpRequest as unknown as typeof XMLHttpRequest,
+  );
+});
 
 afterEach(() => {
   sessionStorage.clear();
@@ -180,8 +330,12 @@ describe('cover draft primitives', () => {
       return envelope({ draft: draft({ state: nextState, revision: 4 }) });
     }));
     const file = new File(['abc'], 'porch.jpg', { type: 'image/jpeg' });
+    const controller = new AbortController();
+    const onProgress = vi.fn();
 
-    await expect(transferCoverDraft({ eventId: 'event-a', draft: draft({ state: 'ready' }), file }))
+    await expect(transferCoverDraft({
+      eventId: 'event-a', draft: draft({ state: 'ready' }), file, signal: controller.signal, onProgress,
+    }))
       .rejects.toBeInstanceOf(CoverDraftPrimitiveError);
     await expect(inspectCoverDraft('event-a', draft({ state: 'reserved' })))
       .rejects.toBeInstanceOf(CoverDraftPrimitiveError);
@@ -189,14 +343,15 @@ describe('cover draft primitives', () => {
       eventId: 'event-a', draft: draft({ state: 'ready' }), focus: { x: 0.4, y: 0.6 },
     })).rejects.toBeInstanceOf(CoverDraftPrimitiveError);
 
-    await transferCoverDraft({ eventId: 'event-a', draft: draft({ revision: 3 }), file });
+    await transferCoverDraft({
+      eventId: 'event-a', draft: draft({ revision: 3 }), file, signal: controller.signal, onProgress,
+    });
     await inspectCoverDraft('event-a', draft({ state: 'transferred', revision: 4 }));
     await writeCoverComposition({
       eventId: 'event-a',
       draft: draft({ state: 'inspected', revision: 5 }),
       focus: { x: 0.4, y: 0.6 },
     });
-    const controller = new AbortController();
     await readCoverEffectPreview('event-a', 'draft-a', 'warm', controller.signal);
     await discardCoverDraft('event-a', draft({ state: 'ready', revision: 8 }));
 
@@ -554,7 +709,8 @@ describe('useCoverStudioSession', () => {
     await act(async () => { await Promise.allSettled([upload, discard]); });
 
     expect(calls.filter(([, method]) => method === 'DELETE')).toHaveLength(1);
-    expect(session.result.current.open).toBe(false);
+    expect(session.result.current.open).toBe(true);
+    expect(session.result.current.selection.source).toBeNull();
     expect(session.result.current.draftState.status).toBe('idle');
   });
 
@@ -707,7 +863,7 @@ describe('useCoverStudioSession', () => {
     await act(async () => {
       await expect(session.result.current.chooseFile(
         new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 }),
-      )).rejects.toThrow('transfer response was lost');
+      )).rejects.toThrow('Reception dropped out. Try this photo again.');
     });
     await act(async () => session.result.current.discard());
 
@@ -1549,5 +1705,300 @@ describe('useCoverStudioSession', () => {
       operationId: null,
       dispatched: false,
     });
+  });
+});
+
+describe('cover draft cancel ordering', () => {
+  it('aborts one shared known attempt before settlement and ignores late transfer progress', async () => {
+    installControlledCoverXhr();
+    const NativeAbortController = globalThis.AbortController;
+    const controllers: AbortController[] = [];
+    class TrackingAbortController extends NativeAbortController {
+      constructor() {
+        super();
+        controllers.push(this);
+      }
+    }
+    vi.stubGlobal('AbortController', TrackingAbortController);
+
+    const reserved = draft();
+    const order: string[] = [];
+    let reservationSignal: AbortSignal | null = null;
+    let reservations = 0;
+    const fetchMock = vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      const method = init?.method ?? 'GET';
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        reservationSignal = init?.signal ?? null;
+        order.push('reserve');
+        return envelope({ draft: reserved, ingress: { method: 'PUT', path: '/ignored' } }, 201);
+      }
+      if (value.endsWith('/draft-a') && method === 'GET') {
+        order.push('read');
+        return envelope({ draft: reserved });
+      }
+      if (method === 'DELETE') {
+        order.push('delete');
+        return envelope({ draft: draft({ state: 'expired', revision: 1 }) });
+      }
+      throw new Error(`Unexpected request ${method} ${value}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const owner = reconciler();
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: owner,
+    }));
+    const file = new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 });
+
+    act(() => session.result.current.openStudio());
+    let upload!: Promise<void>;
+    act(() => { upload = session.result.current.chooseFile(file); });
+    await waitFor(() => expect(ControlledCoverXMLHttpRequest.instances).toHaveLength(1));
+    const request = ControlledCoverXMLHttpRequest.instances[0]!;
+    expect(controllers).toHaveLength(1);
+    expect(reservationSignal).toBe(controllers[0]!.signal);
+    expect(session.result.current.draftState).toMatchObject({
+      status: 'transferring', sentBytes: 0, totalBytes: file.size,
+    });
+
+    act(() => request.progress(1, file.size));
+    expect(session.result.current.draftState).toMatchObject({ status: 'transferring', sentBytes: 1 });
+
+    let cancellation!: Promise<void>;
+    act(() => { cancellation = session.result.current.discard(); });
+    await waitFor(() => expect(request.abort).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(['reserve']);
+
+    act(() => request.progress(file.size, file.size));
+    expect(session.result.current.draftState).toMatchObject({ status: 'transferring', sentBytes: 1 });
+    act(() => request.settleAbort());
+    await act(async () => { await Promise.all([upload, cancellation]); });
+
+    expect(order).toEqual(['reserve', 'read', 'delete']);
+    expect(reservations).toBe(1);
+    expect(fetchMock.mock.calls.some(([path]) => String(path).endsWith('/inspect'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([path]) => String(path).includes('/publications'))).toBe(false);
+    expect(session.result.current).toMatchObject({
+      open: true,
+      draft: null,
+      draftState: { status: 'idle' },
+      canvasPreview: { kind: 'authoritative' },
+    });
+    expect(session.result.current.selection.source).toBeNull();
+    expect(owner.beginDispatch).not.toHaveBeenCalled();
+  });
+
+  it('waits for a post-bytes inspection attempt and ignores its late completion', async () => {
+    installControlledCoverXhr();
+    const NativeAbortController = globalThis.AbortController;
+    const controllers: AbortController[] = [];
+    class TrackingAbortController extends NativeAbortController {
+      constructor() {
+        super();
+        controllers.push(this);
+      }
+    }
+    vi.stubGlobal('AbortController', TrackingAbortController);
+
+    const reserved = draft();
+    const transferred = draft({ state: 'transferred', revision: 1 });
+    const inspected = draft({
+      state: 'inspected',
+      revision: 2,
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    let serverDraft = transferred;
+    let reservationSignal: AbortSignal | null = null;
+    let inspectionSignal: AbortSignal | null = null;
+    let releaseInspection!: () => void;
+    const inspectionGate = new Promise<void>((resolve) => { releaseInspection = resolve; });
+    const order: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      const method = init?.method ?? 'GET';
+      if (value.endsWith('/cover/drafts')) {
+        reservationSignal = init?.signal ?? null;
+        return envelope({ draft: reserved, ingress: { method: 'PUT', path: '/ignored' } }, 201);
+      }
+      if (value.endsWith('/inspect')) {
+        inspectionSignal = init?.signal ?? null;
+        serverDraft = inspected;
+        order.push('inspect');
+        await inspectionGate;
+        order.push('inspection-response');
+        return envelope({ draft: inspected });
+      }
+      if (value.endsWith('/draft-a') && method === 'GET') {
+        order.push('read');
+        return envelope({ draft: serverDraft });
+      }
+      if (method === 'DELETE') {
+        order.push('delete');
+        return envelope({ draft: draft({ state: 'expired', revision: 3 }) });
+      }
+      throw new Error(`Unexpected request ${method} ${value}`);
+    }));
+    const owner = reconciler();
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: owner,
+    }));
+
+    let upload!: Promise<void>;
+    act(() => {
+      session.result.current.openStudio();
+      upload = session.result.current.chooseFile(
+        new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 }),
+      );
+    });
+    await waitFor(() => expect(ControlledCoverXMLHttpRequest.instances).toHaveLength(1));
+    act(() => ControlledCoverXMLHttpRequest.instances[0]!.respond({
+      data: { draft: transferred }, requestId: 'request-transfer',
+    }));
+    await waitFor(() => expect(inspectionSignal).not.toBeNull());
+    expect(controllers).toHaveLength(1);
+    expect(reservationSignal).toBe(controllers[0]!.signal);
+    expect(inspectionSignal).toBe(controllers[0]!.signal);
+
+    let cancellation!: Promise<void>;
+    act(() => { cancellation = session.result.current.discard(); });
+    expect(inspectionSignal!.aborted).toBe(true);
+    expect(order).toEqual(['inspect']);
+
+    releaseInspection();
+    await act(async () => { await Promise.all([upload, cancellation]); });
+    expect(order).toEqual(['inspect', 'inspection-response', 'read', 'delete']);
+    expect(session.result.current).toMatchObject({
+      open: true,
+      draft: null,
+      draftState: { status: 'idle' },
+      canvasPreview: { kind: 'authoritative' },
+    });
+    expect(owner.rejectBeforeDispatch).not.toHaveBeenCalled();
+    expect(owner.beginDispatch).not.toHaveBeenCalled();
+  });
+
+  it('replays only an ambiguous reservation once with the same intent before reread and discard', async () => {
+    installControlledCoverXhr();
+    const reserved = draft();
+    const intentIds: string[] = [];
+    const order: string[] = [];
+    let reservations = 0;
+    vi.stubGlobal('fetch', vi.fn((path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      const method = init?.method ?? 'GET';
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        intentIds.push((JSON.parse(String(init?.body)) as { draftIntentId: string }).draftIntentId);
+        if (reservations === 1) {
+          order.push('reserve');
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              order.push('abort');
+              reject(new DOMException('The response was lost.', 'AbortError'));
+            }, { once: true });
+          });
+        }
+        order.push('replay');
+        return Promise.resolve(envelope({
+          draft: reserved,
+          ingress: { method: 'PUT', path: '/ignored' },
+          replayed: true,
+        }, 201));
+      }
+      if (value.endsWith('/draft-a') && method === 'GET') {
+        order.push('read');
+        return Promise.resolve(envelope({ draft: reserved }));
+      }
+      if (method === 'DELETE') {
+        order.push('delete');
+        return Promise.resolve(envelope({ draft: draft({ state: 'expired', revision: 1 }) }));
+      }
+      return Promise.reject(new Error(`Unexpected request ${method} ${value}`));
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    let upload!: Promise<void>;
+    act(() => {
+      upload = session.result.current.chooseFile(
+        new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 }),
+      );
+    });
+    await waitFor(() => expect(reservations).toBe(1));
+    let cancellation!: Promise<void>;
+    act(() => { cancellation = session.result.current.discard(); });
+    await act(async () => { await Promise.all([upload, cancellation]); });
+
+    expect(intentIds).toHaveLength(2);
+    expect(new Set(intentIds).size).toBe(1);
+    expect(order).toEqual(['reserve', 'abort', 'replay', 'read', 'delete']);
+    expect(ControlledCoverXMLHttpRequest.instances).toHaveLength(0);
+    expect(session.result.current).toMatchObject({ open: true, draftState: { status: 'idle' } });
+  });
+
+  it('uses the existing preparation retry after a network failure mid-transfer', async () => {
+    installControlledCoverXhr();
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:ready') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    const reserved = draft();
+    const ready = draft({
+      state: 'ready',
+      revision: 3,
+      master: { width: 1600, height: 1000, safeZoomMaximum: 1.6, available2xProfiles: [] },
+      focus: { x: 0.5, y: 0.5, modelVersion: 1 },
+      preview: { effect: 'natural', width: 960, height: 600, byteSize: 3, recipeVersion: 1 },
+    });
+    const intentIds: string[] = [];
+    let reservations = 0;
+    vi.stubGlobal('fetch', vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      const value = String(path);
+      if (value.endsWith('/cover/drafts')) {
+        reservations += 1;
+        intentIds.push((JSON.parse(String(init?.body)) as { draftIntentId: string }).draftIntentId);
+        return envelope({
+          draft: reservations === 1 ? reserved : ready,
+          ingress: reservations === 1 ? { method: 'PUT', path: '/ignored' } : null,
+          replayed: reservations > 1,
+        }, 201);
+      }
+      if (value.endsWith('/previews/natural')) {
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      throw new Error(`Unexpected request ${value}`);
+    }));
+    const session = renderHook(() => useCoverStudioSession({
+      event: managerEvent({ version: 1, source: { kind: 'none' } }),
+      reconciler: reconciler(),
+    }));
+
+    act(() => session.result.current.openStudio());
+    let upload!: Promise<void>;
+    act(() => {
+      upload = session.result.current.chooseFile(
+        new File(['abc'], 'porch.jpg', { type: 'image/jpeg', lastModified: 10 }),
+      );
+    });
+    await waitFor(() => expect(ControlledCoverXMLHttpRequest.instances).toHaveLength(1));
+    act(() => ControlledCoverXMLHttpRequest.instances[0]!.fail());
+    await act(async () => {
+      await expect(upload).rejects.toThrow('Reception dropped out. Try this photo again.');
+    });
+    expect(session.result.current.draftState.status).toBe('error');
+
+    await act(async () => session.result.current.enterCompose());
+    expect(reservations).toBe(2);
+    expect(new Set(intentIds).size).toBe(1);
+    expect(ControlledCoverXMLHttpRequest.instances).toHaveLength(1);
+    expect(session.result.current.draftState.status).toBe('ready');
+    expect(session.result.current.canvasPreview).toEqual({ kind: 'draft', url: 'blob:ready' });
   });
 });

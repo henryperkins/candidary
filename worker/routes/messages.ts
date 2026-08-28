@@ -19,6 +19,7 @@ import { GuestbookRepository } from '../db/guestbook';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertCsrf } from '../http/csrf';
+import { assertGuestReadSurfacesAvailable } from '../http/event-view';
 import { decodeMessageCursor, encodeMessageCursor } from '../http/message-cursor';
 import { decodeGuestbookCursor, encodeGuestbookCursor } from '../http/guestbook-cursor';
 import { clientIp } from '../http/client-ip';
@@ -36,6 +37,7 @@ async function guestAuth(context: Context<AppBindings>, write = false) {
   if (auth.session.role !== 'guest' || context.req.param('slug') !== auth.event.slug) {
     throw new ApiError('ROLE_FORBIDDEN', 'This session belongs to a different event.', 403);
   }
+  assertGuestReadSurfacesAvailable(auth.event);
   if (write) await assertCsrf(context, 'event', auth.session.csrfDigest);
   return auth;
 }

@@ -394,6 +394,8 @@ export interface SessionRecord {
   accessTokenId: string;
   role: Role;
   canClaimOwner: boolean;
+  /** Non-null only for a server-only Manager upload actor. Never authorizes a request. */
+  managerUploadAccountId: string | null;
   expiresAt: string;
   revokedAt: string | null;
   createdAt: string;

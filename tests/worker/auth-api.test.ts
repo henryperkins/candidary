@@ -3,7 +3,7 @@ import { applyD1Migrations, reset } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuthService } from '../../worker/auth/service';
-import { decryptSecret } from '../../worker/security/crypto';
+import { decryptSecret, digestSecret } from '../../worker/security/crypto';
 import { createApp } from '../../worker/app';
 import type { AppEnv } from '../../worker/env';
 import { classifyExchangeFailure } from '../../worker/routes/exchange';
@@ -106,6 +106,35 @@ describe('event creation', () => {
 });
 
 describe('token exchange and session authorization', () => {
+  it('refuses a matching-digest manager upload actor as an event session', async () => {
+    const created = await createEvent();
+    const managerTokenId = new URL(created.body.data.managementLink).pathname
+      .split('/').at(-1)!.split('.')[0]!;
+    const actorId = 'manager-upload-actor';
+    const actorSecret = 'server-only-actor-secret';
+
+    await env.DB.prepare(`
+      INSERT INTO host_accounts (id, email, password_hash, created_at)
+      VALUES ('manager-upload-account', 'manager-upload@example.com', 'password-hash', ?)
+    `).bind(new Date().toISOString()).run();
+    await env.DB.prepare(`
+      INSERT INTO event_sessions (
+        id, secret_digest, csrf_digest, event_id, access_token_id, role,
+        can_claim_owner, expires_at, created_at, manager_upload_account_id
+      ) VALUES (?, ?, 'csrf-digest', ?, ?, 'manager', 0, ?, ?, 'manager-upload-account')
+    `).bind(
+      actorId,
+      await digestSecret(actorSecret, testEnv.SESSION_HMAC_KEY),
+      created.body.data.event.id,
+      managerTokenId,
+      new Date(Date.now() + 60_000).toISOString(),
+      new Date().toISOString(),
+    ).run();
+
+    await expect(new AuthService(testEnv).resolve(`${actorId}.${actorSecret}`))
+      .rejects.toMatchObject({ code: 'SESSION_REQUIRED', status: 401 });
+  });
+
   it('exchanges the printed entry, answers without the secret, and resolves the event shell', async () => {
     const created = await createEvent();
     const fragment = new URL(created.body.data.eventLink).hash.slice(1);
@@ -262,4 +291,3 @@ describe('token exchange and session authorization', () => {
     expect(entry).not.toContain('database unavailable');
   });
 });
-

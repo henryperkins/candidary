@@ -1,4 +1,6 @@
 import type { EventView, GuestEventView } from '../../shared/contracts';
+import { MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
+import { ApiError } from '../../shared/errors';
 import type { EventCoverView, GuestEventCoverView } from '../../shared/event-cover';
 import {
   localDateForInstant,
@@ -8,16 +10,48 @@ import { resolvedThemeView } from '../../shared/event-theme';
 import {
   isLegacyEventStart,
   isRsvpConfigured,
+  GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE,
   resolveGuestEventPhase,
   resolvePhotoIntake,
 } from '../../shared/rsvp';
 import type { EventRecord } from '../db/types';
+import { TokensRepository } from '../db/tokens';
 import type { AppEnv } from '../env';
 import { selectEventCoverPreparation } from '../services/event-cover-publication';
 import {
   guestCoverView,
   selectManagerEventCoverView,
 } from './event-cover-view';
+
+type ManagerLinkProjection = Pick<
+  EventView,
+  'managerLinkRevision' | 'managerLinkRotationAvailability'
+>;
+
+function resolveGuestPhaseForEvent(event: EventRecord, now: Date) {
+  return resolveGuestEventPhase({
+    ...event,
+    rsvpConfigured: isRsvpConfigured(event),
+  }, now);
+}
+
+function guestReadSurfacesConflict(): ApiError {
+  return new ApiError(
+    'EVENT_PHASE_CONFLICT',
+    GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE,
+    409,
+  );
+}
+
+/** One route guard owns the direct Gallery, My Deliveries, and Guestbook refusal. */
+export function assertGuestReadSurfacesAvailable(
+  event: EventRecord,
+  now = new Date(),
+): void {
+  if (!resolveGuestPhaseForEvent(event, now).guestReadSurfaces.available) {
+    throw guestReadSurfacesConflict();
+  }
+}
 
 function deadlineDate(event: EventRecord): string | null {
   return event.rsvpDeadlineAt
@@ -37,10 +71,30 @@ export function eventStartTime(event: EventRecord): string {
   return localTimeForInstant(event.eventStartAt, event.eventTimezone);
 }
 
+function hostUploadAvailability(event: EventRecord): EventView['hostUploadAvailability'] {
+  const retainedMedia = event.storedMediaCount
+    + event.reservedMediaCount
+    + event.recoverableMediaCount;
+  if (retainedMedia >= MAX_EVENT_MEDIA) {
+    return { enabled: false, reason: 'media-cap' };
+  }
+
+  const retainedBytes = event.storedBytes + event.reservedBytes + event.recoverableBytes;
+  if (retainedBytes >= MAX_EVENT_BYTES) {
+    return { enabled: false, reason: 'storage-cap' };
+  }
+
+  return { enabled: true, reason: null };
+}
+
 export function eventView(
   event: EventRecord,
   cover: EventCoverView,
   now = new Date(),
+  managerLink: ManagerLinkProjection = {
+    managerLinkRevision: null,
+    managerLinkRotationAvailability: { enabled: false, reason: 'account-required' },
+  },
 ): EventView {
   const intake = resolvePhotoIntake(event, now);
   return {
@@ -60,8 +114,10 @@ export function eventView(
     storedBytes: event.storedBytes,
     recoverableMediaCount: event.recoverableMediaCount,
     recoverableBytes: event.recoverableBytes,
+    hostUploadAvailability: hostUploadAvailability(event),
     guestAccessExpiresAt: event.guestAccessExpiresAt,
     managementAccessExpiresAt: event.managementAccessExpiresAt,
+    ...managerLink,
     purgeAfter: event.purgeAfter,
     createdAt: event.createdAt,
     deletedAt: event.deletedAt,
@@ -91,7 +147,6 @@ export function guestEventView(
   cover: GuestEventCoverView,
   now = new Date(),
 ): GuestEventView {
-  const rsvpConfigured = isRsvpConfigured(event);
   return {
     id: event.id,
     slug: event.slug,
@@ -107,7 +162,7 @@ export function guestEventView(
     eventStartAt: event.eventStartAt,
     rsvpDeadlineAt: event.rsvpDeadlineAt,
     rsvpDeadlineDate: deadlineDate(event),
-    ...resolveGuestEventPhase({ ...event, rsvpConfigured }, now),
+    ...resolveGuestPhaseForEvent(event, now),
     theme: resolvedThemeView(event.themeConfig),
   };
 }
@@ -117,10 +172,20 @@ export async function selectManagerEventView(
   env: AppEnv,
   event: EventRecord,
   now = new Date(),
+  via: 'link' | 'account' | null = null,
 ): Promise<EventView> {
   const preparation = await selectEventCoverPreparation(env, event.id, now);
   const cover = await selectManagerEventCoverView(env.DB, event, preparation);
-  return eventView(event, cover, now);
+  const managerLink: ManagerLinkProjection = via === 'account'
+    ? {
+        managerLinkRevision: await new TokensRepository(env.DB).getManagerLinkRevision(event.id),
+        managerLinkRotationAvailability: { enabled: true, reason: null },
+      }
+    : {
+        managerLinkRevision: null,
+        managerLinkRotationAvailability: { enabled: false, reason: 'account-required' },
+      };
+  return eventView(event, cover, now, managerLink);
 }
 
 /** Route boundary: derive the manager projection, then apply the guest allowlist. */

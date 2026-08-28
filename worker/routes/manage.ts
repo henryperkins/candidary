@@ -41,6 +41,7 @@ import {
   MANAGER_BULK_SELECTION_MAX,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
+  MAX_IMAGE_BYTES,
   MAX_GUESTBOOK_PROMPT_LENGTH,
   MIN_EVENT_CALENDAR_YEAR,
   PRIVATE_GALLERY_PAGE_SIZE,
@@ -53,7 +54,13 @@ import { eventStartTime, selectManagerEventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { deleteEventData } from '../workflows/cleanup';
 import { privateJson } from '../http/private-json';
-import { retireMediaObjects } from '../storage/media';
+import { managerUploadBatchSchema } from '../http/upload-schemas';
+import { ManagerUploadActorService } from '../services/manager-upload-actor';
+import { UploadService } from '../services/uploads';
+import {
+  deleteMediaObjectAliases,
+  receiveMediaUpload,
+} from '../storage/media';
 
 const confirmNameSchema = z.object({ confirmName: z.string().max(80) });
 
@@ -111,6 +118,9 @@ const mediaLimitSchema = z.coerce.number().int().min(1).max(MANAGER_MEDIA_MAX_PA
 const galleryLimitSchema = z.coerce.number().int().min(1).max(PRIVATE_GALLERY_PAGE_SIZE)
   .default(PRIVATE_GALLERY_PAGE_SIZE);
 const favoriteSchema = z.object({ favorite: z.boolean() }).strict();
+const managerLinkRotationSchema = z.object({
+  expectedManagerLinkRevision: z.number().int().nonnegative(),
+}).strict();
 const GALLERY_SEARCH_MAX_CODE_POINTS = 120;
 
 // Album. `strict()` throughout: an unknown key here is a client composing against a
@@ -149,7 +159,18 @@ const albumPicksSchema = z.object({
   mediaIds: z.array(z.string().min(1).max(64)).min(1).max(ALBUM_MAX_ENTRIES),
   picked: z.boolean(),
 }).strict();
-const albumStartSchema = z.object({ start: z.enum(['from-picks', 'empty']) }).strict();
+const albumStartChoiceSchema = z.enum(['from-picks', 'empty']);
+const albumStartSchema = z.union([
+  z.object({
+    start: albumStartChoiceSchema,
+    expectedReconciliation: z.enum(['initialize', 'historical', 'over-capacity']),
+    expectedPickGeneration: z.number().int().min(0),
+    expectedRevision: z.number().int().min(0),
+  }).strict(),
+  // One compatibility release only. Keeping this as a separate strict shape
+  // prevents a partially upgraded client from falling through to legacy behavior.
+  z.object({ start: albumStartChoiceSchema }).strict(),
+]);
 
 function managerForEvent(context: Context<AppBindings>, write = false) {
   return requireManager(context, { write });
@@ -207,6 +228,11 @@ manageRoutes.use('/manage/events/:eventId/media/:mediaId/trash', privateJson);
 manageRoutes.use('/manage/events/:eventId/media/:mediaId/restore', privateJson);
 manageRoutes.use('/manage/events/:eventId/media/:mediaId/cancel-reservation', privateJson);
 manageRoutes.use('/manage/events/:eventId/gallery/summary', privateJson);
+manageRoutes.use('/manage/events/:eventId/uploads/batch', privateJson);
+manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/content', privateJson);
+manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/finalize', privateJson);
+manageRoutes.use('/manage/events/:eventId/uploads/:mediaId', privateJson);
+manageRoutes.use('/manage/events/:eventId/links/manager/rotate', privateJson);
 
 // Re-displays the printed credential for a host who lost the card. There is no
 // replacement action beside it on purpose: a new link would not be on the signs
@@ -275,7 +301,7 @@ manageRoutes.put('/manage/events/:eventId/theme', async (context) => {
     serializeEventThemeConfig(resolved.config),
   );
   return context.json({
-    data: { event: await selectManagerEventView(context.env, updated) },
+    data: { event: await selectManagerEventView(context.env, updated, new Date(), auth.via) },
     requestId: context.get('requestId'),
   });
 });
@@ -365,7 +391,7 @@ manageRoutes.patch('/manage/events/:eventId/settings', async (context) => {
     );
   }
   return context.json({
-    data: { event: await selectManagerEventView(context.env, event) },
+    data: { event: await selectManagerEventView(context.env, event, new Date(), auth.via) },
     requestId: context.get('requestId'),
   });
 });
@@ -403,7 +429,195 @@ manageRoutes.post('/manage/events/:eventId/photo-intake', async (context) => {
     );
   }
   return context.json({
-    data: { event: await selectManagerEventView(context.env, event) },
+    data: { event: await selectManagerEventView(context.env, event, new Date(), auth.via) },
+    requestId: context.get('requestId'),
+  });
+});
+
+function managerUploadForbidden(): ApiError {
+  return new ApiError(
+    'RESOURCE_FORBIDDEN',
+    'This upload belongs to a different Manager or event.',
+    403,
+  );
+}
+
+function managerUploadConflict(): ApiError {
+  return new ApiError(
+    'UPLOAD_FINALIZE_CONFLICT',
+    'This upload can no longer be canceled.',
+    409,
+  );
+}
+
+manageRoutes.post('/manage/events/:eventId/uploads/batch', async (context) => {
+  // Manager authentication, origin, and credential-scoped CSRF all complete
+  // before the bounded JSON body is read.
+  const auth = await managerForEvent(context, true);
+  const parsed = managerUploadBatchSchema.safeParse(
+    await context.req.json().catch(() => null),
+  );
+  if (!parsed.success) {
+    throw new ApiError('VALIDATION_FAILED', 'Check these photos and try again.', 422);
+  }
+  const authority = await new ManagerUploadActorService(context.env)
+    .ensureForReservation(auth);
+  const result = await new UploadService(context.env).initiateBatch(
+    authority,
+    auth.event,
+    parsed.data,
+  );
+  return context.json({ data: result, requestId: context.get('requestId') }, 201);
+});
+
+manageRoutes.post('/manage/events/:eventId/uploads/:mediaId/finalize', async (context) => {
+  const auth = await managerForEvent(context, true);
+  const authority = await new ManagerUploadActorService(context.env)
+    .lookupForExistingUpload(auth);
+  if (!authority) throw managerUploadForbidden();
+  const repository = new MediaRepository(context.env.DB);
+  const media = await repository.getById(context.req.param('mediaId'));
+  if (!media
+    || media.eventId !== auth.event.id
+    || media.uploaderSessionId !== authority.actorSessionId) {
+    throw managerUploadForbidden();
+  }
+  if (media.uploadState === 'stored') {
+    return context.json({
+      data: { media: uploadMediaView(media) },
+      requestId: context.get('requestId'),
+    });
+  }
+  throw new ApiError(
+    'UPLOAD_FINALIZE_CONFLICT',
+    'This upload needs its photo bytes again before it can be secured.',
+    409,
+  );
+});
+
+manageRoutes.delete('/manage/events/:eventId/uploads/:mediaId', async (context) => {
+  const auth = await managerForEvent(context, true);
+  const authority = await new ManagerUploadActorService(context.env)
+    .lookupForExistingUpload(auth);
+  if (!authority) throw managerUploadForbidden();
+  const repository = new MediaRepository(context.env.DB);
+  const mediaId = context.req.param('mediaId');
+  const media = await repository.getById(mediaId);
+  if (!media
+    || media.eventId !== auth.event.id
+    || media.uploaderSessionId !== authority.actorSessionId) {
+    throw managerUploadForbidden();
+  }
+  const canceledAt = new Date().toISOString();
+  const outcome = await repository.cancelReservation(mediaId, authority, canceledAt);
+  if (outcome.kind === 'forbidden') throw managerUploadForbidden();
+  if (outcome.kind === 'conflict') throw managerUploadConflict();
+  if (outcome.kind === 'canceled') {
+    await deleteMediaObjectAliases(
+      context.env.MEDIA_BUCKET,
+      context.env.CANONICAL_MEDIA_BUCKET,
+      outcome.claim,
+    ).catch(() => undefined);
+  }
+  const canceled = await repository.getById(mediaId);
+  if (!canceled) throw managerUploadConflict();
+  return context.json({
+    data: { media: uploadMediaView(canceled) },
+    requestId: context.get('requestId'),
+  });
+});
+
+manageRoutes.put('/manage/events/:eventId/uploads/:mediaId/content', async (context) => {
+  // Resolve the one authority before touching the body. The same object crosses
+  // the post-buffer claim and commit fences; it is never re-resolved after bytes
+  // arrive and lookup-only account resolution cannot create an actor on a probe.
+  const auth = await managerForEvent(context, true);
+  const authority = await new ManagerUploadActorService(context.env)
+    .lookupForExistingUpload(auth);
+  if (!authority) throw managerUploadForbidden();
+  const repository = new MediaRepository(context.env.DB);
+  const media = await repository.getById(context.req.param('mediaId'));
+  if (!media
+    || media.eventId !== auth.event.id
+    || media.uploaderSessionId !== authority.actorSessionId) {
+    throw managerUploadForbidden();
+  }
+  if (media.uploadState === 'stored') {
+    return context.json({
+      data: { media: uploadMediaView(media) },
+      requestId: context.get('requestId'),
+    });
+  }
+  if (media.uploadState !== 'reserved' || media.deletedAt !== null) {
+    throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer receive bytes.', 409);
+  }
+  const promotion = await repository.getPromotion(media.id);
+  const canBufferExactRetry = promotion?.state === 'copying'
+    && promotion.sourceEtag?.startsWith('buffer:') === true;
+  if (!promotion || (promotion.state !== 'pending' && !canBufferExactRetry)) {
+    throw new ApiError(
+      'UPLOAD_FINALIZE_CONFLICT',
+      'This upload is already being secured. Wait a moment and try again.',
+      409,
+    );
+  }
+  if (Date.parse(media.reservationExpiresAt) <= Date.now()) {
+    throw new ApiError(
+      'UPLOAD_RESERVATION_EXPIRED',
+      'This upload reservation expired. Choose the file again.',
+      409,
+    );
+  }
+
+  const lengthHeader = context.req.header('content-length');
+  if (!lengthHeader) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'This upload needs to say how large the photo is.',
+      411,
+    );
+  }
+  const contentLength = Number(lengthHeader);
+  if (!Number.isSafeInteger(contentLength) || contentLength < 1) {
+    throw new ApiError('VALIDATION_FAILED', 'That upload could not be read. Try again.', 422);
+  }
+  if (contentLength > MAX_IMAGE_BYTES || contentLength !== media.declaredByteSize) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'That photo is a different size than the one reserved.',
+      422,
+    );
+  }
+  if ((context.req.header('content-type') ?? '') !== media.mimeType) {
+    throw new ApiError(
+      'FILE_TYPE_UNSUPPORTED',
+      'The uploaded image type does not match its reservation.',
+      415,
+    );
+  }
+
+  const bytes = await context.req.raw.arrayBuffer();
+  if (bytes.byteLength !== contentLength) {
+    throw new ApiError(
+      'VALIDATION_FAILED',
+      'That upload did not finish. Choose the photo again.',
+      422,
+    );
+  }
+  const stored = await receiveMediaUpload(
+    context.env.CANONICAL_MEDIA_BUCKET,
+    repository,
+    media,
+    {
+      eventStartAt: auth.event.eventStartAt,
+      eventTimezone: auth.event.eventTimezone,
+    },
+    authority,
+    bytes,
+    context.req.header('content-type') ?? '',
+  );
+  return context.json({
+    data: { media: uploadMediaView(stored) },
     requestId: context.get('requestId'),
   });
 });
@@ -645,6 +859,13 @@ manageRoutes.post('/manage/events/:eventId/album/start', async (context) => {
   const { album, started, cleared } = await new AlbumRepository(context.env.DB).start(
     eventId,
     parsed.data.start,
+    'expectedReconciliation' in parsed.data
+      ? {
+          expectedReconciliation: parsed.data.expectedReconciliation,
+          expectedPickGeneration: parsed.data.expectedPickGeneration,
+          expectedRevision: parsed.data.expectedRevision,
+        }
+      : null,
     new Date().toISOString(),
   );
   return context.json({ data: { album, started, cleared }, requestId: context.get('requestId') });
@@ -744,28 +965,35 @@ manageRoutes.post('/manage/events/:eventId/media/:mediaId/cancel-reservation', a
   await managerForEvent(context, true);
   await assertEmptyBody(context);
   const repository = new MediaRepository(context.env.DB);
-  const media = await repository.getById(context.req.param('mediaId'));
-  if (!media || media.eventId !== context.req.param('eventId')) {
+  const mediaId = context.req.param('mediaId');
+  const outcome = await repository.cancelGuestReservationFromManager(
+    mediaId,
+    context.req.param('eventId'),
+    new Date().toISOString(),
+  );
+  if (outcome.kind === 'forbidden') {
     throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
   }
-  if (media.uploadState === 'stored') {
+  if (outcome.kind === 'conflict') {
     throw new ApiError(
       'MEDIA_STATE_CONFLICT',
       'This photo was delivered. Move it to Recently deleted instead.',
       409,
     );
   }
-  const cancelledAt = new Date().toISOString();
-  const cancelled = await repository.delete(media.id, cancelledAt);
-  await retireMediaObjects(
-    context.env.MEDIA_BUCKET,
-    context.env.CANONICAL_MEDIA_BUCKET,
-    repository,
-    media,
-    cancelledAt,
-  ).catch(() => undefined);
+  if (outcome.kind === 'canceled') {
+    await deleteMediaObjectAliases(
+      context.env.MEDIA_BUCKET,
+      context.env.CANONICAL_MEDIA_BUCKET,
+      outcome.claim,
+    ).catch(() => undefined);
+  }
+  const canceled = await repository.getById(mediaId);
+  if (!canceled) {
+    throw new ApiError('MEDIA_STATE_CONFLICT', 'This reservation no longer exists.', 409);
+  }
   return context.json({
-    data: { media: uploadMediaView(cancelled) },
+    data: { media: uploadMediaView(canceled) },
     requestId: context.get('requestId'),
   });
 });
@@ -793,6 +1021,13 @@ manageRoutes.post('/manage/events/:eventId/media/bulk', async (context) => {
 // `/guest-sessions/rotate` and deliberately produces no new URL.
 manageRoutes.post('/manage/events/:eventId/links/manager/rotate', async (context) => {
   const auth = await managerForEvent(context, true);
+  if (auth.via !== 'account') {
+    throw new ApiError(
+      'ROLE_FORBIDDEN',
+      'Sign in to an account that owns or cohosts this event to rotate its link.',
+      403,
+    );
+  }
   const ownership = await new AccountsRepository(context.env.DB)
     .getEventOwnershipState(auth.event.id, new Date().toISOString());
   if (ownership && !ownership.hasOwner && ownership.claimStillPossible) {
@@ -802,6 +1037,13 @@ manageRoutes.post('/manage/events/:eventId/links/manager/rotate', async (context
       409,
     );
   }
-  const result = await new LinkService(context.env, requestOrigin(context)).rotateManagementLink(auth.event);
+  const parsed = managerLinkRotationSchema.safeParse(await context.req.json().catch(() => null));
+  if (!parsed.success) {
+    throw new ApiError('VALIDATION_FAILED', 'Reload this event before rotating its link.', 422);
+  }
+  const result = await new LinkService(context.env, requestOrigin(context)).rotateManagementLink(
+    auth.event,
+    parsed.data.expectedManagerLinkRevision,
+  );
   return context.json({ data: result, requestId: context.get('requestId') });
 });

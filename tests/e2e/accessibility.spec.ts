@@ -2,7 +2,12 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 import type { Locator, Page, TestInfo } from '@playwright/test';
 
-import type { EventView } from '../../shared/contracts';
+import type {
+  EventView,
+  GuestEventView,
+  HostSessionResponse,
+  ManagerGalleryMediaView,
+} from '../../shared/contracts';
 import type { ExportView } from '../../src/app/types';
 import type { ExportGuestbookEntryRecord } from '../../worker/db/types';
 import { buildGuestbookHtml } from '../../worker/export/guestbook-html';
@@ -22,6 +27,8 @@ import { computedStyleContrast } from './helpers/theme-contrast';
 // 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
 const HEADER_WIDTHS = [320, 768];
 const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
+const E2E_ORIGIN = 'http://127.0.0.1:4173';
+const ROTATED_MANAGEMENT_LINK = 'https://example.test/manage/replacement-id.replacement-secret';
 // The public header keeps exactly these exits: the count is asserted so neither a
 // hidden one nor an added one can pass unnoticed. On `/` the row reads navigate | return | act, and
 // `How it works` is the only member of it whose presence varies by width — it is a page anchor the
@@ -85,6 +92,18 @@ function onlyOnce(testInfo: TestInfo) {
   test.skip(testInfo.project.name === 'mobile', 'Viewport-pinned accessibility evidence runs once.');
 }
 
+async function installViteRefreshGlobals(page: Page) {
+  // The focused dev-server config uses Cloudflare's SPA fallback rather than Vite's transformed
+  // HTML, so plugin-react's refresh globals are absent. These are inert for browser assertions;
+  // the selected tests do not exercise HMR.
+  await page.addInitScript(() => {
+    Object.assign(window, {
+      $RefreshReg$: () => undefined,
+      $RefreshSig$: () => (type: unknown) => type,
+    });
+  });
+}
+
 // The engine runs over the whole document with axe's default rule set plus `target-size`. Narrowing
 // it to make a surface pass would leave it proving nothing. Violations are reported by rule id,
 // target, and axe's own explanation so a failure names the element and the measurement instead of
@@ -106,6 +125,1456 @@ async function expectNoAxeViolations(page: Page, surface: string) {
     `${surface} accessibility violations`,
   ).toEqual([]);
 }
+
+const REQUIRED_MANAGER_AXE_FIXTURES = [
+  'Intake default', 'Intake filtered', 'Intake Recently deleted',
+  'true-empty Intake', 'Manager upload held transfer', 'Cover upload progress', 'RSVP',
+  'Library default', 'Library selection', 'Library selection tray', 'Library viewer',
+  'Album editor', 'Album Preview', 'Album create-link dialog', 'Album live-link state',
+  'Album stop-link alertdialog', 'Guest gallery all', 'Guest gallery unpublished',
+  'Guest gallery published', 'Guest gallery hidden', 'Guest gallery single-write',
+  'Guest gallery bulk-write', 'Guestbook', 'Share', 'Settings', 'Album-leave prompt',
+  'Rotate management link confirmation', 'Rotate management link sensitive result',
+  'RSVP pending-work prompt', 'Settings pending-work prompt',
+  'Move to Recently deleted dialog', 'Entry rotation confirmation',
+  'Entry disable confirmation',
+] as const;
+
+type ManagerAxeFixtureName = typeof REQUIRED_MANAGER_AXE_FIXTURES[number];
+type ManagerAxeFixture = {
+  name: ManagerAxeFixtureName;
+  setup(page: Page): Promise<void>;
+  ready(page: Page): Promise<void>;
+  cleanup?(page: Page): Promise<void>;
+};
+
+const REQUIRED_GUEST_AXE_FIXTURES = [
+  'paused guest main page',
+  'paused guest fullscreen',
+] as const;
+
+type GuestAxeFixtureName = typeof REQUIRED_GUEST_AXE_FIXTURES[number];
+type GuestAxeFixture = {
+  name: GuestAxeFixtureName;
+  setup(page: Page): Promise<void>;
+  ready(page: Page): Promise<void>;
+};
+
+const REQUIRED_HOST_AXE_FIXTURES = [
+  'pending registration route',
+  'Host Events search and sort',
+] as const;
+
+type HostAxeFixtureName = typeof REQUIRED_HOST_AXE_FIXTURES[number];
+type HostAxeFixture = {
+  name: HostAxeFixtureName;
+  setup(page: Page): Promise<void>;
+  ready(page: Page): Promise<void>;
+};
+
+const REQUIRED_PUBLIC_ALBUM_AXE_FIXTURES = [
+  'Public Album nonempty',
+  'Public Album empty',
+] as const;
+
+type PublicAlbumAxeFixtureName = typeof REQUIRED_PUBLIC_ALBUM_AXE_FIXTURES[number];
+type PublicAlbumAxeFixture = {
+  name: PublicAlbumAxeFixtureName;
+  setup(page: Page): Promise<void>;
+  ready(page: Page): Promise<void>;
+  cleanup?(page: Page): Promise<void>;
+};
+
+async function readyHeading(page: Page, name: string | RegExp) {
+  await expect(page.getByRole('heading', { name })).toBeVisible();
+}
+
+async function readyModal(page: Page, role: 'dialog' | 'alertdialog', name: string | RegExp) {
+  await expect(page.getByRole(role, { name })).toBeVisible();
+}
+
+async function installHostAccountSession(page: Page) {
+  await page.context().addCookies([
+    {
+      name: 'candidary_host',
+      value: 'host-session.fixture-secret',
+      url: E2E_ORIGIN,
+      httpOnly: true,
+      sameSite: 'Lax',
+    },
+    {
+      name: 'candidary_host_csrf',
+      value: 'host-csrf-fixture',
+      url: E2E_ORIGIN,
+      sameSite: 'Strict',
+    },
+  ]);
+  await page.route('**/api/host/session', (route) => route.fulfill({
+    headers: { 'cache-control': 'private, no-store' },
+    json: {
+      data: {
+        account: { email: 'host@example.test' },
+        events: [{ id: EVENT_FIXTURE.id }],
+      },
+      requestId: 'request-host-session',
+    },
+  }));
+}
+
+async function openManagerSection(page: Page, name: typeof MANAGER_SECTIONS[number]['name']) {
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  if (name !== 'Intake') {
+    await page.getByRole('navigation', { name: 'Manager sections' })
+      .getByRole('button', { name }).click();
+  }
+}
+
+async function openManagerLinkRotationConfirmation(page: Page) {
+  await installHostAccountSession(page);
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+    event: {
+      managerLinkRevision: 4,
+      managerLinkRotationAvailability: { enabled: true, reason: null },
+    },
+    managerLinkRotation: { managementLink: ROTATED_MANAGEMENT_LINK },
+  });
+  await openManagerSection(page, 'Settings');
+  await page.getByRole('button', { name: 'Rotate manager link' }).click();
+}
+
+async function openGalleryMode(page: Page, mode: 'Library' | 'Album' | 'Guest gallery') {
+  await openManagerSection(page, 'Gallery');
+  await page.getByRole('group', { name: 'Gallery mode' })
+    .getByRole('button', { name: mode }).click();
+}
+
+async function scanManagerFixture(page: Page, fixture: ManagerAxeFixture) {
+  try {
+    await installViteRefreshGlobals(page);
+    await fixture.setup(page);
+    await fixture.ready(page);
+    await expectNoAxeViolations(page, fixture.name);
+  } finally {
+    await fixture.cleanup?.(page);
+  }
+}
+
+function makeAxeLibraryMedia() {
+  return makeMedia(3, 'unpublished').map((photo, index) => ({
+    ...photo,
+    caption: `Axe Library photo ${index + 1}`,
+  }));
+}
+
+function makeAxeAlbumMedia() {
+  return makeMedia(2, 'published').map((photo, index) => ({
+    ...photo,
+    caption: `Axe Album photo ${index + 1}`,
+  }));
+}
+
+function axeAlbumRouteState(
+  rows: ReturnType<typeof makeAxeAlbumMedia>,
+  share?: { active: boolean; token: string },
+) {
+  return {
+    pickedMediaIds: rows.map(({ id }) => id),
+    title: 'Axe Album',
+    description: 'A saved two-photo accessibility fixture.',
+    coverMediaId: rows[0]!.id,
+    entries: rows.map(({ id }) => ({ kind: 'photo' as const, mediaId: id })),
+    saved: true,
+    ...(share ? { shareActive: share.active, shareToken: share.token } : {}),
+  };
+}
+
+type AxeGuestGalleryFilter = 'all' | 'unpublished' | 'published' | 'hidden';
+
+const AXE_GUEST_GALLERY_FILTER_LABELS: Record<AxeGuestGalleryFilter, string> = {
+  all: 'All',
+  unpublished: 'Unpublished',
+  published: 'Published',
+  hidden: 'Hidden',
+};
+
+function makeAxeGuestGalleryMedia() {
+  const unpublished = makeMedia(2, 'unpublished').map((photo, index) => ({
+    ...photo,
+    id: `00000000-0000-4000-8100-${String(index + 1).padStart(12, '0')}`,
+    originalFilename: `axe-unpublished-${index + 1}.jpg`,
+    caption: `Axe unpublished photo ${index + 1}`,
+  }));
+  const published = makeMedia(1, 'published').map((photo) => ({
+    ...photo,
+    id: '00000000-0000-4000-8200-000000000001',
+    originalFilename: 'axe-published-1.jpg',
+    caption: 'Axe published photo 1',
+  }));
+  const hidden = makeMedia(1, 'hidden').map((photo) => ({
+    ...photo,
+    id: '00000000-0000-4000-8300-000000000001',
+    originalFilename: 'axe-hidden-1.jpg',
+    caption: 'Axe hidden photo 1',
+  }));
+  return [...unpublished, ...published, ...hidden];
+}
+
+function guestGalleryMediaResponse(page: Page, status: AxeGuestGalleryFilter) {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'GET'
+      && url.pathname === `/api/manage/events/${EVENT_FIXTURE.id}/media`
+      && url.searchParams.get('status') === (status === 'all' ? null : status);
+  });
+}
+
+async function openGuestGalleryFilter(page: Page, status: AxeGuestGalleryFilter) {
+  const initialResponse = guestGalleryMediaResponse(page, 'unpublished');
+  await openGalleryMode(page, 'Guest gallery');
+  await initialResponse;
+  const controls = page.getByRole('group', { name: 'Publication status' });
+  await expect(controls).toBeVisible();
+
+  // Unpublished is the workspace default. Leave and return so this descriptor still proves the
+  // literal Unpublished control and its action-caused request rather than scanning initial state.
+  if (status === 'unpublished') {
+    const allResponse = guestGalleryMediaResponse(page, 'all');
+    await controls.getByRole('button', { name: 'All', exact: true }).click();
+    await allResponse;
+  }
+
+  const filteredResponse = guestGalleryMediaResponse(page, status);
+  await controls.getByRole('button', {
+    name: AXE_GUEST_GALLERY_FILTER_LABELS[status],
+    exact: true,
+  }).click();
+  await filteredResponse;
+}
+
+async function readyGuestGalleryFilter(
+  page: Page,
+  status: AxeGuestGalleryFilter,
+  rows: ReturnType<typeof makeAxeGuestGalleryMedia>,
+) {
+  const controls = page.getByRole('group', { name: 'Publication status' });
+  await expect(controls.getByRole('button', {
+    name: AXE_GUEST_GALLERY_FILTER_LABELS[status],
+    exact: true,
+  })).toHaveAttribute('aria-pressed', 'true');
+
+  const expected = status === 'all'
+    ? rows
+    : rows.filter((row) => row.publicationStatus === status);
+  const nonmatching = rows.filter((row) => !expected.includes(row));
+  const articles = page.locator('.moderation-grid article');
+  await expect(articles).toHaveCount(expected.length);
+  for (const row of expected) {
+    const article = articles.filter({ hasText: row.caption! });
+    await expect(article).toHaveCount(1);
+    await expect(article).toBeVisible();
+  }
+  for (const row of nonmatching) {
+    await expect(articles.filter({ hasText: row.caption! })).toHaveCount(0);
+  }
+}
+
+const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
+  const media = makeMedia(3);
+  return {
+    name: 'Intake default',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media, nextCursor: null } },
+      });
+      await openManagerSection(page, 'Intake');
+    },
+    async ready(page) {
+      await readyHeading(page, 'Live intake');
+      const liveIntake = page.getByRole('group', { name: 'Which photos to show' })
+        .getByRole('button', { name: 'Live intake', exact: true });
+      await expect(liveIntake).toBeVisible();
+      await expect(liveIntake).toHaveAttribute('aria-pressed', 'true');
+      const grid = page.locator('.intake-grid');
+      await expect(grid.locator('article')).toHaveCount(media.length);
+      await expect(grid.locator(`[data-intake-card="${media[0]!.id}"]`)).toBeVisible();
+    },
+  };
+})(),
+  {
+    name: 'Intake filtered',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: makeMedia(1), nextCursor: null } },
+      });
+      await openManagerSection(page, 'Intake');
+      const filter = page.getByRole('textbox', { name: 'Filter by guest name' });
+      await filter.fill('Avery Stone');
+      const filteredResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === 'GET'
+          && url.pathname === `/api/manage/events/${EVENT_FIXTURE.id}/media`
+          && url.searchParams.get('guestName') === 'Avery Stone';
+      });
+      await page.getByRole('button', { name: 'Filter', exact: true }).click();
+      await filteredResponse;
+    },
+    async ready(page) {
+      await expect(page.getByRole('textbox', { name: 'Filter by guest name' }))
+        .toHaveValue('Avery Stone');
+      const filteredRows = page.locator('.intake-grid article').filter({ hasText: 'Avery Stone' });
+      await expect(filteredRows).toHaveCount(1);
+      await expect(filteredRows.first()).toBeVisible();
+    },
+  },
+  {
+    name: 'Intake Recently deleted',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+        event: { recoverableMediaCount: 1 },
+        trashedMedia: [{
+          id: '00000000-0000-4000-8000-000000000099',
+          originalFilename: 'retained-photo.jpg',
+          guestName: 'Avery Stone',
+          caption: 'Held moment',
+          trashedAt: '2026-09-20T01:00:00.000Z',
+          restoreUntil: '2099-10-19T00:00:00.000Z',
+        }],
+      });
+      await openManagerSection(page, 'Intake');
+      const trashResponse = page.waitForResponse((response) => (
+        response.request().method() === 'GET'
+        && new URL(response.url()).pathname
+          === `/api/manage/events/${EVENT_FIXTURE.id}/media/trash`
+      ));
+      await page.getByRole('button', { name: 'Recently deleted (1)' }).click();
+      await trashResponse;
+    },
+    async ready(page) {
+      await expect(page.getByRole('heading', { name: 'Recently deleted', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Restore retained-photo.jpg' })).toBeVisible();
+    },
+  },
+  {
+    name: 'true-empty Intake',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        event: { storedMediaCount: 0 },
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await openManagerSection(page, 'Intake');
+    },
+    async ready(page) {
+      const empty = page.getByRole('heading', { name: 'No photos yet' }).locator('..');
+      await expect(empty).toBeVisible();
+      await expect(empty.getByText("Guests' photos arrive privately here.")).toBeVisible();
+      await expect(empty.getByRole('button', { name: 'Share event' })).toBeVisible();
+      await expect(empty.getByRole('button', { name: 'Add photos' })).toBeVisible();
+      await expect(page.getByRole('img', { name: 'Event QR code' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'No matching photos' })).toHaveCount(0);
+    },
+  },
+  (() => {
+    let releaseContent = () => {};
+    const contentGate = new Promise<void>((resolve) => { releaseContent = resolve; });
+    let managerUrl = '';
+    return {
+      name: 'Manager upload held transfer',
+      async setup(page) {
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: [], nextCursor: null } },
+          uploads: { contentGate },
+        });
+        await page.goto('/');
+        await openManagerSection(page, 'Intake');
+        managerUrl = page.url();
+        await page.getByRole('button', { name: 'Add photos' }).click();
+        const dialog = page.getByRole('dialog', { name: 'Add photos' });
+        await dialog.locator('input[data-photo-source="library"]').setInputFiles({
+          name: 'held-manager-upload.jpg',
+          mimeType: 'image/jpeg',
+          buffer: Buffer.from('held-manager-upload'),
+        });
+        const contentRequest = page.waitForRequest((request) => (
+          request.method() === 'PUT'
+          && new URL(request.url()).pathname.includes('/uploads/')
+          && new URL(request.url()).pathname.endsWith('/content')
+        ));
+        await dialog.getByRole('button', { name: 'Send 1 photo' }).click();
+        await contentRequest;
+      },
+      async ready(page) {
+        const dialog = page.getByRole('dialog', { name: 'Add photos' });
+        await expect(dialog).toBeVisible();
+        await expect(dialog.getByRole('button', { name: 'Close Add photos' })).toHaveCount(0);
+        await expect(dialog.getByRole('button', { name: 'Cancel uploads' })).toBeVisible();
+
+        const backNavigation = page.goBack();
+        await expect(page).toHaveURL(managerUrl);
+        await expect(dialog).toBeVisible();
+
+        const gallery = page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' });
+        await gallery.evaluate((button) => {
+          button.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            view: window,
+          }));
+        });
+        await backNavigation;
+        await expect(page).toHaveURL(managerUrl);
+        await expect(gallery).toHaveAttribute('aria-pressed', 'false');
+        await expect(dialog).toBeVisible();
+      },
+      async cleanup(page) {
+        releaseContent();
+        await expect(page).toHaveURL(
+          `/manage/event/${EVENT_FIXTURE.id}?section=gallery`,
+        );
+        const dialog = page.getByRole('dialog', { name: 'Add photos' });
+        await expect(dialog.getByRole('heading', { name: '1 photo was added.' })).toBeVisible();
+      },
+    } satisfies ManagerAxeFixture;
+  })(),
+  (() => {
+    let releaseRawTransfer = () => {};
+    let rawTransferReached = Promise.resolve();
+    return {
+      name: 'Cover upload progress',
+      async setup(page) {
+        let markRawTransferReached = () => {};
+        rawTransferReached = new Promise<void>((resolve) => {
+          markRawTransferReached = resolve;
+        });
+        const rawTransferGate = new Promise<void>((resolve) => {
+          releaseRawTransfer = resolve;
+        });
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: [], nextCursor: null } },
+        });
+        await page.route(
+          `**/api/manage/events/${EVENT_FIXTURE.id}/cover/drafts/draft-e2e/raw`,
+          async (route) => {
+            markRawTransferReached();
+            await rawTransferGate;
+            await route.fallback();
+          },
+        );
+        await openManagerSection(page, 'Settings');
+        await page.getByRole('button', { name: 'Change cover' }).click();
+        await page.getByLabel('Choose photo').setInputFiles({
+          name: 'cover-progress.jpg',
+          mimeType: 'image/jpeg',
+          buffer: Buffer.alloc(19_000_000),
+        });
+        await rawTransferReached;
+      },
+      async ready(page) {
+        const studio = page.getByRole('dialog', { name: 'Cover Studio' });
+        const progress = studio.getByRole('progressbar', { name: 'Uploading cover photo' });
+        await expect(progress).toBeVisible();
+        await expect(progress).toHaveAttribute('max', '19000000');
+        await expect(studio.getByRole('status')).toContainText(/Upload (started|complete)|Uploading photo/u);
+        await expect(studio.getByRole('button', { name: 'Continue' })).toBeDisabled();
+      },
+      async cleanup(page) {
+        releaseRawTransfer();
+        await expect(page.getByRole('progressbar', { name: 'Uploading cover photo' }))
+          .toHaveCount(0);
+      },
+    } satisfies ManagerAxeFixture;
+  })(),
+  {
+    name: 'RSVP',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await openManagerSection(page, 'RSVP');
+    },
+    async ready(page) {
+      await readyHeading(page, 'Guest list and RSVPs');
+      await expect(page.getByRole('button', { name: 'Add guests' })).toBeVisible();
+    },
+  },
+  {
+    name: 'Library default',
+    async setup(page) {
+      const rows = makeAxeLibraryMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+      });
+      await openGalleryMode(page, 'Library');
+    },
+    async ready(page) {
+      await expect(page.getByRole('group', { name: 'Gallery mode' })
+        .getByRole('button', { name: 'Library', exact: true }))
+        .toHaveAttribute('aria-pressed', 'true');
+      const mosaic = page.locator('.gallery-mosaic__item');
+      await expect(mosaic).toHaveCount(3);
+      await expect(mosaic.first().locator('img')).toBeVisible();
+    },
+  },
+  {
+    name: 'Library selection',
+    async setup(page) {
+      const rows = makeAxeLibraryMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+      });
+      await openGalleryMode(page, 'Library');
+      await expect(page.locator('.gallery-mosaic__item')).toHaveCount(rows.length);
+      await page.getByRole('button', { name: 'Select photos' }).click();
+      await page.getByRole('button', {
+        name: 'Select Axe Library photo 1, from Avery Stone',
+        exact: true,
+      }).click();
+    },
+    async ready(page) {
+      const selected = page.getByRole('button', {
+        name: 'Deselect Axe Library photo 1, from Avery Stone',
+        exact: true,
+      });
+      await expect(selected).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.locator('.gallery-mosaic__item.is-selected')
+        .filter({ has: selected })).toHaveCount(1);
+    },
+  },
+  {
+    name: 'Library selection tray',
+    async setup(page) {
+      const rows = makeAxeLibraryMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+      });
+      await openGalleryMode(page, 'Library');
+      await expect(page.locator('.gallery-mosaic__item')).toHaveCount(rows.length);
+      await page.getByRole('button', { name: 'Select photos' }).click();
+      await page.getByRole('button', {
+        name: 'Select Axe Library photo 1, from Avery Stone',
+        exact: true,
+      }).click();
+    },
+    async ready(page) {
+      const tray = page.getByRole('region', { name: 'Album', exact: true });
+      await expect(tray).toContainText('1 of 50 selected');
+      await expect(tray.getByRole('button', { name: 'Pick for Album (1)' })).toBeEnabled();
+      await expect(tray.getByRole('button', { name: 'Remove from Album (1)' })).toBeEnabled();
+      await expect(tray.getByRole('button', { name: 'Clear selection' })).toBeEnabled();
+    },
+  },
+  {
+    name: 'Library viewer',
+    async setup(page) {
+      const rows = makeAxeLibraryMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+      });
+      await openGalleryMode(page, 'Library');
+      await expect(page.locator('.gallery-mosaic__item')).toHaveCount(rows.length);
+      await page.locator('.gallery-mosaic__open').first().click();
+    },
+    async ready(page) {
+      const viewer = page.getByRole('dialog', { name: 'Axe Library photo 3' });
+      await expect(viewer).toBeVisible();
+      await expect(viewer.getByRole('button', { name: 'Close viewer' })).toBeFocused();
+      const currentImage = viewer.getByRole('img', { name: 'Axe Library photo 3' });
+      const currentFallback = viewer.locator('.gallery-viewer__placeholder')
+        .filter({ hasText: 'moment-3.jpg' });
+      await expect.poll(async () => {
+        if (await currentImage.count() === 1) {
+          return currentImage.evaluate((image) => (
+            image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0
+              ? 'decoded current image'
+              : 'pending'
+          ));
+        }
+        if (
+          await currentFallback.count() === 1
+          && await currentFallback.getByText('Preview unavailable', { exact: true }).isVisible()
+          && await currentFallback.getByText(
+            'This photo was delivered and is included in your download.',
+            { exact: true },
+          ).isVisible()
+        ) return 'current-photo fallback';
+        return 'pending';
+      }).toMatch(/^(decoded current image|current-photo fallback)$/u);
+    },
+  },
+  {
+    name: 'Album editor',
+    async setup(page) {
+      const rows = makeAxeAlbumMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+        album: axeAlbumRouteState(rows),
+      });
+      await openGalleryMode(page, 'Album');
+    },
+    async ready(page) {
+      await readyHeading(page, 'The order people with the Album link will see');
+      await expect(page.getByLabel('Album title')).toHaveValue('Axe Album');
+      await expect(page.locator('.album-review-grid > li')).toHaveCount(2);
+      await expect(page.locator('.album-autosave-row').getByText('Saved', { exact: true }))
+        .toBeVisible();
+    },
+  },
+  {
+    name: 'Album Preview',
+    async setup(page) {
+      const rows = makeAxeAlbumMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+        album: axeAlbumRouteState(rows),
+      });
+      await openGalleryMode(page, 'Album');
+      await readyHeading(page, 'The order people with the Album link will see');
+      const previewResponse = page.waitForResponse((response) => (
+        response.request().method() === 'GET'
+        && new URL(response.url()).pathname
+          === `/api/manage/events/${EVENT_FIXTURE.id}/album/preview`
+      ));
+      await page.getByRole('button', { name: 'Preview album' }).click();
+      await previewResponse;
+    },
+    async ready(page) {
+      const preview = page.getByRole('region', { name: 'What people with the Album link see' });
+      await expect(preview).toHaveClass(/album-preview/u);
+      await expect(preview.getByRole('heading', { level: 3, name: 'Axe Album' })).toBeVisible();
+      await expect(preview.getByRole('img', { name: 'Axe Album photo 1' })).toBeVisible();
+      await expect(preview.locator('.public-album__photo')).toHaveCount(2);
+    },
+  },
+  {
+    name: 'Album create-link dialog',
+    async setup(page) {
+      const rows = makeAxeAlbumMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+        album: axeAlbumRouteState(rows),
+      });
+      await openGalleryMode(page, 'Album');
+      await readyHeading(page, 'The order people with the Album link will see');
+      await page.getByRole('button', { name: 'Create Album link' }).click();
+    },
+    async ready(page) {
+      await readyModal(page, 'dialog', 'Create the Album link?');
+      const dialog = page.getByRole('dialog', { name: 'Create the Album link?' });
+      await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+      await expect(dialog).toContainText('This link will show 2 photos');
+    },
+  },
+  {
+    name: 'Album live-link state',
+    async setup(page) {
+      const rows = makeAxeAlbumMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+        album: axeAlbumRouteState(rows, {
+          active: false,
+          token: 'axe-live-album-id.axe-live-album-secret',
+        }),
+      });
+      await openGalleryMode(page, 'Album');
+      await readyHeading(page, 'The order people with the Album link will see');
+      await page.getByRole('button', { name: 'Create Album link' }).click();
+      const createResponse = page.waitForResponse((response) => (
+        response.request().method() === 'POST'
+        && new URL(response.url()).pathname
+          === `/api/manage/events/${EVENT_FIXTURE.id}/album/share`
+      ));
+      await page.getByRole('dialog', { name: 'Create the Album link?' })
+        .getByRole('button', { name: 'Create Album link' }).click();
+      await createResponse;
+      await page.getByRole('button', { name: 'Reveal Album link' }).click();
+    },
+    async ready(page) {
+      const share = page.locator('.album-share');
+      await expect(share).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Stop Album link', exact: true })).toBeVisible();
+      await expect(share.getByRole('button', { name: 'Copy Album link' })).toBeVisible();
+      await expect(share.getByRole('textbox', { name: 'Album link' })).toHaveValue(
+        /\/album#axe-live-album-id\.axe-live-album-secret$/u,
+      );
+    },
+  },
+  {
+    name: 'Album stop-link alertdialog',
+    async setup(page) {
+      const rows = makeAxeAlbumMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+        album: axeAlbumRouteState(rows, {
+          active: true,
+          token: 'axe-stop-album-id.axe-stop-album-secret',
+        }),
+      });
+      await openGalleryMode(page, 'Album');
+      await readyHeading(page, 'The order people with the Album link will see');
+      await page.getByRole('button', { name: 'Stop Album link', exact: true }).click();
+    },
+    async ready(page) {
+      await readyModal(page, 'alertdialog', 'Stop the Album link?');
+      const dialog = page.getByRole('alertdialog', { name: 'Stop the Album link?' });
+      await expect(dialog.getByRole('button', { name: 'Keep sharing' })).toBeFocused();
+      await expect(dialog.getByRole('button', { name: 'Stop Album link' })).toBeVisible();
+    },
+  },
+  ...(['all', 'unpublished', 'published', 'hidden'] as const).map((status): ManagerAxeFixture => {
+    const rows = makeAxeGuestGalleryMedia();
+    return {
+      name: `Guest gallery ${status}`,
+      async setup(page) {
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: rows, nextCursor: null } },
+          event: { storedMediaCount: rows.length },
+        });
+        await openGuestGalleryFilter(page, status);
+      },
+      ready: (page) => readyGuestGalleryFilter(page, status, rows),
+    };
+  }),
+  (() => {
+    const rows = makeAxeGuestGalleryMedia();
+    let releaseSingle!: () => void;
+    const singleGate = new Promise<void>((resolve) => { releaseSingle = resolve; });
+    let publicationResponse: Promise<unknown> | null = null;
+    return {
+      name: 'Guest gallery single-write',
+      async setup(page) {
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: rows, nextCursor: null } },
+          event: { storedMediaCount: rows.length },
+          album: { singlePublicationGate: singleGate },
+        });
+        await openGuestGalleryFilter(page, 'unpublished');
+        await readyGuestGalleryFilter(page, 'unpublished', rows);
+        const mediaId = rows.find((row) => row.caption === 'Axe unpublished photo 1')!.id;
+        const publicationRequest = page.waitForRequest((request) => (
+          request.method() === 'PATCH'
+          && new URL(request.url()).pathname
+            === `/api/manage/events/${EVENT_FIXTURE.id}/media/${mediaId}`
+        ));
+        await Promise.all([
+          publicationRequest,
+          page.getByRole('button', { name: 'Publish axe-unpublished-1.jpg' }).click(),
+        ]);
+        // The route gate now owns the in-flight request, so the response cannot settle before this
+        // waiter is armed. A click/setup failure never reaches this assignment.
+        publicationResponse = page.waitForResponse((response) => (
+          response.request().method() === 'PATCH'
+          && new URL(response.url()).pathname
+            === `/api/manage/events/${EVENT_FIXTURE.id}/media/${mediaId}`
+        ));
+      },
+      async ready(page) {
+        await expect(page.locator('[data-gallery-live-host] [role="status"]'))
+          .toHaveText('Publishing Axe unpublished photo 1…');
+      },
+      async cleanup() {
+        releaseSingle();
+        if (publicationResponse !== null) await publicationResponse;
+      },
+    } satisfies ManagerAxeFixture;
+  })(),
+  (() => {
+    const rows = makeAxeGuestGalleryMedia();
+    let releaseBulk!: () => void;
+    const bulkGate = new Promise<void>((resolve) => { releaseBulk = resolve; });
+    let bulkResponse: Promise<unknown> | null = null;
+    return {
+      name: 'Guest gallery bulk-write',
+      async setup(page) {
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: rows, nextCursor: null } },
+          event: { storedMediaCount: rows.length },
+          album: { bulkPublicationGate: bulkGate },
+        });
+        await openGuestGalleryFilter(page, 'unpublished');
+        await readyGuestGalleryFilter(page, 'unpublished', rows);
+        await page.getByRole('checkbox', { name: 'Select Axe unpublished photo 1' }).check();
+        await page.getByRole('checkbox', { name: 'Select Axe unpublished photo 2' }).check();
+        const bulkRequest = page.waitForRequest((request) => (
+          request.method() === 'POST'
+          && new URL(request.url()).pathname
+            === `/api/manage/events/${EVENT_FIXTURE.id}/media/bulk`
+        ));
+        await Promise.all([
+          bulkRequest,
+          page.getByRole('button', { name: 'Publish selected' }).click(),
+        ]);
+        // As above, arm the response waiter only after both the action and held request are known
+        // to exist, so cleanup cannot mask an earlier setup failure.
+        bulkResponse = page.waitForResponse((response) => (
+          response.request().method() === 'POST'
+          && new URL(response.url()).pathname
+            === `/api/manage/events/${EVENT_FIXTURE.id}/media/bulk`
+        ));
+      },
+      async ready(page) {
+        const bulkBar = page.locator('.gallery-shared .bulk-bar');
+        await expect(bulkBar).toHaveAttribute('aria-busy', 'true');
+        await expect(bulkBar.locator('#bulk-selection-status')).toHaveText('2 of 50 selected');
+        const publishing = bulkBar.getByRole('button', { name: 'Publishing…' });
+        await expect(publishing).toBeDisabled();
+        await expect(publishing).toHaveAttribute('aria-busy', 'true');
+        await expect(bulkBar.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+      },
+      async cleanup() {
+        releaseBulk();
+        if (bulkResponse !== null) await bulkResponse;
+      },
+    } satisfies ManagerAxeFixture;
+  })(),
+  {
+    name: 'Guestbook',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+        messages: [NOTE],
+      });
+      const guestbookResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === 'GET'
+          && url.pathname === `/api/manage/events/${EVENT_FIXTURE.id}/guestbook`
+          && url.searchParams.get('view') === 'shared'
+          && url.searchParams.get('source') === 'all'
+          && url.searchParams.get('limit') === '25';
+      });
+      await openManagerSection(page, 'Guestbook');
+      await guestbookResponse;
+    },
+    async ready(page) {
+      await readyHeading(page, 'Guestbook from the day');
+      await expect(page.getByRole('group', { name: 'Guestbook view' })
+        .getByRole('button', { name: /^Shared\b/u }))
+        .toHaveAttribute('aria-pressed', 'true');
+      const row = page.getByRole('listitem', { name: 'Rowan Guest note' });
+      await expect(row).toBeVisible();
+      await expect(row.getByRole('heading', { name: 'Rowan' })).toBeVisible();
+      await expect(row.getByText(NOTE.body, { exact: true })).toBeVisible();
+    },
+  },
+  {
+    name: 'Share',
+    async setup(page) {
+      const runningExport: ExportView = {
+        id: 'axe-share-running-export',
+        kind: 'complete',
+        state: 'running',
+        snapshotAt: '2026-09-20T09:00:00Z',
+        createdAt: '2026-09-20T09:00:00Z',
+        startedAt: '2026-09-20T09:00:01Z',
+        completedAt: null,
+        mediaCount: 4,
+        totalBytes: 512,
+        processedMediaCount: 2,
+        processedBytes: 256,
+        progressUpdatedAt: '2026-09-20T09:00:02Z',
+        attempt: 1,
+        partCount: 0,
+        expiresAt: null,
+        guestbookEntryCount: 1,
+        guestbookSharedCount: 1,
+        guestbookEventName: EVENT_FIXTURE.name,
+        guestbookEventDate: EVENT_FIXTURE.eventDate,
+        guestbookEventTimezone: EVENT_FIXTURE.eventTimezone,
+        guestbookPrompt: EVENT_FIXTURE.guestbookPrompt,
+        guestbookGalleryVisible: EVENT_FIXTURE.galleryVisible,
+        errorCode: null,
+      };
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+        event: { storedMediaCount: 4, storedBytes: 512 },
+        exports: [runningExport],
+      });
+      const exportsResponse = page.waitForResponse((response) => (
+        response.request().method() === 'GET'
+        && new URL(response.url()).pathname
+          === `/api/manage/events/${EVENT_FIXTURE.id}/exports`
+      ));
+      await openManagerSection(page, 'Share');
+      await exportsResponse;
+    },
+    async ready(page) {
+      await readyHeading(page, 'Share your event');
+      await expect(page.getByText('Event link', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Show full event link' })).toBeVisible();
+      await expect(page.getByRole('region', { name: 'Event entry controls' })).toBeVisible();
+      const progress = page.getByRole('region', { name: 'Export progress' });
+      await expect(progress).toContainText('Complete export · Running');
+      await expect(progress).toContainText('2 of 4 photos processed');
+      await expect(progress.getByRole('button', { name: 'Open Gallery' })).toBeVisible();
+    },
+  },
+  {
+    name: 'Settings',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await openManagerSection(page, 'Settings');
+    },
+    async ready(page) {
+      await readyHeading(page, /^Settings$/u);
+      await expect(page.getByRole('textbox', { name: 'Event name', exact: true }))
+        .toHaveValue(EVENT_FIXTURE.name);
+    },
+  },
+  {
+    name: 'Album-leave prompt',
+    async setup(page) {
+      const rows = makeAxeAlbumMedia();
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: rows, nextCursor: null } },
+        event: { storedMediaCount: rows.length },
+        album: axeAlbumRouteState(rows),
+      });
+      await openGalleryMode(page, 'Album');
+      await readyHeading(page, 'The order people with the Album link will see');
+      const title = page.getByLabel('Album title');
+      await title.fill('');
+      await expect(title).toHaveAttribute('aria-invalid', 'true');
+      await page.getByRole('group', { name: 'Gallery mode' })
+        .getByRole('button', { name: 'Library', exact: true }).click();
+    },
+    async ready(page) {
+      const prompt = page.getByRole('region', { name: 'Album changes are not saved yet' });
+      await expect(prompt).toBeFocused();
+      await expect(prompt.getByRole('status'))
+        .toHaveText('Album title needs attention before the Album can be confirmed.');
+      await expect(prompt.getByRole('button', { name: 'Stay in Album' })).toBeVisible();
+      await expect(prompt.getByRole('button', {
+        name: 'Discard unsent Album changes and leave',
+      })).toBeVisible();
+    },
+  },
+  {
+    name: 'Rotate management link confirmation',
+    async setup(page) {
+      await openManagerLinkRotationConfirmation(page);
+    },
+    async ready(page) {
+      await readyModal(page, 'dialog', 'Rotate management link?');
+      const dialog = page.getByRole('dialog', { name: 'Rotate management link?' });
+      await expect(dialog.getByRole('button', { name: 'Keep current link' })).toBeFocused();
+      await expect(dialog.getByRole('button', { name: 'Rotate link' })).toBeEnabled();
+      await expect(dialog).toContainText('The current management link will stop working immediately.');
+      await expect(dialog).toContainText('You must save the replacement before continuing.');
+    },
+  },
+  {
+    name: 'Rotate management link sensitive result',
+    async setup(page) {
+      await openManagerLinkRotationConfirmation(page);
+      await page.getByRole('dialog', { name: 'Rotate management link?' })
+        .getByRole('button', { name: 'Rotate link' }).click();
+    },
+    async ready(page) {
+      await readyModal(page, 'dialog', 'Save your new management link');
+      const dialog = page.getByRole('dialog', { name: 'Save your new management link' });
+      await expect(dialog.getByText('The prior management link is no longer valid.')).toBeVisible();
+      await expect(dialog.getByRole('button', { name: 'Copy management link' })).toBeFocused();
+      await expect(dialog.getByRole('button', { name: 'Continue managing' })).toBeDisabled();
+      await expect(dialog.getByRole('textbox', { name: 'Management link' })).toHaveCount(0);
+      await expect(dialog.getByText(ROTATED_MANAGEMENT_LINK, { exact: true })).toHaveCount(0);
+      await expect(dialog.locator('.link-card__mask')).toBeVisible();
+    },
+  },
+  {
+    name: 'RSVP pending-work prompt',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await openManagerSection(page, 'RSVP');
+      await readyHeading(page, 'Guest list and RSVPs');
+      await page.getByRole('button', { name: 'Add guests' }).click();
+      await readyHeading(page, 'Add guests');
+      await page.getByLabel('Guest names or spreadsheet data').fill('Avery Lee');
+      await page.getByRole('navigation', { name: 'Manager sections' })
+        .getByRole('button', { name: 'Gallery' }).click();
+    },
+    async ready(page) {
+      const prompt = page.getByRole('region', { name: 'Your pending work is not saved' });
+      await expect(prompt.getByRole('heading', { name: 'Your pending work is not saved' }))
+        .toBeVisible();
+      await expect(prompt).toBeFocused();
+    },
+  },
+  {
+    name: 'Settings pending-work prompt',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await openManagerSection(page, 'Settings');
+      await readyHeading(page, /^Settings$/u);
+      await page.getByRole('textbox', { name: 'Event name', exact: true }).fill('');
+      await expect(page.getByRole('region', { name: 'Unsaved settings' })).toBeVisible();
+      await page.getByRole('navigation', { name: 'Manager sections' })
+        .getByRole('button', { name: 'Gallery' }).click();
+    },
+    async ready(page) {
+      const prompt = page.getByRole('region', { name: 'Event settings is not saved yet' });
+      await expect(prompt).toContainText(
+        'A change already sent may still finish saving after you leave. Leaving now discards anything that has not been sent.',
+      );
+      await expect(prompt).toBeFocused();
+    },
+  },
+  {
+    name: 'Move to Recently deleted dialog',
+    async setup(page) {
+      const media = makeMedia(1);
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media, nextCursor: null } },
+        event: { storedMediaCount: media.length },
+      });
+      await openManagerSection(page, 'Intake');
+      const row = page.locator('.intake-grid article').first();
+      await expect(row).toBeVisible();
+      const move = row.getByRole('button', {
+        name: `Move ${media[0]!.originalFilename} to Recently deleted`,
+      });
+      await expect(move).toBeEnabled();
+      await move.click();
+    },
+    async ready(page) {
+      await readyModal(page, 'dialog', 'Move this photo to Recently deleted?');
+      const dialog = page.getByRole('dialog', { name: 'Move this photo to Recently deleted?' });
+      await expect(dialog.getByRole('button', { name: 'Keep photo' })).toBeFocused();
+    },
+  },
+  {
+    name: 'Entry rotation confirmation',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await openManagerSection(page, 'Share');
+      const entryControls = page.getByRole('region', { name: 'Event entry controls' });
+      await expect(entryControls).toBeVisible();
+      await entryControls.getByRole('button', { name: 'Sign out guest devices', exact: true }).click();
+    },
+    async ready(page) {
+      const confirmation = page.locator('fieldset').filter({
+        has: page.locator('legend').filter({ hasText: 'Sign out guest devices' }),
+      });
+      await expect(confirmation).toBeVisible();
+      await expect(confirmation.locator('legend')).toHaveText('Sign out guest devices');
+      await expect(confirmation.getByRole('textbox', { name: 'Confirm event name' })).toBeVisible();
+      await expect(confirmation.getByRole('button', {
+        name: `Sign out guest devices for ${EVENT_FIXTURE.name}`,
+      })).toBeDisabled();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    },
+  },
+  {
+    name: 'Entry disable confirmation',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await openManagerSection(page, 'Share');
+      const entryControls = page.getByRole('region', { name: 'Event entry controls' });
+      await expect(entryControls).toBeVisible();
+      await entryControls.getByRole('button', { name: 'Disable printed event QR', exact: true }).click();
+    },
+    async ready(page) {
+      const confirmation = page.locator('fieldset').filter({
+        has: page.locator('legend').filter({ hasText: 'Disable printed event QR' }),
+      });
+      await expect(confirmation).toBeVisible();
+      await expect(confirmation.locator('legend')).toHaveText('Disable printed event QR');
+      await expect(confirmation.getByRole('textbox', { name: 'Confirm event name' })).toBeVisible();
+      await expect(confirmation.getByRole('button', {
+        name: `Disable printed event QR for ${EVENT_FIXTURE.name}`,
+      })).toBeDisabled();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    },
+  },
+];
+
+for (const fixture of MANAGER_AXE_FIXTURES) {
+  test(`${fixture.name} is axe-clean`, async ({ page }) => {
+    await scanManagerFixture(page, fixture);
+  });
+}
+
+const PAUSED_GUEST_EVENT = {
+  uploadsEnabled: false,
+  phase: 'waiting',
+  guestReadSurfaces: { available: true, reason: null },
+} satisfies Partial<GuestEventView>;
+
+const PAUSED_GUEST_NOTE = {
+  id: 'paused-axe-note',
+  guestName: 'Avery',
+  body: 'The shared celebration remains available while new uploads are paused.',
+  moderationStatus: 'approved',
+  createdAt: '2026-09-19T23:00:00Z',
+} as const;
+
+async function scanGuestFixture(page: Page, fixture: GuestAxeFixture) {
+  await installViteRefreshGlobals(page);
+  await fixture.setup(page);
+  await fixture.ready(page);
+  await expectNoAxeViolations(page, fixture.name);
+}
+
+const GUEST_AXE_FIXTURES: GuestAxeFixture[] = [
+  (() => {
+    const gallery = makeMedia(3, 'published');
+    const contributions = makeMedia(1);
+    return {
+      name: 'paused guest main page',
+      async setup(page) {
+        await stubGuestRoutes(page, {
+          event: PAUSED_GUEST_EVENT,
+          gallery,
+          contributions,
+          messages: [PAUSED_GUEST_NOTE],
+        });
+        await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+        await page.locator('details.guestbook summary').click();
+        await page.locator('details.event-extra').filter({ hasText: 'Shared gallery' })
+          .locator('summary').click();
+        await page.locator('details.event-extra').filter({ hasText: 'My deliveries' })
+          .locator('summary').click();
+      },
+      async ready(page) {
+        await readyHeading(page, 'New guest uploads are paused');
+        await expect(page.getByRole('button', { name: 'Take a photo', exact: true }))
+          .toHaveCount(0);
+        await expect(page.locator('details.guestbook')).toHaveAttribute('open', '');
+        await expect(page.getByText(PAUSED_GUEST_NOTE.body)).toBeVisible();
+        await expect(page.locator('.photo-grid figure')).toHaveCount(gallery.length);
+        await expect(page.locator('.contributions li')).toHaveCount(contributions.length);
+      },
+    } satisfies GuestAxeFixture;
+  })(),
+  (() => {
+    const gallery = makeMedia(3, 'published');
+    return {
+      name: 'paused guest fullscreen',
+      async setup(page) {
+        await stubGuestRoutes(page, { event: PAUSED_GUEST_EVENT, gallery });
+        await page.goto(`/event/${EVENT_FIXTURE.slug}/fullscreen`);
+      },
+      async ready(page) {
+        await readyHeading(page, `Shared gallery · ${EVENT_FIXTURE.name}`);
+        await expect(page.locator('.fullscreen__grid figure')).toHaveCount(gallery.length);
+        await expect(page.getByRole('link', { name: 'Close full-screen gallery' })).toBeVisible();
+        await expect(page.locator('details.guestbook')).toHaveCount(0);
+        await expect(page.getByText(/My deliveries/u)).toHaveCount(0);
+      },
+    } satisfies GuestAxeFixture;
+  })(),
+];
+
+for (const fixture of GUEST_AXE_FIXTURES) {
+  test(`${fixture.name} is axe-clean`, async ({ page }) => {
+    await scanGuestFixture(page, fixture);
+  });
+}
+
+const HOST_AXE_SESSION = {
+  account: {
+    id: 'account-axe',
+    email: 'host@example.test',
+    displayName: 'Axe Host',
+    emailVerified: true,
+    notificationsEnabled: true,
+  },
+  events: [
+    {
+      id: 'event-gallery-dinner',
+      name: 'Gallery Dinner',
+      slug: 'gallery-dinner',
+      eventDate: '2027-01-02',
+      eventTimezone: 'Pacific/Auckland',
+      storedMediaCount: 40,
+      managementAccessExpiresAt: '2027-01-03T10:30:00.000Z',
+    },
+    {
+      id: 'event-other',
+      name: 'Studio Reception',
+      slug: 'studio-reception',
+      eventDate: '2026-09-19',
+      eventTimezone: 'America/Chicago',
+      storedMediaCount: 12,
+      managementAccessExpiresAt: '2026-09-20T00:30:00.000Z',
+    },
+    {
+      id: 'event-gallery-picnic',
+      name: 'Gallery Picnic',
+      slug: 'gallery-picnic',
+      eventDate: '2025-06-01',
+      eventTimezone: 'Europe/London',
+      storedMediaCount: 3,
+      managementAccessExpiresAt: '2025-06-01T23:30:00.000Z',
+    },
+  ],
+} satisfies HostSessionResponse;
+
+const HOST_AXE_FIXTURES: HostAxeFixture[] = [
+  {
+    name: 'pending registration route',
+    async setup(page) {
+      await page.addInitScript(() => {
+        localStorage.setItem('candidary.pending-registration.v1', JSON.stringify({
+          version: 1,
+          emailDigest: '61c0ee79db216f84107d8d2d7bfb35266f66b06773a99a0786e3a173ffe920ee',
+          expiresAt: '2099-01-01T00:15:00.000Z',
+        }));
+      });
+      await page.goto('/host/register?pending=1');
+    },
+    async ready(page) {
+      await readyHeading(page, 'Check your email.');
+      await expect(page.getByRole('textbox', { name: 'Confirmation code' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Confirm my email' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Start over' })).toBeVisible();
+      await expect(page.getByText('Until you enter it, no account exists.', { exact: false }))
+        .toBeVisible();
+    },
+  },
+  {
+    name: 'Host Events search and sort',
+    async setup(page) {
+      await page.route('**/api/host/session', (route) => route.fulfill({
+        headers: { 'cache-control': 'private, no-store' },
+        json: { data: HOST_AXE_SESSION, requestId: 'request-host-events-axe' },
+      }));
+      await page.goto('/host/events');
+      await readyHeading(page, 'Your events');
+      await page.getByRole('searchbox', { name: 'Search events' }).fill('gallery');
+      await page.getByRole('combobox', { name: 'Sort events' }).selectOption('oldest');
+    },
+    async ready(page) {
+      await expect(page.getByRole('searchbox', { name: 'Search events' })).toHaveValue('gallery');
+      await expect(page.getByRole('combobox', { name: 'Sort events' })).toHaveValue('oldest');
+      await expect(page.getByRole('status')).toHaveText('2 events');
+      const events = page.locator('.host-event-list > li');
+      await expect(events).toHaveCount(2);
+      await expect(events.nth(0)).toContainText('Gallery Picnic');
+      await expect(events.nth(1)).toContainText('Gallery Dinner');
+    },
+  },
+];
+
+for (const fixture of HOST_AXE_FIXTURES) {
+  test(`${fixture.name} is axe-clean`, async ({ page }) => {
+    await installViteRefreshGlobals(page);
+    await fixture.setup(page);
+    await fixture.ready(page);
+    await expectNoAxeViolations(page, fixture.name);
+  });
+}
+
+async function scanPublicAlbumFixture(page: Page, fixture: PublicAlbumAxeFixture) {
+  try {
+    await installViteRefreshGlobals(page);
+    await fixture.setup(page);
+    await fixture.ready(page);
+    await expectNoAxeViolations(page, fixture.name);
+  } finally {
+    await fixture.cleanup?.(page);
+  }
+}
+
+async function readyPublicAlbumMedia(scope: Locator, label: string) {
+  const media = scope.getByRole('img', { name: label, exact: true });
+  await expect.poll(async () => {
+    if (await media.count() !== 1 || !await media.isVisible()) return 'pending';
+    const rendered = await media.evaluate((element) => {
+      if (element instanceof HTMLImageElement) {
+        return element.complete && element.naturalWidth > 0 ? 'decoded image' : 'pending';
+      }
+      return element instanceof HTMLElement
+        && element.classList.contains('public-album__preview-fallback')
+        ? 'preview fallback'
+        : 'pending';
+    });
+    if (rendered !== 'preview fallback') return rendered;
+    return await media.getByText('Preview unavailable', { exact: true }).isVisible()
+      ? rendered
+      : 'pending';
+  }, { message: `${label} is a decoded image or its labelled preview fallback` })
+    .toMatch(/^(decoded image|preview fallback)$/u);
+}
+
+const PUBLIC_ALBUM_AXE_FIXTURES: PublicAlbumAxeFixture[] = [
+  (() => {
+    const rows = makeMedia(2, 'published').map((row, index) => ({
+      ...row,
+      id: `00000000-0000-4000-8500-${String(index + 1).padStart(12, '0')}`,
+      originalFilename: `axe-public-nonempty-${index + 1}.jpg`,
+      caption: index === 0 ? 'Lantern portraits' : 'Last dance',
+    }));
+    const shareToken = 'axe-public-nonempty-id.axe-public-nonempty-secret';
+    return {
+      name: 'Public Album nonempty',
+      async setup(page) {
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: rows, nextCursor: null } },
+          album: {
+            shareActive: true,
+            shareToken,
+            pickedMediaIds: rows.map(({ id }) => id),
+            title: 'Axe public Album',
+            description: 'Two published moments from the evening.',
+            coverMediaId: rows[0]!.id,
+            entries: [
+              { kind: 'photo', mediaId: rows[0]!.id },
+              { kind: 'section', id: 'axe-public-dancing', heading: 'Dancing' },
+              { kind: 'photo', mediaId: rows[1]!.id },
+            ],
+          },
+        });
+        await page.goto(`/album#${shareToken}`);
+      },
+      async ready(page) {
+        await expect(page).toHaveURL((url) => (
+          url.pathname === '/album' && url.search === '' && url.hash === ''
+        ));
+        await expect(page.getByRole('heading', { level: 1, name: 'Axe public Album' }))
+          .toBeVisible();
+        await readyPublicAlbumMedia(
+          page.locator('.public-album__intro'),
+          'Cover for Axe public Album',
+        );
+        await expect(page.getByText('2 photos', { exact: true })).toBeVisible();
+        await expect(page.getByRole('heading', { level: 2, name: 'Dancing' })).toBeVisible();
+        const figures = page.locator('.public-album__photo');
+        await expect(figures).toHaveCount(2);
+        const lanternPortraits = figures.filter({
+          has: page.locator('figcaption', { hasText: /^Lantern portraits$/u }),
+        });
+        await expect(lanternPortraits).toHaveCount(1);
+        await expect(lanternPortraits.locator('figcaption')).toHaveText('Lantern portraits');
+        await readyPublicAlbumMedia(lanternPortraits, 'Lantern portraits');
+        const lastDance = figures.filter({
+          has: page.locator('figcaption', { hasText: /^Last dance$/u }),
+        });
+        await expect(lastDance).toHaveCount(1);
+        await expect(lastDance.locator('figcaption')).toHaveText('Last dance');
+        await readyPublicAlbumMedia(lastDance, 'Last dance');
+      },
+    } satisfies PublicAlbumAxeFixture;
+  })(),
+  (() => {
+    const shareToken = 'axe-public-empty-id.axe-public-empty-secret';
+    return {
+      name: 'Public Album empty',
+      async setup(page) {
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: [], nextCursor: null } },
+          album: {
+            shareActive: true,
+            shareToken,
+            pickedMediaIds: [],
+            title: 'Axe empty Album',
+            description: 'The host has not added any photos yet.',
+            coverMediaId: null,
+            entries: [],
+          },
+        });
+        await page.goto(`/album#${shareToken}`);
+      },
+      async ready(page) {
+        await expect(page).toHaveURL((url) => (
+          url.pathname === '/album' && url.search === '' && url.hash === ''
+        ));
+        await expect(page.getByRole('heading', { level: 1, name: 'Axe empty Album' }))
+          .toBeVisible();
+        await expect(page.getByText('0 photos', { exact: true })).toBeVisible();
+        await expect(page.getByText('No photos in this Album yet.', { exact: true })).toBeVisible();
+        await expect(page.locator('.public-album__photo')).toHaveCount(0);
+      },
+    } satisfies PublicAlbumAxeFixture;
+  })(),
+];
+
+for (const fixture of PUBLIC_ALBUM_AXE_FIXTURES) {
+  test(`${fixture.name} is axe-clean`, async ({ page }) => {
+    await scanPublicAlbumFixture(page, fixture);
+  });
+}
+
+test('Slice 5 named Axe inventories are exact and unique', () => {
+  expect(MANAGER_AXE_FIXTURES.map(({ name }) => name))
+    .toEqual([...REQUIRED_MANAGER_AXE_FIXTURES]);
+  expect(GUEST_AXE_FIXTURES.map(({ name }) => name))
+    .toEqual([...REQUIRED_GUEST_AXE_FIXTURES]);
+  expect(HOST_AXE_FIXTURES.map(({ name }) => name))
+    .toEqual([...REQUIRED_HOST_AXE_FIXTURES]);
+  expect(PUBLIC_ALBUM_AXE_FIXTURES.map(({ name }) => name))
+    .toEqual([...REQUIRED_PUBLIC_ALBUM_AXE_FIXTURES]);
+  expect(new Set(MANAGER_AXE_FIXTURES.map(({ name }) => name)).size)
+    .toBe(REQUIRED_MANAGER_AXE_FIXTURES.length);
+  expect(new Set(GUEST_AXE_FIXTURES.map(({ name }) => name)).size)
+    .toBe(REQUIRED_GUEST_AXE_FIXTURES.length);
+  expect(new Set(HOST_AXE_FIXTURES.map(({ name }) => name)).size)
+    .toBe(REQUIRED_HOST_AXE_FIXTURES.length);
+  expect(new Set(PUBLIC_ALBUM_AXE_FIXTURES.map(({ name }) => name)).size)
+    .toBe(REQUIRED_PUBLIC_ALBUM_AXE_FIXTURES.length);
+  const allNames = [
+    ...MANAGER_AXE_FIXTURES,
+    ...GUEST_AXE_FIXTURES,
+    ...HOST_AXE_FIXTURES,
+    ...PUBLIC_ALBUM_AXE_FIXTURES,
+  ].map(({ name }) => name);
+  expect(new Set(allNames).size).toBe(allNames.length);
+});
+
+test('Manager upload terminal expiry closes through terminal handoff without claiming cancellation', async ({ page }) => {
+  await installViteRefreshGlobals(page);
+  const cancelRequests: string[] = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() === 'DELETE' && path.includes('/uploads/')) cancelRequests.push(path);
+  });
+  await stubManagerRoutes(page, {
+    event: { managerLinkRevision: null },
+    mediaPages: { first: { media: [], nextCursor: null } },
+    uploads: {
+      contentFailure: {
+        status: 410,
+        code: 'EVENT_EXPIRED',
+        message: 'This event access has expired.',
+      },
+    },
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.getByRole('button', { name: 'Add photos' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add photos' });
+  await dialog.locator('input[data-photo-source="library"]').setInputFiles({
+    name: 'expired-manager-upload.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from('expired-manager-upload'),
+  });
+  await dialog.getByRole('button', { name: 'Send 1 photo' }).click();
+
+  await expect(dialog).toHaveCount(0);
+  const notice = page.getByRole('region', { name: 'Manager notice' });
+  await expect(notice).toContainText('This event access has expired.');
+  await expect(page.getByRole('button', { name: 'Add photos' })).toHaveAttribute('aria-disabled', 'true');
+  await expect(page.getByText(/cancell?ed/iu)).toHaveCount(0);
+  expect(cancelRequests).toEqual([]);
+});
 
 function animationName(locator: Locator) {
   return locator.evaluate((element) => getComputedStyle(element).animationName);
@@ -493,6 +1962,35 @@ test('manager navigation exposes visible labels, selected state, and mobile-size
   await expect(intake).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('Pause and Resume guest uploads stay keyboard reachable and touch-sized at 390px and 320px', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+  });
+
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+    await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+
+    for (const name of ['Pause guest uploads', 'Resume guest uploads'] as const) {
+      const control = page.getByRole('button', { name, exact: true });
+      await expect(control).toBeVisible();
+      await control.focus();
+      await page.keyboard.press('Shift+Tab');
+      await expect(control).not.toBeFocused();
+      await page.keyboard.press('Tab');
+      await expect(control).toBeFocused();
+
+      const target = await measureTarget(control);
+      expect(target.width, `${name} width at ${width}`).toBeGreaterThanOrEqual(44);
+      expect(target.height, `${name} height at ${width}`).toBeGreaterThanOrEqual(44);
+      await page.keyboard.press('Enter');
+    }
+  }
+});
+
 test('full-page manager recovery is labelled, associated, touch-sized, contained, and axe-clean', async ({ page }) => {
   await stubManagerRoutes(page, {
     event: { id: RECOVERY_EVENT_ID },
@@ -633,6 +2131,7 @@ test('the guest surfaces carry no automated accessibility violation', async ({ p
  * That gap is why a clipped focus ring on the mosaic's primary control survived.
  */
 test('the manager private gallery mosaic is axe-clean, shows keyboard focus, and contains its viewer', async ({ page }) => {
+  await installViteRefreshGlobals(page);
   await stubManagerRoutes(page, { mediaPages: { first: { media: makeMedia(6), nextCursor: null } } });
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
@@ -703,6 +2202,130 @@ test('the manager private gallery mosaic is axe-clean, shows keyboard focus, and
     await page.evaluate(() => document.activeElement?.classList.contains('gallery-mosaic__open') ?? false),
     'focus returns to the tile the viewer was opened from',
   ).toBe(true);
+});
+
+test('viewer crosses a Gallery page boundary without losing its failed continuation state', async ({ page }) => {
+  // This test fails if the continuation control is disabled at the end of the first page, if a
+  // failed append replaces the current photo, or if the append's duplicate becomes a second tile.
+  // The browser route stays here rather than changing `stubManagerRoutes`: every other manager
+  // surface should retain its ordinary one-page fixture.
+  await installViteRefreshGlobals(page);
+  const first: ManagerGalleryMediaView = {
+    id: '00000000-0000-4000-8000-000000000101',
+    originalFilename: 'first-page-photo.jpg',
+    guestName: 'Avery Stone',
+    caption: 'First page photo',
+    publicationStatus: 'published',
+    previewAvailable: true,
+    width: 1200,
+    height: 900,
+    receivedAt: '2026-07-27T12:01:00.000Z',
+    timelineAt: '2026-07-27T12:01:00.000Z',
+    timelineSource: 'received',
+    isFavorite: false,
+  };
+  const second: ManagerGalleryMediaView = {
+    id: '00000000-0000-4000-8000-000000000102',
+    originalFilename: 'second-page-photo.jpg',
+    guestName: 'Avery Stone',
+    caption: 'Second page photo',
+    publicationStatus: 'published',
+    previewAvailable: true,
+    width: 1200,
+    height: 900,
+    receivedAt: '2026-07-27T12:00:00.000Z',
+    timelineAt: '2026-07-27T12:00:00.000Z',
+    timelineSource: 'received',
+    isFavorite: false,
+  };
+  expect(Date.parse(first.timelineAt), 'the first newest-first page is newer than its continuation')
+    .toBeGreaterThan(Date.parse(second.timelineAt));
+  let continuationAttempts = 0;
+  let releaseRetryResponse: (() => void) | undefined;
+  const retryResponseGate = new Promise<void>((resolve) => {
+    releaseRetryResponse = resolve;
+  });
+  const galleryPath = `/api/manage/events/${EVENT_FIXTURE.id}/gallery`;
+  await stubManagerRoutes(page, { mediaPages: { first: { media: [], nextCursor: null } } });
+  await page.route(`**${galleryPath}**`, async (route) => {
+    const request = route.request();
+    const url = new URL(route.request().url());
+    // The summary is a separate Manager resource owned by the common stub, but only its exact
+    // GET read may fall through. Any other nested Gallery URL or write fails this wire contract.
+    if (url.pathname === `${galleryPath}/summary`) {
+      expect(request.method(), 'Gallery summary is read with GET').toBe('GET');
+      return route.fallback();
+    }
+    expect(request.method(), 'viewer continuation only reads Gallery with GET').toBe('GET');
+    expect(url.pathname, 'viewer continuation only reads the exact Gallery endpoint').toBe(galleryPath);
+    const parameters = [...url.searchParams.entries()];
+    if (url.searchParams.get('cursor') === null) {
+      expect(parameters, 'first Gallery page carries only newest-first order').toEqual([['order', 'newest']]);
+      return route.fulfill({
+        json: { data: { media: [first], nextCursor: 'viewer-page-2' }, requestId: 'viewer-page-1' },
+      });
+    }
+    expect(parameters, 'continuation uses only the original cursor and newest-first order').toEqual([
+      ['order', 'newest'],
+      ['cursor', 'viewer-page-2'],
+    ]);
+    continuationAttempts += 1;
+    if (continuationAttempts === 1) {
+      return route.fulfill({
+        status: 500,
+        json: { code: 'INTERNAL_ERROR', message: 'The next page is temporarily unavailable.', requestId: 'viewer-page-2-failed' },
+      });
+    }
+    await retryResponseGate;
+    return route.fulfill({
+      json: { data: { media: [first, second], nextCursor: null }, requestId: 'viewer-page-2' },
+    });
+  });
+
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
+  const origin = page.getByRole('button', { name: 'Open First page photo, from Avery Stone' });
+  await expect(origin).toBeVisible();
+  await origin.click();
+
+  const viewer = page.getByRole('dialog');
+  const next = viewer.getByRole('button', { name: 'Load next photo' });
+  await expect(next).toBeEnabled();
+  await next.click();
+
+  const alert = viewer.getByRole('alert');
+  await expect(alert).toContainText('Could not load the next photo. Try again.');
+  await expect(viewer).toContainText('First page photo');
+  const retry = alert.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeFocused();
+  await expect(alert).toHaveCSS('background-color', 'rgb(255, 241, 238)');
+  const retryTarget = await measureTarget(retry);
+  expect(retryTarget.width, 'viewer Retry target width').toBeGreaterThanOrEqual(44);
+  expect(retryTarget.height, 'viewer Retry target height').toBeGreaterThanOrEqual(44);
+  expect(
+    await computedStyleContrast(retry, 'outlineColor', alert),
+    'viewer Retry focus indicator contrast against its adjacent failure surface',
+  ).toBeGreaterThanOrEqual(3);
+  await expectNoAxeViolations(page, 'viewer continuation failure');
+
+  await retry.click();
+  await expect.poll(() => continuationAttempts, 'the deferred retry starts exactly one request').toBe(2);
+  await expect(retry).toBeFocused();
+  expect(
+    await page.evaluate(() => document.activeElement?.closest('[role="dialog"]') !== null),
+    'focus remains inside the viewer throughout the deferred retry',
+  ).toBe(true);
+  releaseRetryResponse?.();
+  await expect(viewer).toContainText('Second page photo');
+  await expect(alert).toHaveCount(0);
+  await expect(viewer.getByRole('button', { name: 'Close viewer' })).toBeFocused();
+  await expect(page.locator(`[data-photo-id="${first.id}"]`)).toHaveCount(1);
+  await expect(page.locator(`[data-photo-id="${second.id}"]`)).toHaveCount(1);
+  expect(continuationAttempts, 'the failed cursor is retried once').toBe(2);
+
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
+  await expect(origin).toBeFocused();
 });
 
 test('narrow Manager export progress has one scoped live owner and remains axe-clean', async ({ page }, testInfo) => {

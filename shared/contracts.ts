@@ -49,11 +49,37 @@ export interface ApiSuccess<T> {
 
 export interface RegistrationPendingResponse {
   registrationPending: true;
+  resumeExpiresAt: string;
 }
 
 export interface RegistrationCompleteResponse {
   registered: true;
   boundEvent: boolean;
+}
+
+export interface HostSessionAccountView {
+  id: string;
+  email: string;
+  displayName: string | null;
+  emailVerified: boolean;
+  notificationsEnabled: boolean;
+}
+
+// This is an allowlist, not a projection-by-omission. An EventRecord field added
+// later stays private until the account dashboard explicitly names it here.
+export interface HostSessionEventView {
+  id: string;
+  name: string;
+  slug: string;
+  eventDate: string;
+  eventTimezone: string;
+  storedMediaCount: number;
+  managementAccessExpiresAt: string;
+}
+
+export interface HostSessionResponse {
+  account: HostSessionAccountView;
+  events: HostSessionEventView[];
 }
 
 export type ApiResult<T> = ApiSuccess<T> | ApiErrorBody;
@@ -131,6 +157,16 @@ export interface ResolvedEventTheme {
   tokens: EventThemeTokens;
 }
 
+export interface HostUploadAvailability {
+  enabled: boolean;
+  reason: 'event-unavailable' | 'media-cap' | 'storage-cap' | null;
+}
+
+export interface ManagerLinkRotationAvailability {
+  enabled: boolean;
+  reason: 'account-required' | null;
+}
+
 export interface EventView {
   id: string;
   slug: string;
@@ -154,8 +190,13 @@ export interface EventView {
   // only — no guest projection carries either field.
   recoverableMediaCount: number;
   recoverableBytes: number;
+  hostUploadAvailability: HostUploadAvailability;
   guestAccessExpiresAt: string;
   managementAccessExpiresAt: string;
+  // Present only when this projection was authorized by an owning/cohosting
+  // account. A management-link bearer cannot rotate itself and receives null.
+  managerLinkRevision: number | null;
+  managerLinkRotationAvailability: ManagerLinkRotationAvailability;
   purgeAfter: string;
   createdAt: string;
   deletedAt: string | null;
@@ -444,12 +485,15 @@ export type AlbumRetainedSlotState = 'recoverable' | 'expired-cleanup-pending';
  *
  * This is the one Album surface allowed to name a trashed row, and it is
  * deliberately not a photo: no image URL, caption, guest, or filename crosses
- * here, because the point of trashing was to stop showing the photograph.
+ * here, because the point of trashing was to stop showing the photograph. Its
+ * timeline instant is ordering-only Manager data, so Reset can keep this slot
+ * among the live photos without exposing any photo content or provenance.
  */
 export interface AlbumRetainedSlotView {
   mediaId: string;
   restoreUntil: string;
   state: AlbumRetainedSlotState;
+  timelineAt: string;
 }
 
 export type AlbumEntryView =
@@ -474,11 +518,21 @@ export interface AlbumSaveRequest {
   metadata?: AlbumMetadataInput;
 }
 
+export type AlbumReconciliation =
+  | { kind: 'initialize' }
+  | { kind: 'historical'; historicalPickCount: number }
+  | { kind: 'over-capacity'; pickCount: number; historicalPickCount: number }
+  | null;
+
 export interface AlbumView extends AlbumMetadataInput {
   /** Compare-and-set token. Every write carries the revision it was composed against. */
   revision: number;
-  /** False until the host first commits an album; the only reconciliation signal. */
+  /** False until the host first commits an album. */
   saved: boolean;
+  /** Event-owned counter advanced by every actual Album-eligibility change. */
+  pickGeneration: number;
+  /** Server-computed first-read category; raw per-photo provenance never crosses the API. */
+  reconciliation: AlbumReconciliation;
   effectiveCoverMediaId: string | null;
   /**
    * The chosen cover is a photo the host moved to Recently deleted. The slot is
@@ -551,6 +605,10 @@ export type RsvpAccess = 'editable' | 'read-only' | 'unavailable';
 // households never act as a host.
 export type RsvpActor = 'household' | 'host';
 
+export type GuestReadSurfaces =
+  | { available: true; reason: null }
+  | { available: false; reason: 'before-photo-open' };
+
 // What the host's photo-delivery controls are chosen from. `paused` is decided
 // first, so an event whose capability is withheld never reports itself as
 // scheduled to open.
@@ -560,6 +618,7 @@ export interface GuestPhaseView {
   phase: GuestEventPhase;
   rsvpState: RsvpState;
   rsvpAccess: RsvpAccess;
+  guestReadSurfaces: GuestReadSurfaces;
   // A *relative* delay to the next guest-view boundary, computed by the server
   // from the same instant that resolved this view, or null when none remains.
   // Relative on purpose: an absolute instant compared against `Date.now()` is a

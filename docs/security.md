@@ -8,6 +8,12 @@ Every event-scoped request resolves an HttpOnly session, loads its current acces
 
 Access links contain a random token ID and 256-bit secret. D1 stores keyed HMAC digests, not raw secrets. The guest secret is additionally stored as AES-256-GCM ciphertext so an authenticated manager can redisplay the current share link; the one-time management secret is not recoverable. Rotating a role revokes both its tokens and sessions.
 
+Management-link rotation is available only when Manager authorization resolves through an active
+signed-in account that owns or cohosts the event. It is replacement, not recovery: the old bearer
+credential is revoked, the new secret is shown once behind the copy-or-acknowledge gate, and the
+account session remains the authority throughout rather than navigating through the replacement.
+A link-only `POST .../links/manager/rotate` probe receives `403 ROLE_FORBIDDEN`.
+
 ## Event cover delivery
 
 Cover configuration is public presentation, but cover storage identity is private. Manager event JSON
@@ -95,6 +101,11 @@ No raw credential, ciphertext, submitted name, RSVP body, or CSV row is ever log
 Registration does not create an account. `POST /api/host/register` reserves rate-limit capacity, hashes the proposed password, and stores a short-lived `host_registration_challenges` row holding the normalized address, the proposed hash, digests of an opaque browser secret and the emailed code, and — only when the request held that event's live management session — the event to bind and the exact session authorizing that claim. No account, membership, or host session exists until `POST /api/host/register/complete` proves both the browser secret and the mailbox code. Completion re-resolves that same creator session live, so rotation, expiry, or a different browser cannot replay a pending claim.
 
 Completing a challenge for an address that already has an account neither duplicates it nor changes its password, display name, or authentication version; the verified code acts as passwordless recovery for that one request. Pending registration has its own resend endpoint authenticated by the registration cookie, distinct from the host-session verification flow an existing account uses.
+
+The browser-local pending-registration marker is only a presentation hint. It contains a schema
+version, `SHA-256(normalize(email))`, and the 15-minute expiry; it contains no raw email, password,
+confirmation code, registration browser secret, challenge ID, or other credential. The HttpOnly
+registration cookie remains the only browser credential that can resume the pending challenge.
 
 For creator ownership, eligibility ends at the earlier of the event's management deadline and 12 hours after creation. The browser's registration URL may remember a pending code-entry screen and a validated local return path, but it is only a presentation hint: the server's live creator session and the completion result remain the authority for event attachment.
 

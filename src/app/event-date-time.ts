@@ -30,9 +30,12 @@ import { isCalendarDate, isIanaTimeZone } from '../../shared/event-time';
  */
 
 const LOCALE = 'en-US';
+const EXPLICIT_OFFSET_INSTANT = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u;
 
 function validInstant(iso: string, timeZone: string): Date | null {
   if (!isIanaTimeZone(timeZone)) return null;
+  const match = EXPLICIT_OFFSET_INSTANT.exec(iso);
+  if (!match || !isCalendarDate(match[1] ?? '')) return null;
   const parsed = Date.parse(iso);
   return Number.isFinite(parsed) ? new Date(parsed) : null;
 }
@@ -43,15 +46,16 @@ function validInstant(iso: string, timeZone: string): Date | null {
  * Takes `YYYY-MM-DD` and reads its parts directly rather than constructing a
  * `Date`, so no zone — the browser's or the event's — is involved at all.
  */
-export function formatEventDate(dateOnly: string): string | null {
+export function formatEventDate(
+  dateOnly: string,
+  presentation: 'long' | 'compact' = 'long',
+): string | null {
   if (!isCalendarDate(dateOnly)) return null;
   const [year, month, day] = dateOnly.split('-').map(Number) as [number, number, number];
-  return new Intl.DateTimeFormat(LOCALE, {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    timeZone: 'UTC',
-  }).format(Date.UTC(year, month - 1, day));
+  const options: Intl.DateTimeFormatOptions = presentation === 'compact'
+    ? { month: 'short', day: 'numeric', timeZone: 'UTC' }
+    : { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' };
+  return new Intl.DateTimeFormat(LOCALE, options).format(Date.UTC(year, month - 1, day));
 }
 
 /** An instant, as a date and time in the event's zone. */

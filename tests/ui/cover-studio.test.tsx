@@ -1559,3 +1559,109 @@ describe('cover studio accessibility', () => {
     expect(dialog.contains(document.activeElement)).toBe(true);
   });
 });
+
+describe('cover upload progress', () => {
+  function transferring(sentBytes: number, totalBytes: number): CoverDraftSessionState {
+    return {
+      status: 'transferring',
+      error: null,
+      sentBytes,
+      totalBytes,
+    } as unknown as CoverDraftSessionState;
+  }
+
+  it('renders a monotonic determinate 19 MB transfer and throttles polite announcements', async () => {
+    const user = userEvent.setup();
+    const totalBytes = 19_000_000;
+    const { rerender } = render(<Harness
+      initialSource={{ kind: 'upload' }}
+      composeState={transferring(1_900_000, totalBytes)}
+    />);
+
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    const progress = screen.getByRole('progressbar', { name: 'Uploading cover photo' });
+    const announcement = screen.getByRole('status');
+    expect(progress).toHaveAttribute('max', String(totalBytes));
+    expect(progress).toHaveAttribute('value', '1900000');
+    expect(announcement).toHaveAttribute('aria-live', 'polite');
+    expect(announcement).toHaveTextContent('Uploading photo, 10%');
+
+    rerender(<Harness
+      initialSource={{ kind: 'upload' }}
+      composeState={transferring(1_910_000, totalBytes)}
+    />);
+    expect(screen.getByRole('status')).toBe(announcement);
+    expect(announcement).toHaveTextContent('Uploading photo, 10%');
+
+    rerender(<Harness
+      initialSource={{ kind: 'upload' }}
+      composeState={transferring(1_000_000, totalBytes)}
+    />);
+    expect(progress).toHaveAttribute('value', '1910000');
+
+    rerender(<Harness
+      initialSource={{ kind: 'upload' }}
+      composeState={transferring(totalBytes, totalBytes)}
+    />);
+    expect(progress).toHaveAttribute('value', String(totalBytes));
+    expect(announcement).toHaveTextContent('Upload complete');
+  });
+
+  it('cancels an active transfer back to the picker and restores its file-control focus', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+
+    function CancelTransferHarness() {
+      const [controller] = useState(() => createCoverOperationController({
+        eventId: 'event-a',
+        schedule: () => () => undefined,
+      }));
+      const [source, setSource] = useState<CoverSourceChoice | { kind: 'none' } | null>(null);
+      const [composeState, setComposeState] = useState<CoverDraftSessionState>({
+        status: 'idle',
+        error: null,
+      });
+      return <CoverStudio
+        open
+        operation={controller}
+        operationState={controller.getState()}
+        draft={null}
+        composeState={composeState}
+        source={source}
+        focus={null}
+        focusMode="auto"
+        effect="natural"
+        accessFailure={null}
+        canRemove={false}
+        presetThumbnail={(presetId) => `/assets/event-covers/v1/${presetId}.webp`}
+        styleThumbnail={readyThumbnail}
+        onSourceChange={setSource}
+        onUpload={(file) => setComposeState(transferring(0, file.size))}
+        onEnterCompose={vi.fn()}
+        onFocusChange={vi.fn()}
+        onResetFocus={vi.fn()}
+        onEffectChange={vi.fn()}
+        onPublish={vi.fn()}
+        onDiscardDraft={async () => {
+          setSource(null);
+          setComposeState({ status: 'idle', error: null });
+        }}
+        onClose={onClose}
+      />;
+    }
+
+    render(<CancelTransferHarness />);
+    const chooser = screen.getByLabelText<HTMLInputElement>('Choose photo');
+    await user.upload(chooser, new File(['photo'], 'porch.jpg', { type: 'image/jpeg' }));
+    expect(screen.getByRole('progressbar', { name: 'Uploading cover photo' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    const confirm = screen.getByRole('alertdialog', { name: 'Discard cover changes' });
+    await user.click(within(confirm).getByRole('button', { name: 'Discard draft' }));
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Choose a cover' })).toBeVisible());
+    expect(screen.getByLabelText('Choose photo')).toHaveFocus();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});

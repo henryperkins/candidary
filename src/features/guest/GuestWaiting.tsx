@@ -3,7 +3,7 @@ import { guestEventCoverSlotPath } from '../../app/api';
 import { GuestEventHero } from '../../components/GuestEventHero';
 
 /**
- * The event has started and photo delivery is currently unavailable.
+ * The event has started and new guest uploads are currently unavailable.
  *
  * That is now the only thing `waiting` means, so the surface says exactly that and nothing more.
  * The hero still names the event — the same one the before-start page draws, because a guest who
@@ -20,8 +20,8 @@ export function GuestWaiting({ event }: { event: GuestEventView }) {
     />
     <div className="rsvp-flow__body">
       <div className="rsvp-card">
-        <h1>Photo delivery is paused</h1>
-        <p>The host has paused photo delivery for now. Please try again later.</p>
+        <h1>New guest uploads are paused</h1>
+        <p>The host has paused new guest uploads for now. Shared photos, Guestbook, and My deliveries are still available below.</p>
       </div>
     </div>
   </section>;

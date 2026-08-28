@@ -63,10 +63,11 @@ const eventColumnNames = [
   'cover_config', 'cover_revision', 'cover_render_set_id',
   'guestbook_prompt',
   'recoverable_media_count', 'recoverable_bytes',
+  'album_pick_generation', 'manager_link_revision',
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// post-cutover verifier refuses a candidate whose ledger is not exactly twenty.
+// post-cutover verifier refuses a candidate whose ledger is not exactly twenty-one.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
@@ -75,7 +76,7 @@ const migrationFileNames = [
   '0013_guest_message_hardening.sql', '0014_event_cover_invariants.sql',
   '0015_curated_private_guestbook.sql', '0016_host_private_gallery.sql',
   '0017_event_album.sql', '0018_album_end_to_end.sql', '0019_media_recovery.sql',
-  '0020_export_progress.sql',
+  '0020_export_progress.sql', '0021_manager_upload_and_album_era.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -405,6 +406,49 @@ const exportProtocolAdmissionRows = [
   admitted_at: null,
 }));
 
+// Hand-checked terminal rows for the four columns, actor foreign key, and two
+// partial unique indexes added by 0021. The CHECK results are literal fixture
+// evidence rather than values computed from the verifier under test.
+const managerUploadAlbumEraColumnRows = [
+  {
+    tbl: 'event_sessions', cid: 10, col: 'manager_upload_account_id', type: 'TEXT',
+    notnull: 0, dflt_value: null, pk: 0, checks: '',
+  },
+  {
+    tbl: 'events', cid: 32, col: 'album_pick_generation', type: 'INTEGER',
+    notnull: 1, dflt_value: '0', pk: 0, checks: '1',
+  },
+  {
+    tbl: 'events', cid: 33, col: 'manager_link_revision', type: 'INTEGER',
+    notnull: 1, dflt_value: '0', pk: 0, checks: '1',
+  },
+  {
+    tbl: 'media', cid: 27, col: 'album_pick_version', type: 'INTEGER',
+    notnull: 0, dflt_value: null, pk: 0, checks: '1',
+  },
+];
+
+const managerUploadAlbumEraForeignKeyRows = [
+  {
+    tbl: 'event_sessions', parent: 'host_accounts',
+    col: 'manager_upload_account_id', parent_col: 'id', on_delete: 'NO ACTION',
+  },
+];
+
+const managerUploadAlbumEraIndexRows = [
+  {
+    name: 'event_access_tokens_one_live_manager', uniq: 1, partial: 1,
+    sql: 'CREATE UNIQUE INDEX event_access_tokens_one_live_manager\n'
+      + "ON event_access_tokens(event_id)\nWHERE role = 'manager' AND revoked_at IS NULL",
+  },
+  {
+    name: 'event_sessions_manager_upload_actor', uniq: 1, partial: 1,
+    sql: 'CREATE UNIQUE INDEX event_sessions_manager_upload_actor\n'
+      + 'ON event_sessions(event_id, manager_upload_account_id)\n'
+      + 'WHERE manager_upload_account_id IS NOT NULL AND revoked_at IS NULL',
+  },
+];
+
 type ColumnRow = {
   cid: number;
   name: string;
@@ -443,6 +487,8 @@ function terminalRows() {
   });
   Object.assign(events[30]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
   Object.assign(events[31]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
+  Object.assign(events[32]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
+  Object.assign(events[33]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
 
   const roster = columns(rosterColumnNames);
   Object.assign(roster[0]!, { type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 });
@@ -490,6 +536,9 @@ function invariantOutput(ledgerNames: string[]): unknown[] {
     resultEnvelope(structuredClone(recoveryIndexRows)),
     resultEnvelope(structuredClone(exportProgressColumnRows)),
     resultEnvelope(structuredClone(exportProtocolAdmissionRows)),
+    resultEnvelope(structuredClone(managerUploadAlbumEraColumnRows)),
+    resultEnvelope(structuredClone(managerUploadAlbumEraForeignKeyRows)),
+    resultEnvelope(structuredClone(managerUploadAlbumEraIndexRows)),
   ];
 }
 
@@ -694,7 +743,7 @@ describe('fresh local D1 verification', () => {
       .map((statement) => statement.trim())
       .filter(Boolean);
 
-    expect(statements).toHaveLength(27);
+    expect(statements).toHaveLength(30);
     const exportProgressColumns = statements[25]!;
     expect(exportProgressColumns).toContain("pragma_table_info('export_jobs')");
     expect(exportProgressColumns).toContain("name = 'export_jobs'");
@@ -715,6 +764,38 @@ describe('fresh local D1 verification', () => {
     expect(exportAdmission).toContain('closed_at');
     expect(exportAdmission).toContain('worker_version_id');
     expect(exportAdmission).toContain('admitted_at');
+  });
+
+  it('appends the exact 0021 Manager actor and Album-era schema fingerprint', () => {
+    const statements = READ_ONLY_INVARIANT_QUERY
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+
+    expect(statements).toHaveLength(30);
+    const columns = statements[27]!;
+    for (const column of [
+      'manager_upload_account_id',
+      'album_pick_version',
+      'album_pick_generation',
+      'manager_link_revision',
+    ]) {
+      expect(columns).toContain(`'${column}'`);
+    }
+    expect(columns).toContain('album_pick_version IS NULL OR album_pick_version = 1');
+    expect(columns).toContain('album_pick_generation >= 0');
+    expect(columns).toContain('manager_link_revision >= 0');
+
+    const foreignKeys = statements[28]!;
+    expect(foreignKeys).toContain("pragma_foreign_key_list('event_sessions')");
+    expect(foreignKeys).toContain('f."to" AS parent_col');
+    expect(foreignKeys).toContain("f.\"from\" = 'manager_upload_account_id'");
+
+    const indexes = statements[29]!;
+    expect(indexes).toContain("'event_access_tokens_one_live_manager'");
+    expect(indexes).toContain("'event_sessions_manager_upload_actor'");
+    expect(indexes).toContain('i.partial AS partial');
+    expect(indexes).toContain('x.sql AS sql');
   });
 
   it('keeps the legacy cover-index envelope at exactly four fields', async () => {
@@ -817,12 +898,12 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly twenty migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly twenty-one migrations', async () => {
     const candidate = await fixture();
-    const nineteen = candidate.ledgerNames.slice(0, -1);
+    const twenty = candidate.ledgerNames.slice(0, -1);
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;
-    output[0]!.results = nineteen.map((name, index) => ({ id: index + 1, name }));
-    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), nineteen)).toThrow();
+    output[0]!.results = twenty.map((name, index) => ({ id: index + 1, name }));
+    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), twenty)).toThrow();
   });
 
   it('fails closed on any post-cutover Guestbook schema inventory drift', async () => {
@@ -1031,6 +1112,77 @@ describe('fresh local D1 verification', () => {
       const rows = (output[11] as { results: Array<{ name: string; sql: string }> }).results;
       const trigger = rows.find((row) => row.name === name)!;
       trigger.sql = trigger.sql.replace('BEFORE', 'AFTER');
+      expect(() => parseWranglerInvariantOutput(
+        JSON.stringify(output),
+        candidate.ledgerNames,
+      )).toThrow(/trigger body/iu);
+    }
+  });
+
+  it('fails closed on any 0021 Manager actor or Album-era schema drift', async () => {
+    const candidate = await fixture();
+    const mutations: Array<(output: unknown[]) => void> = [
+      (output) => {
+        const rows = (output[27] as { results: Array<{ col: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.col === 'manager_upload_account_id'), 1);
+      },
+      (output) => {
+        const rows = (output[27] as {
+          results: Array<{ col: string; dflt_value: string | null }>;
+        }).results;
+        rows.find((row) => row.col === 'manager_link_revision')!.dflt_value = '1';
+      },
+      (output) => {
+        const rows = (output[27] as {
+          results: Array<{ col: string; checks: string }>;
+        }).results;
+        rows.find((row) => row.col === 'album_pick_version')!.checks = '0';
+      },
+      (output) => {
+        const rows = (output[28] as { results: Array<{ on_delete: string }> }).results;
+        rows[0]!.on_delete = 'CASCADE';
+      },
+      (output) => {
+        const rows = (output[28] as { results: Array<{ parent_col: string }> }).results;
+        rows[0]!.parent_col = 'email';
+      },
+      (output) => {
+        const rows = (output[29] as {
+          results: Array<{ name: string; partial: number }>;
+        }).results;
+        rows.find((row) => row.name === 'event_sessions_manager_upload_actor')!.partial = 0;
+      },
+      (output) => {
+        const rows = (output[29] as {
+          results: Array<{ name: string; sql: string }>;
+        }).results;
+        const index = rows.find((row) => row.name === 'event_access_tokens_one_live_manager')!;
+        index.sql = index.sql.replace("role = 'manager'", "role = 'guest'");
+      },
+    ];
+    for (const mutate of mutations) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      mutate(output);
+      expect(() => parseWranglerInvariantOutput(
+        JSON.stringify(output),
+        candidate.ledgerNames,
+      )).toThrow();
+    }
+
+    for (const name of [
+      'event_hosts_revoke_manager_upload_actor',
+      'event_sessions_manager_upload_actor_insert',
+      'event_sessions_manager_upload_actor_update',
+      'media_album_pick_generation_delete',
+      'media_album_pick_generation_update',
+      'media_album_pick_pair_guard',
+      'media_album_pick_version_on_legacy_pick',
+      'media_album_pick_version_on_legacy_unpick',
+    ]) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      const rows = (output[11] as { results: Array<{ name: string; sql: string }> }).results;
+      const trigger = rows.find((row) => row.name === name)!;
+      trigger.sql = trigger.sql.replace('BEGIN', 'BEGIN\n  SELECT 1;');
       expect(() => parseWranglerInvariantOutput(
         JSON.stringify(output),
         candidate.ledgerNames,

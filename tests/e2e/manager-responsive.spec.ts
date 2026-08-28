@@ -7,8 +7,10 @@ import type { ExportView } from '../../src/app/types';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 import { LONG_FILENAME, UNBROKEN_NOTE, makeMedia } from './fixtures/ui-data';
 import {
+  boxesIntersect,
   measureContrast,
   measureDocument,
+  measureFoldBelowObstructions,
   measureGridTracks,
   measureOverflow,
   measureSeparation,
@@ -30,6 +32,8 @@ const MIN_LABEL_TEXT = 14;
 const MIN_COUNT_TEXT = 12;
 const MIN_CONTRAST = 4.5;
 const TOUCH_MINIMUM = 44;
+// Chromium can report adjacent CSS-pixel edges on different device-pixel boundaries by a fraction.
+const GEOMETRY_TOLERANCE = 1;
 const NOTE = {
   id: 'message-a',
   guestName: 'Rowan',
@@ -74,6 +78,54 @@ async function openManager(page: Page) {
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
 }
 
+// The focused server's CSP blocks Vite's injected React Refresh preamble. These inert globals let
+// browser traces mount the app without changing production CSP or exercising hot module replacement.
+async function installInertReactRefresh(page: Page) {
+  await page.addInitScript(() => {
+    Object.assign(window, {
+      $RefreshReg$: () => undefined,
+      $RefreshSig$: () => (type: unknown) => type,
+    });
+  });
+}
+
+test.beforeEach(async ({ page }) => {
+  await installInertReactRefresh(page);
+});
+
+test('Manager upload cleanup retry at 320 stays contained and focuses its action', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+    uploads: {
+      contentFailure: 'network',
+      cancelFailure: 'network',
+    },
+  });
+  await page.goto(managerUrl);
+  await page.getByRole('button', { name: 'Add photos' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add photos' });
+  await dialog.locator('input[data-photo-source="library"]').setInputFiles({
+    name: 'cleanup-retry.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from('cleanup-retry'),
+  });
+  await dialog.getByRole('button', { name: 'Send 1 photo' }).click();
+  await dialog.getByRole('button', { name: 'Cancel uploads' }).click();
+
+  const retry = dialog.getByRole('button', { name: 'Retry cleanup' });
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeFocused();
+  await expect(dialog).toContainText('1 temporary upload still needs cleanup.');
+  const target = await measureTarget(retry);
+  expect(target.width, 'Retry cleanup target width at 320').toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  expect(target.height, 'Retry cleanup target height at 320').toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth, 'Manager upload cleanup document at 320')
+    .toBeLessThanOrEqual(documentSize.clientWidth + GEOMETRY_TOLERANCE);
+  expect(await measureViewportEscapes(dialog), 'Manager upload cleanup dialog at 320').toEqual([]);
+});
+
 test('manager navigation keeps every destination labelled at the control-text floor', async ({ page }) => {
   await openManager(page);
 
@@ -98,6 +150,140 @@ test('manager navigation keeps every destination labelled at the control-text fl
 
     await expectContained(page, width);
   }
+});
+
+test('320 Manager navigation labels do not intersect', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: makeMedia(6), nextCursor: null } },
+    messages: [NOTE],
+    event: { storedMediaCount: 6 },
+    exports: [],
+  });
+  await page.goto(managerUrl);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+
+  const controls = page.locator('.manager-nav nav button');
+  await expect(controls).toHaveCount(DESTINATIONS.length);
+  const labels = await controls.locator('.manager-nav__label').all();
+  const controlBoxes = [];
+  expect(await controls.locator('.manager-nav__label').allTextContents(), 'Manager destination source order')
+    .toEqual([...DESTINATIONS]);
+
+  for (let first = 0; first < labels.length; first += 1) {
+    for (let second = first + 1; second < labels.length; second += 1) {
+      expect(
+        await boxesIntersect(labels[first]!, labels[second]!),
+        DESTINATIONS[first] + ' and ' + DESTINATIONS[second] + ' labels',
+      ).toBe(false);
+    }
+  }
+
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index]!;
+    const control = controls.nth(index);
+    await expect(label, `${DESTINATIONS[index]} label is visible`).toBeVisible();
+    const [controlBox, labelBox] = await Promise.all([control.boundingBox(), label.boundingBox()]);
+    if (!controlBox || !labelBox) {
+      throw new Error(`${DESTINATIONS[index]} requires rendered control and label bounds.`);
+    }
+    controlBoxes.push(controlBox);
+    expect(controlBox.width, `${DESTINATIONS[index]} target width`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+    expect(controlBox.height, `${DESTINATIONS[index]} target height`).toBeGreaterThanOrEqual(58);
+    expect(labelBox.x, `${DESTINATIONS[index]} label starts inside its control`).toBeGreaterThanOrEqual(controlBox.x);
+    expect(labelBox.x + labelBox.width, `${DESTINATIONS[index]} label ends inside its control`)
+      .toBeLessThanOrEqual(controlBox.x + controlBox.width);
+    expect(labelBox.y, `${DESTINATIONS[index]} label starts inside its control`).toBeGreaterThanOrEqual(controlBox.y);
+    expect(labelBox.y + labelBox.height, `${DESTINATIONS[index]} label ends inside its control`)
+      .toBeLessThanOrEqual(controlBox.y + controlBox.height);
+    const fontSize = await label.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+    expect(fontSize, `${DESTINATIONS[index]} label text size`).toBeGreaterThanOrEqual(MIN_LABEL_TEXT);
+  }
+
+  const rowStarts = controlBoxes.reduce<number[]>((rows, box) => {
+    if (!rows.some((rowStart) => Math.abs(rowStart - box.y) <= GEOMETRY_TOLERANCE)) rows.push(box.y);
+    return rows;
+  }, []);
+  expect(rowStarts, 'Manager destinations render as exactly two rows').toHaveLength(2);
+  for (let index = 0; index < controlBoxes.length; index += 1) {
+    const expectedRow = index < 3 ? rowStarts[0]! : rowStarts[1]!;
+    expect(
+      Math.abs(controlBoxes[index]!.y - expectedRow),
+      `${DESTINATIONS[index]} remains in its source-ordered row`,
+    ).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+  }
+  expect(rowStarts[1]!, 'second Manager row follows the first')
+    .toBeGreaterThanOrEqual(rowStarts[0]! + controlBoxes[0]!.height - GEOMETRY_TOLERANCE);
+
+  const counts = controls.locator('.manager-nav__count');
+  await expect(counts).toHaveCount(2);
+  for (let index = 0; index < await counts.count(); index += 1) {
+    const count = counts.nth(index);
+    await expect(count, `Manager count ${index + 1} is visible`).toBeVisible();
+    const control = count.locator('..');
+    const [controlBox, countBox] = await Promise.all([control.boundingBox(), count.boundingBox()]);
+    if (!controlBox || !countBox) {
+      throw new Error(`Manager count ${index + 1} requires rendered control and count bounds.`);
+    }
+    const fontSize = await count.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+    expect(fontSize, `Manager count ${index + 1} text size`).toBeGreaterThanOrEqual(MIN_COUNT_TEXT);
+    expect(countBox.x, `Manager count ${index + 1} starts inside its control`).toBeGreaterThanOrEqual(controlBox.x);
+    expect(countBox.x + countBox.width, `Manager count ${index + 1} ends inside its control`)
+      .toBeLessThanOrEqual(controlBox.x + controlBox.width);
+    expect(countBox.y, `Manager count ${index + 1} starts inside its control`).toBeGreaterThanOrEqual(controlBox.y);
+    expect(countBox.y + countBox.height, `Manager count ${index + 1} ends inside its control`)
+      .toBeLessThanOrEqual(controlBox.y + controlBox.height);
+  }
+  await expectContained(page, 320);
+
+  const managerHeadingMargin = await page.locator('#intake-title').evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).scrollMarginTop));
+
+  await destination(page, 'Gallery').click();
+  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  const managerNav = page.locator('.manager-nav');
+  const controlRow = page.locator('.gallery-control-row');
+  const mosaicControl = page.locator('.gallery-mosaic__open').last();
+  await mosaicControl.scrollIntoViewIfNeeded();
+  const [managerNavBox, controlRowBox, mosaicControlBox, scrollY, stickyOffset, galleryHeadingMargin, mosaicMargin] =
+    await Promise.all([
+      managerNav.boundingBox(),
+      controlRow.boundingBox(),
+      mosaicControl.boundingBox(),
+      page.evaluate(() => window.scrollY),
+      page.locator('.manager-shell').evaluate((element) =>
+        Number.parseFloat(getComputedStyle(element).getPropertyValue('--manager-sticky-offset'))),
+      page.locator('#gallery-workspace-title').evaluate((element) =>
+        Number.parseFloat(getComputedStyle(element).scrollMarginTop)),
+      mosaicControl.evaluate((element) => Number.parseFloat(getComputedStyle(element).scrollMarginTop)),
+    ]);
+  if (!managerNavBox || !controlRowBox || !mosaicControlBox) {
+    throw new Error('Narrow Gallery requires rendered navigation, control-row, and mosaic-control bounds.');
+  }
+  expect(stickyOffset, 'narrow Manager sticky offset').toBe(169);
+  expect(managerNavBox.height, 'two-row Manager navigation fits its declared offset').toBeLessThanOrEqual(stickyOffset);
+  expect(managerNavBox.height, 'two-row Manager navigation consumes the declared offset').toBeGreaterThan(stickyOffset - 1);
+  expect(await boxesIntersect(managerNav, controlRow), 'Manager navigation and Gallery control row').toBe(false);
+  const managerToGalleryGap = controlRowBox.y - (managerNavBox.y + managerNavBox.height);
+  expect(managerToGalleryGap, 'Gallery row does not overlap the Manager navigation')
+    .toBeGreaterThanOrEqual(-GEOMETRY_TOLERANCE);
+  expect(managerToGalleryGap, 'Gallery row begins at the Manager navigation bottom')
+    .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+  expect(Math.abs(controlRowBox.y - stickyOffset), 'sticky Gallery row uses the declared Manager offset')
+    .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+  const combinedStickyBottom = Math.max(
+    managerNavBox.y + managerNavBox.height,
+    controlRowBox.y + controlRowBox.height,
+  );
+  expect(scrollY, 'the 320 mosaic target is measured after scrolling').toBeGreaterThan(0);
+  expect(mosaicControlBox.y, 'scrolled 320 mosaic target clears the measured sticky stack')
+    .toBeGreaterThanOrEqual(combinedStickyBottom - GEOMETRY_TOLERANCE);
+  const managerTracks = await measureGridTracks(page.locator('.manager-nav nav'));
+  expect(managerTracks, 'Manager destination topology').toHaveLength(3);
+  expect(managerHeadingMargin, 'narrow Manager heading scroll margin').toBe(stickyOffset + 12);
+  expect(galleryHeadingMargin, 'narrow Gallery heading scroll margin').toBe(stickyOffset + 190 + 12);
+  expect(mosaicMargin, 'narrow Gallery mosaic-control scroll margin').toBe(stickyOffset + 190 + 12);
+  await expectContained(page, 320);
 });
 
 test('manager shell and media grid turn over exactly at their breakpoints', async ({ page }) => {
@@ -398,6 +584,7 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await page.setViewportSize({ width, height: 900 });
 
     await destination(page, 'Intake').click();
+    await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
     await expectTouchTargets(page, '.intake-search .button', `intake filter at ${width}`);
     await expectTouchTargets(page, '.intake-search .text-button', `intake clear at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type .intake-card-actions a', `intake download at ${width}`);
@@ -492,6 +679,325 @@ test('active export progress stays reachable and contained outside Gallery on na
     .toBeVisible();
 });
 
+test('Library first photo intersects the initial 390 by 844 viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: makeMedia(6), nextCursor: null } },
+    event: { storedMediaCount: 6 },
+    exports: [],
+    galleryAudienceSummary: {
+      albumPhotoCount: 0,
+      albumEntryCount: 0,
+      albumLink: { active: true, sharedAt: '2026-09-19T20:00:00Z' },
+      guestGalleryVisible: false,
+      guestGalleryPublishedCount: 0,
+    },
+  });
+  await page.goto(managerUrl);
+  await destination(page, 'Gallery').click();
+  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+
+  const firstPhoto = page.locator('.gallery-mosaic__item').first();
+  await expect(firstPhoto).toBeVisible();
+  // Keep the fold assertion ahead of the new obstruction selector so RED records the incumbent
+  // layout defect even before the control-row structure exists.
+  const initialBounds = await firstPhoto.boundingBox();
+  if (!initialBounds) throw new Error('The first Library photo must have rendered bounds.');
+  expect(initialBounds.y, 'first Library photo starts inside the initial viewport')
+    .toBeLessThan(844);
+
+  const obstructions = [page.locator('.manager-nav'), page.locator('.gallery-control-row')] as const;
+  const fold = await measureFoldBelowObstructions(firstPhoto, obstructions, 844);
+  expect(fold.top).toBeLessThan(844);
+  expect(fold.top).toBeGreaterThanOrEqual(fold.effectiveVisibleTop);
+  expect(fold.visibleHeight).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  const obstructionBoxes = await Promise.all(obstructions.map((obstruction) => obstruction.boundingBox()));
+  for (const box of obstructionBoxes) {
+    if (!box) throw new Error('Every sticky obstruction must have rendered bounds.');
+    expect(fold.top, 'first Library photo clears each sticky obstruction')
+      .toBeGreaterThanOrEqual(box.y + box.height);
+  }
+
+  await expectTouchTargets(page, '.gallery-mode-switch--three button', 'Gallery mode control at 390');
+  await expectContained(page, 390);
+
+  const controlRow = page.locator('.gallery-control-row');
+  const contextDetails = page.locator('.gallery-context-disclosure');
+  expect(await contextDetails.evaluate((details) => ({
+    parentClass: details.parentElement?.className ?? null,
+    previousSiblingClass: details.previousElementSibling?.className ?? null,
+  })), 'Gallery context stays in normal flow beside the direct-child sticky row').toEqual({
+    parentClass: 'manager-gallery',
+    previousSiblingClass: 'gallery-control-row',
+  });
+  const contextSummary = contextDetails.getByText('About this Gallery view', { exact: true });
+  const contextCopy = contextDetails.getByText(
+    'Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.',
+    { exact: true },
+  );
+  const liveLinkCopy = contextDetails.getByText(/Album link live—later saved membership/u);
+  await expect(contextCopy).toBeHidden();
+  await expect(liveLinkCopy).toBeHidden();
+  expect((await measureTarget(contextSummary)).height, 'Gallery context summary height')
+    .toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  const collapsedControlRow = await controlRow.boundingBox();
+  if (!collapsedControlRow) throw new Error('Collapsed Gallery controls require rendered bounds.');
+  await contextSummary.focus();
+  await page.keyboard.press('Enter');
+  await expect(contextDetails).toHaveAttribute('open', '');
+  await expect(contextCopy).toBeVisible();
+  await expect(liveLinkCopy).toBeVisible();
+  await expectContained(page, 390);
+  const [contextBox, firstAfterContext, expandedControlRow] = await Promise.all([
+    contextDetails.boundingBox(),
+    firstPhoto.boundingBox(),
+    controlRow.boundingBox(),
+  ]);
+  if (!contextBox || !firstAfterContext || !expandedControlRow) {
+    throw new Error('Expanded Gallery context requires control and photo geometry.');
+  }
+  expect(expandedControlRow.height, 'expanded context does not enlarge the sticky obstruction')
+    .toBeCloseTo(collapsedControlRow.height, 1);
+  expect(contextBox.y + contextBox.height, 'expanded Gallery context does not cover the first photo')
+    .toBeLessThanOrEqual(firstAfterContext.y + 1);
+
+  const stickyTarget = page.locator('.gallery-mosaic__open').first();
+  await stickyTarget.evaluate((element) => {
+    const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    window.scrollTo(0, element.getBoundingClientRect().top + window.scrollY);
+    document.documentElement.style.scrollBehavior = previousScrollBehavior;
+  });
+  const [obstructingManagerNav, obstructingControlRow, obstructedTarget, scrollBeforeNative] = await Promise.all([
+    page.locator('.manager-nav').boundingBox(),
+    controlRow.boundingBox(),
+    stickyTarget.boundingBox(),
+    page.evaluate(() => window.scrollY),
+  ]);
+  if (!obstructingManagerNav || !obstructingControlRow || !obstructedTarget) {
+    throw new Error('The native Library focus path requires an initially obstructed target and sticky bounds.');
+  }
+  expect(obstructedTarget.y, 'Library target starts underneath the sticky Gallery row')
+    .toBeLessThan(obstructingControlRow.y + obstructingControlRow.height - GEOMETRY_TOLERANCE);
+  expect(obstructedTarget.y + obstructedTarget.height, 'obstructed Library target intersects the sticky stack')
+    .toBeGreaterThan(obstructingManagerNav.y + obstructingManagerNav.height);
+
+  await stickyTarget.evaluate((element) => {
+    const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    element.scrollIntoView({ block: 'start', inline: 'nearest' });
+    element.focus({ preventScroll: true });
+    document.documentElement.style.scrollBehavior = previousScrollBehavior;
+  });
+  await expect(stickyTarget).toBeFocused();
+  const [managerNavBox, stickyControlRow, stickyTargetBox, scrollAfterNative] = await Promise.all([
+    page.locator('.manager-nav').boundingBox(),
+    controlRow.boundingBox(),
+    stickyTarget.boundingBox(),
+    page.evaluate(() => window.scrollY),
+  ]);
+  if (!managerNavBox || !stickyControlRow || !stickyTargetBox) {
+    throw new Error('Sticky Gallery focus requires every obstruction and target bound.');
+  }
+  expect(scrollBeforeNative - scrollAfterNative, 'native Library focus makes a real scroll transition')
+    .toBeGreaterThan(GEOMETRY_TOLERANCE);
+  expect(stickyControlRow.y, 'Gallery control row sticks below the Manager navigation')
+    .toBeGreaterThanOrEqual(managerNavBox.y + managerNavBox.height - GEOMETRY_TOLERANCE);
+  expect(stickyTargetBox.y, 'focused mosaic control clears the actual Manager navigation')
+    .toBeGreaterThanOrEqual(managerNavBox.y + managerNavBox.height - GEOMETRY_TOLERANCE);
+  expect(stickyTargetBox.y, 'focused mosaic control clears the actual sticky Gallery row')
+    .toBeGreaterThanOrEqual(stickyControlRow.y + stickyControlRow.height - GEOMETRY_TOLERANCE);
+
+  await contextSummary.focus();
+  await page.keyboard.press('Enter');
+  await expect(contextDetails).not.toHaveAttribute('open', '');
+  await expect(contextCopy).toBeHidden();
+  await page.evaluate(() => window.scrollTo(0, 0));
+
+  const exportDetails = page.locator('.gallery-export__details');
+  const exportSummary = exportDetails.getByText('What the complete download includes', { exact: true });
+  const exportCopy = exportDetails.getByText(
+    'Every delivered photo, the photo manifest, and the printable and private guestbook files. Search and Album picks do not change this.',
+    { exact: true },
+  );
+  await expect(exportCopy).toBeHidden();
+  expect((await measureTarget(exportSummary)).height, 'complete download summary height')
+    .toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  await exportSummary.focus();
+  await page.keyboard.press('Enter');
+  await expect(exportDetails).toHaveAttribute('open', '');
+  await expect(exportCopy).toBeVisible();
+  await expectContained(page, 390);
+  const [exportBox, firstAfterExport] = await Promise.all([
+    exportDetails.boundingBox(),
+    firstPhoto.boundingBox(),
+  ]);
+  if (!exportBox || !firstAfterExport) throw new Error('Expanded export detail requires photo geometry.');
+  expect(exportBox.y + exportBox.height, 'expanded export detail does not cover the first photo')
+    .toBeLessThanOrEqual(firstAfterExport.y + 1);
+});
+
+test('audience failure stays below the mobile Gallery sticky row', async ({ page }) => {
+  let audienceReadShouldFail = true;
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: makeMedia(6), nextCursor: null } },
+    event: { storedMediaCount: 6 },
+    exports: [],
+  });
+  const audienceRoute = `**/api/manage/events/${EVENT_FIXTURE.id}/gallery/summary`;
+  await page.unroute(audienceRoute);
+  await page.route(audienceRoute, async (route) => {
+    if (!audienceReadShouldFail) {
+      await route.fulfill({
+        json: {
+          data: {
+            summary: {
+              albumPhotoCount: 0,
+              albumEntryCount: 0,
+              albumLink: { active: false, sharedAt: null },
+              guestGalleryVisible: true,
+              guestGalleryPublishedCount: 6,
+            },
+          },
+          requestId: 'audience-responsive-success',
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 503,
+      json: {
+        code: 'INTERNAL_ERROR',
+        message: 'The Gallery audience status is temporarily unavailable while the event audience is being refreshed.',
+        requestId: 'audience-responsive-failure',
+      },
+    });
+  });
+
+  for (const width of [390, 320]) {
+    audienceReadShouldFail = true;
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(managerUrl);
+    await destination(page, 'Gallery').click();
+    await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+
+    const controlRow = page.locator('.gallery-control-row');
+    const managerGallery = page.locator('.manager-gallery');
+    const audienceFailure = page.locator('.state-card--error').filter({
+      hasText: 'The Gallery audience status is temporarily unavailable',
+    });
+    const retry = audienceFailure.getByRole('button', { name: 'Try again' });
+    await expect(audienceFailure, `audience failure at ${width}`).toBeVisible();
+    expect(await audienceFailure.evaluate((failure) => ({
+      parentClass: failure.parentElement?.className ?? null,
+      previousSiblingClass: failure.previousElementSibling?.className ?? null,
+    })), `audience failure is a direct normal-flow sibling at ${width}`).toEqual({
+      parentClass: 'manager-gallery',
+      previousSiblingClass: 'gallery-control-row',
+    });
+
+    const [failureRowBox, failureBox, managerGalleryBox, failureBudget, failurePosition] = await Promise.all([
+      controlRow.boundingBox(),
+      audienceFailure.boundingBox(),
+      managerGallery.boundingBox(),
+      page.locator('.manager-shell').evaluate((element) =>
+        Number.parseFloat(getComputedStyle(element).getPropertyValue('--gallery-control-obstruction'))),
+      audienceFailure.evaluate((failure) => getComputedStyle(failure).position),
+    ]);
+    if (!failureRowBox || !failureBox || !managerGalleryBox) {
+      throw new Error(`Audience failure requires state, parent, and Gallery control bounds at ${width}.`);
+    }
+    expect(failurePosition, `audience failure stays in normal flow at ${width}`).toBe('static');
+    expect(Math.abs(failureBox.x - managerGalleryBox.x), `audience failure shares its parent left edge at ${width}`)
+      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(
+      Math.abs(
+        failureBox.x + failureBox.width - (managerGalleryBox.x + managerGalleryBox.width),
+      ),
+      `audience failure shares its parent right edge at ${width}`,
+    ).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(failureBox.y, `audience failure starts after the Gallery control row at ${width}`)
+      .toBeGreaterThanOrEqual(failureRowBox.y + failureRowBox.height - GEOMETRY_TOLERANCE);
+    expect(failureRowBox.height, `failed audience read stays inside the successful-row obstruction budget at ${width}`)
+      .toBeLessThanOrEqual(failureBudget);
+    const failureOverflow = await measureOverflow(audienceFailure);
+    expect(failureOverflow.scrollWidth, `audience failure content stays contained at ${width}`)
+      .toBeLessThanOrEqual(failureOverflow.clientWidth + 1);
+    await expectContained(page, width);
+    const retrySize = await measureTarget(retry);
+    expect(retrySize.width, `audience Retry width at ${width}`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+    expect(retrySize.height, `audience Retry height at ${width}`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+
+    const downstreamControl = page.locator('.gallery-mosaic__open').first();
+    await downstreamControl.evaluate((element) => {
+      const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+      document.documentElement.style.scrollBehavior = 'auto';
+      window.scrollTo(0, element.getBoundingClientRect().top + window.scrollY);
+      document.documentElement.style.scrollBehavior = previousScrollBehavior;
+    });
+    const [obstructingManagerNav, obstructingStickyRow, obstructedDownstream, scrollBeforeNative] = await Promise.all([
+      page.locator('.manager-nav').boundingBox(),
+      controlRow.boundingBox(),
+      downstreamControl.boundingBox(),
+      page.evaluate(() => window.scrollY),
+    ]);
+    if (!obstructingManagerNav || !obstructingStickyRow || !obstructedDownstream) {
+      throw new Error(`Audience failure requires an initially obstructed downstream target at ${width}.`);
+    }
+    expect(obstructedDownstream.y, `downstream target starts underneath the sticky Gallery row at ${width}`)
+      .toBeLessThan(obstructingStickyRow.y + obstructingStickyRow.height - GEOMETRY_TOLERANCE);
+    expect(
+      obstructedDownstream.y + obstructedDownstream.height,
+      `obstructed downstream target intersects the sticky stack at ${width}`,
+    ).toBeGreaterThan(obstructingManagerNav.y + obstructingManagerNav.height);
+
+    await downstreamControl.evaluate((element) => {
+      const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+      document.documentElement.style.scrollBehavior = 'auto';
+      element.scrollIntoView({ block: 'start', inline: 'nearest' });
+      element.focus({ preventScroll: true });
+      document.documentElement.style.scrollBehavior = previousScrollBehavior;
+    });
+    await expect(downstreamControl, `downstream Library control is focused at ${width}`).toBeFocused();
+    const [managerNavBox, stickyRowBox, downstreamBox, scrollAfterNative] = await Promise.all([
+      page.locator('.manager-nav').boundingBox(),
+      controlRow.boundingBox(),
+      downstreamControl.boundingBox(),
+      page.evaluate(() => window.scrollY),
+    ]);
+    if (!managerNavBox || !stickyRowBox || !downstreamBox) {
+      throw new Error(`Audience failure focus clearance requires rendered bounds at ${width}.`);
+    }
+    expect(
+      scrollBeforeNative - scrollAfterNative,
+      `native downstream focus makes a real scroll transition at ${width}`,
+    ).toBeGreaterThan(GEOMETRY_TOLERANCE);
+    expect(stickyRowBox.y, `Gallery row sticks below Manager navigation at ${width}`)
+      .toBeGreaterThanOrEqual(managerNavBox.y + managerNavBox.height - GEOMETRY_TOLERANCE);
+    expect(downstreamBox.y, `focused downstream content clears Manager navigation at ${width}`)
+      .toBeGreaterThanOrEqual(managerNavBox.y + managerNavBox.height - GEOMETRY_TOLERANCE);
+    expect(downstreamBox.y, `focused downstream content clears the actual Gallery sticky row at ${width}`)
+      .toBeGreaterThanOrEqual(stickyRowBox.y + stickyRowBox.height - GEOMETRY_TOLERANCE);
+
+    audienceReadShouldFail = false;
+    await retry.click();
+    await expect(audienceFailure, `audience failure clears after Retry at ${width}`).toHaveCount(0);
+    await expect(page.locator('.gallery-audience-summary')).toContainText('Album: 0 photos');
+    const [successfulRowBox, successfulBudget] = await Promise.all([
+      controlRow.boundingBox(),
+      page.locator('.manager-shell').evaluate((element) =>
+        Number.parseFloat(getComputedStyle(element).getPropertyValue('--gallery-control-obstruction'))),
+    ]);
+    if (!successfulRowBox) throw new Error(`Successful audience read requires Gallery control bounds at ${width}.`);
+    expect(successfulBudget, `audience state does not change the obstruction budget at ${width}`)
+      .toBe(failureBudget);
+    expect(successfulRowBox.height, `successful audience row fits its obstruction budget at ${width}`)
+      .toBeLessThanOrEqual(successfulBudget);
+    expect(failureRowBox.height, `failed audience state does not enlarge the successful Gallery row at ${width}`)
+      .toBeLessThanOrEqual(successfulRowBox.height + GEOMETRY_TOLERANCE);
+  }
+});
+
 test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reachable and contained', async ({ page }) => {
   const rows = makeMedia(4, 'unpublished');
   await stubManagerRoutes(page, {
@@ -504,7 +1010,20 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
 
   for (const width of [320, 390]) {
     await page.setViewportSize({ width, height: 844 });
-    await page.getByRole('button', { name: 'Library' }).click();
+    const modeSwitch = page.getByRole('group', { name: 'Gallery mode' });
+    const libraryMode = modeSwitch.getByRole('button', { name: 'Library' });
+    if (width === 320) {
+      const modeTracks = await measureGridTracks(page.locator('.gallery-mode-switch--three'));
+      expect(modeTracks, 'Gallery modes stack at 320').toHaveLength(1);
+      await expectTouchTargets(page, '.gallery-mode-switch--three button', 'Gallery mode control at 320');
+      for (const name of ['Library', 'Album', 'Guest gallery'] as const) {
+        const modeControl = modeSwitch.getByRole('button', { name });
+        await expect(modeControl, `${name} remains reachable at 320`).toBeVisible();
+        await modeControl.click();
+        await expect(modeControl, `${name} can be selected at 320`).toHaveAttribute('aria-pressed', 'true');
+      }
+    }
+    await libraryMode.click();
     const selecting = page.getByRole('button', { name: /^(Select photos|Done selecting)$/u });
     if (await selecting.getAttribute('aria-pressed') === 'true') await selecting.click();
     await page.getByRole('button', { name: 'Select photos' }).click();
@@ -517,6 +1036,37 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
     const tray = page.getByRole('region', { name: 'Album' });
     await expect(tray).toBeVisible();
     await expectTouchTargets(page, '.selection-tray button', `selection tray at ${width}`);
+    if (width === 320) {
+      const trayCopy = tray.locator('.selection-tray__count span');
+      const [trayBounds, trayCopyBounds, textFragments] = await Promise.all([
+        tray.boundingBox(),
+        trayCopy.boundingBox(),
+        trayCopy.evaluate((element) => {
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          return Array.from(range.getClientRects()).map((rect) => ({
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          })).filter((rect) => rect.width > 0 && rect.height > 0);
+        }),
+      ]);
+      if (!trayBounds || !trayCopyBounds) throw new Error('Initial 320 tray copy requires rendered bounds.');
+      expect.soft(trayCopyBounds.x, 'initial 320 tray explanation starts inside the tray')
+        .toBeGreaterThanOrEqual(trayBounds.x - GEOMETRY_TOLERANCE);
+      expect.soft(trayCopyBounds.x + trayCopyBounds.width, 'initial 320 tray explanation ends inside the tray')
+        .toBeLessThanOrEqual(trayBounds.x + trayBounds.width + GEOMETRY_TOLERANCE);
+      for (const [index, fragment] of textFragments.entries()) {
+        expect.soft(fragment.x, `initial 320 tray fragment ${index + 1} starts inside the tray`)
+          .toBeGreaterThanOrEqual(trayBounds.x - GEOMETRY_TOLERANCE);
+        expect.soft(fragment.x + fragment.width, `initial 320 tray fragment ${index + 1} ends inside the tray`)
+          .toBeLessThanOrEqual(trayBounds.x + trayBounds.width + GEOMETRY_TOLERANCE);
+        expect.soft(fragment.x + fragment.width, `initial 320 tray fragment ${index + 1} ends inside the viewport`)
+          .toBeLessThanOrEqual(width + GEOMETRY_TOLERANCE);
+      }
+      expect.soft(await measureViewportEscapes(tray), 'initial 320 tray descendants stay contained').toEqual([]);
+    }
 
     const lastTile = page.locator('.gallery-mosaic__item').last();
     // The tray is fixed, so browser visibility alone cannot tell that it occludes a
@@ -560,18 +1110,385 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
   await expect(tray).toBeVisible();
   // The persistent Manager-owned Undo is a sibling of the Gallery workspace.
   // Prove its shared-shell collision rule at both sides of the layout breakpoint.
-  for (const width of [761, 768, 840, 899, 900, 1024, 390]) {
+  for (const width of [761, 768, 840, 899, 900, 1024, 390, 320]) {
     await page.setViewportSize({ width, height: 844 });
-    const reopenedTray = await tray.boundingBox();
-    const undoBounds = await undo.boundingBox();
-    if (!reopenedTray || !undoBounds) throw new Error(`Undo geometry missing at ${width}`);
+    if (width === 390 || width === 320) {
+      await page.locator('.gallery-mosaic__open').last().scrollIntoViewIfNeeded();
+    }
+    const managerNav = page.locator('.manager-nav');
+    const galleryControlRow = page.locator('.gallery-control-row');
+    const trayCopy = tray.locator('.selection-tray__count span');
+    const [managerNavBounds, galleryControlRowBounds, reopenedTray, undoBounds, trayCopyBounds] = await Promise.all([
+      managerNav.boundingBox(),
+      galleryControlRow.boundingBox(),
+      tray.boundingBox(),
+      undo.boundingBox(),
+      trayCopy.boundingBox(),
+    ]);
+    if (!managerNavBounds || !galleryControlRowBounds || !reopenedTray || !undoBounds || !trayCopyBounds) {
+      throw new Error(`Manager navigation, Gallery controls, Undo, tray, and copy geometry is required at ${width}`);
+    }
     const separated = reopenedTray.y + reopenedTray.height <= undoBounds.y + 1
       || undoBounds.y + undoBounds.height <= reopenedTray.y + 1
       || reopenedTray.x + reopenedTray.width <= undoBounds.x + 1
       || undoBounds.x + undoBounds.width <= reopenedTray.x + 1;
     expect(separated, `Undo does not cover the reopened tray at ${width}`).toBe(true);
     await expectTouchTargets(page, '.album-undo__bar button', `Undo controls at ${width}`);
+    await expectTouchTargets(page, '.selection-tray button', `reopened selection tray at ${width}`);
+    if (width === 761 || width === 899) {
+      const [managerOffset, galleryObstruction] = await page.locator('.manager-shell').evaluate((element) => {
+        const style = getComputedStyle(element);
+        return [
+          Number.parseFloat(style.getPropertyValue('--manager-sticky-offset')),
+          Number.parseFloat(style.getPropertyValue('--gallery-control-obstruction')),
+        ];
+      });
+      expect.soft(Math.abs(undoBounds.y - managerOffset!), `Undo uses only the Manager offset at ${width}`)
+        .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+      expect.soft(undoBounds.y, `Undo is not displaced by the non-sticky Gallery obstruction at ${width}`)
+        .toBeLessThan(managerOffset! + galleryObstruction! - GEOMETRY_TOLERANCE);
+    }
+    if (width === 390 || width === 320) {
+      expect(await boxesIntersect(managerNav, galleryControlRow), `Manager navigation and Gallery controls at ${width}`)
+        .toBe(false);
+      expect(await boxesIntersect(managerNav, undo), `Manager navigation and reopened Undo at ${width}`).toBe(false);
+      expect(await boxesIntersect(managerNav, tray), `Manager navigation and reopened tray at ${width}`).toBe(false);
+      expect.soft(await boxesIntersect(galleryControlRow, undo), `Gallery controls and reopened Undo at ${width}`)
+        .toBe(false);
+      expect(await boxesIntersect(galleryControlRow, tray), `Gallery controls and reopened tray at ${width}`).toBe(false);
+      expect(await boxesIntersect(undo, tray), `reopened Undo and tray at ${width}`).toBe(false);
+      expect(galleryControlRowBounds.y, `Gallery controls start below Manager navigation at ${width}`)
+        .toBeGreaterThanOrEqual(managerNavBounds.y + managerNavBounds.height - GEOMETRY_TOLERANCE);
+      expect.soft(undoBounds.y, `reopened Undo starts below the full sticky stack at ${width}`)
+        .toBeGreaterThanOrEqual(
+          galleryControlRowBounds.y + galleryControlRowBounds.height - GEOMETRY_TOLERANCE,
+        );
+      expect(reopenedTray.y, `reopened tray starts below Undo at ${width}`)
+        .toBeGreaterThanOrEqual(undoBounds.y + undoBounds.height - GEOMETRY_TOLERANCE);
+      const documentSize = await measureDocument(page);
+      expect(documentSize.scrollWidth, `simultaneous-state document at ${width}`)
+        .toBeLessThanOrEqual(documentSize.clientWidth + GEOMETRY_TOLERANCE);
+      for (const [name, box] of [
+        ['Manager navigation', managerNavBounds],
+        ['Gallery controls', galleryControlRowBounds],
+        ['reopened Undo', undoBounds],
+        ['reopened selection tray', reopenedTray],
+      ] as const) {
+        expect(box.x, `${name} starts inside the ${width} viewport`).toBeGreaterThanOrEqual(-GEOMETRY_TOLERANCE);
+        expect(box.x + box.width, `${name} ends inside the ${width} viewport`)
+          .toBeLessThanOrEqual(width + GEOMETRY_TOLERANCE);
+        expect(box.y, `${name} starts inside the 844 viewport`).toBeGreaterThanOrEqual(-GEOMETRY_TOLERANCE);
+        expect(box.y + box.height, `${name} ends inside the 844 viewport`)
+          .toBeLessThanOrEqual(844 + GEOMETRY_TOLERANCE);
+      }
+      for (const [name, locator, containerBox] of [
+        ['Undo', undo.locator('button'), undoBounds],
+        ['selection tray', tray.locator('button'), reopenedTray],
+      ] as const) {
+        for (let index = 0; index < await locator.count(); index += 1) {
+          const controlBox = await locator.nth(index).boundingBox();
+          if (!controlBox) throw new Error(`${name} control ${index + 1} requires rendered bounds at ${width}`);
+          expect(controlBox.x, `${name} control ${index + 1} starts inside its surface`)
+            .toBeGreaterThanOrEqual(containerBox.x - GEOMETRY_TOLERANCE);
+          expect(controlBox.x + controlBox.width, `${name} control ${index + 1} ends inside its surface`)
+            .toBeLessThanOrEqual(containerBox.x + containerBox.width + GEOMETRY_TOLERANCE);
+          expect(controlBox.y, `${name} control ${index + 1} starts inside its surface`)
+            .toBeGreaterThanOrEqual(containerBox.y - GEOMETRY_TOLERANCE);
+          expect(controlBox.y + controlBox.height, `${name} control ${index + 1} ends inside its surface`)
+            .toBeLessThanOrEqual(containerBox.y + containerBox.height + GEOMETRY_TOLERANCE);
+        }
+      }
+      const textFragments = await trayCopy.evaluate((element) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return Array.from(range.getClientRects()).map((rect) => ({
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        })).filter((rect) => rect.width > 0 && rect.height > 0);
+      });
+      expect(textFragments, `tray explanation has rendered text fragments at ${width}`).not.toEqual([]);
+      expect.soft(trayCopyBounds.x, `tray explanation starts inside the tray at ${width}`)
+        .toBeGreaterThanOrEqual(reopenedTray.x - GEOMETRY_TOLERANCE);
+      expect.soft(trayCopyBounds.x + trayCopyBounds.width, `tray explanation ends inside the tray at ${width}`)
+        .toBeLessThanOrEqual(reopenedTray.x + reopenedTray.width + GEOMETRY_TOLERANCE);
+      for (const [index, fragment] of textFragments.entries()) {
+        expect.soft(fragment.x, `tray text fragment ${index + 1} starts inside the tray at ${width}`)
+          .toBeGreaterThanOrEqual(reopenedTray.x - GEOMETRY_TOLERANCE);
+        expect.soft(fragment.x + fragment.width, `tray text fragment ${index + 1} ends inside the tray at ${width}`)
+          .toBeLessThanOrEqual(reopenedTray.x + reopenedTray.width + GEOMETRY_TOLERANCE);
+        expect.soft(fragment.x, `tray text fragment ${index + 1} starts inside the viewport at ${width}`)
+          .toBeGreaterThanOrEqual(-GEOMETRY_TOLERANCE);
+        expect.soft(fragment.x + fragment.width, `tray text fragment ${index + 1} ends inside the viewport at ${width}`)
+          .toBeLessThanOrEqual(width + GEOMETRY_TOLERANCE);
+      }
+      expect.soft(await measureViewportEscapes(tray), `reopened tray descendants stay contained at ${width}`)
+        .toEqual([]);
+    }
   }
+
+  await page.setViewportSize({ width: 320, height: 568 });
+  const shortManagerNav = page.locator('.manager-nav');
+  const shortGalleryRow = page.locator('.gallery-control-row');
+  const shortUndo = page.locator('.album-undo__bar');
+  const shortTray = page.locator('.selection-tray');
+  const shortTrayCopy = shortTray.locator('.selection-tray__count span');
+  await page.locator('.gallery-mosaic__open').last().scrollIntoViewIfNeeded();
+  const [
+    shortManagerNavBox,
+    shortGalleryRowBox,
+    shortUndoBox,
+    shortTrayBox,
+    shortGalleryPosition,
+    shortUndoStyle,
+    shortTrayStyle,
+  ] = await Promise.all([
+    shortManagerNav.boundingBox(),
+    shortGalleryRow.boundingBox(),
+    shortUndo.boundingBox(),
+    shortTray.boundingBox(),
+    shortGalleryRow.evaluate((element) => getComputedStyle(element).position),
+    shortUndo.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { maxHeight: style.maxHeight, overflowY: style.overflowY };
+    }),
+    shortTray.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { position: style.position, maxHeight: style.maxHeight, overflowY: style.overflowY };
+    }),
+  ]);
+  if (!shortManagerNavBox || !shortGalleryRowBox || !shortUndoBox || !shortTrayBox) {
+    throw new Error('The 320 by 568 state requires Manager, Gallery, Undo, and tray bounds.');
+  }
+  expect.soft(shortGalleryPosition, 'Gallery controls unstick at 320 by 568').toBe('static');
+  expect.soft(shortTrayStyle.position, 'selection tray returns to document flow at 320 by 568').toBe('static');
+  expect.soft(shortUndoStyle.overflowY, 'Undo has a reachable constrained-height scroll surface').toBe('auto');
+  expect.soft(shortTrayStyle.overflowY, 'selection tray has a reachable constrained-height scroll surface').toBe('auto');
+  expect.soft(Number.parseFloat(shortUndoStyle.maxHeight), 'Undo has its 116px constrained-height budget')
+    .toBeCloseTo(116, 5);
+  expect.soft(Number.parseFloat(shortTrayStyle.maxHeight), 'tray consumes the remaining 263px safe-height budget')
+    .toBeCloseTo(263, 5);
+  expect.soft(await boxesIntersect(shortGalleryRow, shortTray), 'Gallery controls and tray at 320 by 568')
+    .toBe(false);
+  expect.soft(await boxesIntersect(shortUndo, shortTray), 'Undo and tray at 320 by 568').toBe(false);
+  expect(await boxesIntersect(shortManagerNav, shortUndo), 'Manager navigation and Undo at 320 by 568').toBe(false);
+  expect(await boxesIntersect(shortManagerNav, shortTray), 'Manager navigation and tray at 320 by 568').toBe(false);
+
+  const shortDestinations = shortManagerNav.locator('button');
+  expect(await shortDestinations.count(), 'all Manager destinations remain rendered at 320 by 568').toBe(6);
+  for (let index = 0; index < await shortDestinations.count(); index += 1) {
+    const control = shortDestinations.nth(index);
+    await control.focus();
+    await expect(control).toBeFocused();
+    const controlBox = await control.boundingBox();
+    if (!controlBox) throw new Error(`Manager destination ${index + 1} requires short-height bounds.`);
+    expect(controlBox.y, `Manager destination ${index + 1} starts inside the nav at 320 by 568`)
+      .toBeGreaterThanOrEqual(shortManagerNavBox.y - GEOMETRY_TOLERANCE);
+    expect(controlBox.y + controlBox.height, `Manager destination ${index + 1} ends inside the nav at 320 by 568`)
+      .toBeLessThanOrEqual(shortManagerNavBox.y + shortManagerNavBox.height + GEOMETRY_TOLERANCE);
+  }
+
+  const shortGalleryControls = shortGalleryRow.locator('button');
+  const libraryMode = shortGalleryRow.getByRole('button', { name: 'Library' });
+  const [shortManagerOffset, shortUndoDock, shortGalleryRowMargin, shortGalleryControlMargins] =
+    await shortGalleryRow.evaluate((element) => {
+      const shell = element.closest('.manager-shell');
+      if (!shell) throw new Error('Short-height Gallery controls require the Manager shell.');
+      const shellStyle = getComputedStyle(shell);
+      return [
+        Number.parseFloat(shellStyle.getPropertyValue('--manager-sticky-offset')),
+        Number.parseFloat(shellStyle.getPropertyValue('--manager-short-undo-dock')),
+        Number.parseFloat(getComputedStyle(element).scrollMarginTop),
+        Array.from(element.querySelectorAll('button')).map((control) =>
+          Number.parseFloat(getComputedStyle(control).scrollMarginTop)),
+      ] as const;
+    });
+  const shortGalleryDockMargin = shortManagerOffset + shortUndoDock;
+  expect.soft(shortGalleryRowMargin, 'Gallery row consumes the Manager plus Undo dock at 320 by 568')
+    .toBeCloseTo(shortGalleryDockMargin, 5);
+  expect.soft(shortGalleryControlMargins, 'Gallery mode controls consume the Manager plus Undo dock at 320 by 568')
+    .toEqual(Array.from({ length: await shortGalleryControls.count() }, () => shortGalleryDockMargin));
+
+  await page.evaluate(() => {
+    const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    document.documentElement.style.scrollBehavior = previousScrollBehavior;
+  });
+  const [obstructedLibraryBox, obstructingUndoBox] = await Promise.all([
+    libraryMode.boundingBox(),
+    shortUndo.boundingBox(),
+  ]);
+  if (!obstructedLibraryBox || !obstructingUndoBox) {
+    throw new Error('The native Gallery focus path requires an initially obstructed control and visible Undo.');
+  }
+  expect(obstructedLibraryBox.y + obstructedLibraryBox.height, 'Library starts above the fixed Undo dock')
+    .toBeLessThanOrEqual(obstructingUndoBox.y + obstructingUndoBox.height);
+
+  await libraryMode.evaluate((element) => {
+    const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    element.scrollIntoView({ block: 'start', inline: 'nearest' });
+    element.focus({ preventScroll: true });
+    document.documentElement.style.scrollBehavior = previousScrollBehavior;
+  });
+  await expect(libraryMode).toBeFocused();
+  const [focusedGalleryRowBox, libraryModeBox, visibleUndoBox] = await Promise.all([
+    shortGalleryRow.boundingBox(),
+    libraryMode.boundingBox(),
+    shortUndo.boundingBox(),
+  ]);
+  if (!focusedGalleryRowBox || !libraryModeBox || !visibleUndoBox) {
+    throw new Error('Focused short-height Gallery controls require row, control, and Undo bounds.');
+  }
+  expect(focusedGalleryRowBox.y, 'start-aligned Gallery row starts below Undo at 320 by 568')
+    .toBeGreaterThanOrEqual(visibleUndoBox.y + visibleUndoBox.height - GEOMETRY_TOLERANCE);
+  expect(focusedGalleryRowBox.y + focusedGalleryRowBox.height, 'start-aligned Gallery row ends inside the 568 viewport')
+    .toBeLessThanOrEqual(568 + GEOMETRY_TOLERANCE);
+  expect(libraryModeBox.y, 'focused Gallery mode starts below Undo at 320 by 568')
+    .toBeGreaterThanOrEqual(visibleUndoBox.y + visibleUndoBox.height - GEOMETRY_TOLERANCE);
+  expect(libraryModeBox.y + libraryModeBox.height, 'focused Gallery mode ends inside the 568 viewport')
+    .toBeLessThanOrEqual(568 + GEOMETRY_TOLERANCE);
+  await expectTouchTargets(page, '.gallery-control-row button', 'Gallery controls at 320 by 568');
+  for (let index = 0; index < await shortGalleryControls.count(); index += 1) {
+    const control = shortGalleryControls.nth(index);
+    await control.evaluate((element) => element.focus({ preventScroll: true }));
+    await expect(control).toBeFocused();
+    const [controlBox, surfaceBox] = await Promise.all([control.boundingBox(), shortGalleryRow.boundingBox()]);
+    if (!controlBox || !surfaceBox) throw new Error(`Gallery control ${index + 1} needs short-height bounds.`);
+    expect(controlBox.y, `Gallery control ${index + 1} starts below Undo at 320 by 568`)
+      .toBeGreaterThanOrEqual(visibleUndoBox.y + visibleUndoBox.height - GEOMETRY_TOLERANCE);
+    expect(controlBox.y, `Gallery control ${index + 1} starts inside its row at 320 by 568`)
+      .toBeGreaterThanOrEqual(surfaceBox.y - GEOMETRY_TOLERANCE);
+    expect(controlBox.y + controlBox.height, `Gallery control ${index + 1} ends inside its row at 320 by 568`)
+      .toBeLessThanOrEqual(surfaceBox.y + surfaceBox.height + GEOMETRY_TOLERANCE);
+    expect(controlBox.y + controlBox.height, `Gallery control ${index + 1} ends inside the 568 viewport`)
+      .toBeLessThanOrEqual(568 + GEOMETRY_TOLERANCE);
+  }
+  const shortAudienceSummary = shortGalleryRow.locator('.gallery-audience-summary');
+  await expect(shortAudienceSummary).toBeVisible();
+  const [audienceSummaryBox, visibleGalleryRowBox] = await Promise.all([
+    shortAudienceSummary.boundingBox(),
+    shortGalleryRow.boundingBox(),
+  ]);
+  if (!audienceSummaryBox || !visibleGalleryRowBox) {
+    throw new Error('The short-height audience summary requires row and content bounds.');
+  }
+  expect(audienceSummaryBox.y, 'audience summary starts inside the Gallery row at 320 by 568')
+    .toBeGreaterThanOrEqual(visibleGalleryRowBox.y - GEOMETRY_TOLERANCE);
+  expect(audienceSummaryBox.y + audienceSummaryBox.height, 'audience summary ends inside the Gallery row at 320 by 568')
+    .toBeLessThanOrEqual(visibleGalleryRowBox.y + visibleGalleryRowBox.height + GEOMETRY_TOLERANCE);
+  expect(audienceSummaryBox.y + audienceSummaryBox.height, 'audience summary ends inside the 568 viewport')
+    .toBeLessThanOrEqual(568 + GEOMETRY_TOLERANCE);
+
+  const undoMessage = shortUndo.locator('.album-undo__message');
+  await expect(undoMessage).toHaveText('1 photo picked for Album. Nothing was published.');
+  await undoMessage.scrollIntoViewIfNeeded();
+  await expect(undoMessage).toBeVisible();
+  const [undoMessageBox, undoMessageSurfaceBox, undoMessageStyle] = await Promise.all([
+    undoMessage.boundingBox(),
+    shortUndo.boundingBox(),
+    undoMessage.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { display: style.display, textOverflow: style.textOverflow };
+    }),
+  ]);
+  if (!undoMessageBox || !undoMessageSurfaceBox) {
+    throw new Error('The complete Undo message requires visible short-height bounds.');
+  }
+  expect(undoMessageStyle.display, 'Undo message is not hidden at 320 by 568').not.toBe('none');
+  expect(undoMessageStyle.textOverflow, 'Undo message is not ellipsized at 320 by 568').not.toBe('ellipsis');
+  expect(undoMessageBox.y, 'Undo message starts inside its scroll surface at 320 by 568')
+    .toBeGreaterThanOrEqual(undoMessageSurfaceBox.y - GEOMETRY_TOLERANCE);
+  expect(undoMessageBox.y + undoMessageBox.height, 'Undo message ends inside its scroll surface at 320 by 568')
+    .toBeLessThanOrEqual(undoMessageSurfaceBox.y + undoMessageSurfaceBox.height + GEOMETRY_TOLERANCE);
+  for (let index = 0; index < await shortUndo.locator('button').count(); index += 1) {
+    const control = shortUndo.locator('button').nth(index);
+    await control.scrollIntoViewIfNeeded();
+    await control.focus();
+    await expect(control).toBeFocused();
+    const [controlBox, surfaceBox] = await Promise.all([control.boundingBox(), shortUndo.boundingBox()]);
+    if (!controlBox || !surfaceBox) throw new Error(`Undo control ${index + 1} needs short-height bounds.`);
+    expect(controlBox.height, `Undo control ${index + 1} height at 320 by 568`).toBeGreaterThanOrEqual(44);
+    expect(controlBox.y, `Undo control ${index + 1} starts inside Undo at 320 by 568`)
+      .toBeGreaterThanOrEqual(surfaceBox.y - GEOMETRY_TOLERANCE);
+    expect(controlBox.y + controlBox.height, `Undo control ${index + 1} ends inside Undo at 320 by 568`)
+      .toBeLessThanOrEqual(surfaceBox.y + surfaceBox.height + GEOMETRY_TOLERANCE);
+  }
+
+  await shortTray.evaluate((element) => {
+    const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    element.scrollIntoView({ block: 'end' });
+    document.documentElement.style.scrollBehavior = previousScrollBehavior;
+  });
+  const [flowTrayBox, fixedUndoBox, fixedManagerNavBox] = await Promise.all([
+    shortTray.boundingBox(),
+    shortUndo.boundingBox(),
+    shortManagerNav.boundingBox(),
+  ]);
+  if (!flowTrayBox || !fixedUndoBox || !fixedManagerNavBox) {
+    throw new Error('The short-height flow tray requires tray, Undo, and Manager bounds.');
+  }
+  expect(flowTrayBox.y, 'flow tray starts below Undo at 320 by 568')
+    .toBeGreaterThanOrEqual(fixedUndoBox.y + fixedUndoBox.height - GEOMETRY_TOLERANCE);
+  expect(flowTrayBox.y + flowTrayBox.height, 'flow tray preserves its bottom safe-area gap at 320 by 568')
+    .toBeLessThanOrEqual(568 - 12 + GEOMETRY_TOLERANCE);
+  expect(await boxesIntersect(shortUndo, shortTray), 'scrolled Undo and tray at 320 by 568').toBe(false);
+  expect(await boxesIntersect(shortManagerNav, shortTray), 'scrolled Manager navigation and tray at 320 by 568')
+    .toBe(false);
+  for (let index = 0; index < await shortTray.locator('button').count(); index += 1) {
+    const control = shortTray.locator('button').nth(index);
+    await control.scrollIntoViewIfNeeded();
+    await control.focus();
+    await expect(control).toBeFocused();
+    const [controlBox, surfaceBox] = await Promise.all([control.boundingBox(), shortTray.boundingBox()]);
+    if (!controlBox || !surfaceBox) throw new Error(`Tray control ${index + 1} needs short-height bounds.`);
+    expect(controlBox.height, `tray control ${index + 1} height at 320 by 568`).toBeGreaterThanOrEqual(44);
+    expect(controlBox.y, `tray control ${index + 1} starts inside the tray at 320 by 568`)
+      .toBeGreaterThanOrEqual(surfaceBox.y - GEOMETRY_TOLERANCE);
+    expect(controlBox.y + controlBox.height, `tray control ${index + 1} ends inside the tray at 320 by 568`)
+      .toBeLessThanOrEqual(surfaceBox.y + surfaceBox.height + GEOMETRY_TOLERANCE);
+  }
+  await expect(shortTrayCopy).toHaveText(
+    'Pick changes Album membership only. Remove from Album keeps every delivered photo in Library; neither action publishes to the Guest gallery.',
+  );
+  await shortTrayCopy.scrollIntoViewIfNeeded();
+  await expect(shortTrayCopy).toBeVisible();
+  const shortTrayCopyStyle = await shortTrayCopy.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { display: style.display, textOverflow: style.textOverflow };
+  });
+  expect(shortTrayCopyStyle.display, 'tray consequence copy is not hidden at 320 by 568').not.toBe('none');
+  expect(shortTrayCopyStyle.textOverflow, 'tray consequence copy is not ellipsized at 320 by 568')
+    .not.toBe('ellipsis');
+  const shortFragments = await shortTrayCopy.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    return Array.from(range.getClientRects()).map((rect) => ({
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+    })).filter((rect) => rect.width > 0 && rect.height > 0);
+  });
+  const visibleTrayBox = await shortTray.boundingBox();
+  if (!visibleTrayBox) throw new Error('The short-height tray copy requires tray bounds.');
+  for (const [index, fragment] of shortFragments.entries()) {
+    expect(fragment.x, `short-height tray fragment ${index + 1} starts inside the tray`)
+      .toBeGreaterThanOrEqual(visibleTrayBox.x - GEOMETRY_TOLERANCE);
+    expect(fragment.x + fragment.width, `short-height tray fragment ${index + 1} ends inside the tray`)
+      .toBeLessThanOrEqual(visibleTrayBox.x + visibleTrayBox.width + GEOMETRY_TOLERANCE);
+    expect(fragment.y, `short-height tray fragment ${index + 1} starts inside the visible tray scroller`)
+      .toBeGreaterThanOrEqual(visibleTrayBox.y - GEOMETRY_TOLERANCE);
+    expect(fragment.y + fragment.height, `short-height tray fragment ${index + 1} ends inside the visible tray scroller`)
+      .toBeLessThanOrEqual(visibleTrayBox.y + visibleTrayBox.height + GEOMETRY_TOLERANCE);
+  }
+  const shortDocument = await measureDocument(page);
+  expect(shortDocument.scrollWidth, 'document at 320 by 568')
+    .toBeLessThanOrEqual(shortDocument.clientWidth + GEOMETRY_TOLERANCE);
+  await page.setViewportSize({ width: 390, height: 844 });
 
   await page.getByRole('button', { name: 'Clear selection' }).click();
   await page.getByRole('button', { name: /^Album \(1\)$/u }).click();
@@ -579,6 +1496,7 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
   await expectTouchTargets(page, '.gallery-album button', 'Album controls at 390');
 
   await page.getByRole('button', { name: 'Guest gallery' }).click();
+  await page.getByText('About this Gallery view', { exact: true }).click();
   await expect(page.getByText(/Publish and Hide change what event guests see/u)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Shared' })).toHaveCount(0);
   await expectTouchTargets(page, '.gallery-shared button', 'Guest-gallery controls at 390');

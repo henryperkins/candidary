@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../worker/app';
 import { ExportsRepository } from '../../worker/db/exports';
 import { DEFAULT_EVENT_THEME_CONFIG } from '../../shared/event-theme';
+import { EVENT_START_MIGRATION_SENTINEL } from '../../shared/rsvp';
 import { guestEventView } from '../../worker/http/event-view';
 import {
   applySettings,
@@ -73,6 +74,110 @@ describe('complete private event journey', () => {
     expect(Object.keys(archive)).toEqual(['photos/001-first-look.png', 'media.csv']);
     expect(strFromU8(archive['media.csv']!)).toContain('The first look');
     expect(await testEnv.MEDIA_BUCKET.head(ready!.manifestObjectKey!)).not.toBeNull();
+  });
+});
+
+describe('guest read surfaces', () => {
+  beforeEach(resetDatabase);
+
+  const unavailableMessage = 'Shared photos and Guestbook become available when photo sharing opens.';
+
+  it('refuses direct Gallery and My Deliveries probes before the shared boundary', async () => {
+    const rows = [
+      { name: 'Scheduled unpaused read gate', uploadsEnabled: 1, legacyRsvp: false },
+      { name: 'Scheduled paused read gate', uploadsEnabled: 0, legacyRsvp: false },
+      { name: 'Legacy RSVP read gate', uploadsEnabled: 0, legacyRsvp: true },
+    ];
+
+    for (const row of rows) {
+      const access = await eventAccess(row.name, false);
+      await testEnv.DB.prepare(`
+        UPDATE events
+        SET gallery_visible = 1, uploads_enabled = ?, photos_open_from = NULL,
+            event_start_at = ?, rsvp_enabled = ?, rsvp_deadline_at = ?, rsvp_roster_version = ?
+        WHERE id = ?
+      `).bind(
+        row.uploadsEnabled,
+        row.legacyRsvp ? EVENT_START_MIGRATION_SENTINEL : '2099-09-19T21:00:00.000Z',
+        row.legacyRsvp ? 1 : 0,
+        row.legacyRsvp ? '2099-09-19T20:30:00.000Z' : access.event.rsvpDeadlineAt,
+        row.legacyRsvp ? 1 : 0,
+        access.event.id,
+      ).run();
+
+      for (const suffix of ['gallery', 'contributions']) {
+        const response = await createApp().request(
+          `/api/event/${access.event.slug}/${suffix}`,
+          { headers: { cookie: access.guest.cookie } },
+          testEnv,
+        );
+        const body = await response.json<any>();
+        expect(response.status, `${row.name} ${suffix}`).toBe(409);
+        expect(body, `${row.name} ${suffix}`).toMatchObject({
+          code: 'EVENT_PHASE_CONFLICT',
+          message: unavailableMessage,
+        });
+        expect(body, `${row.name} ${suffix} leaks no contribution envelope`).not.toHaveProperty('data');
+      }
+    }
+  });
+
+  it.each([
+    ['scheduled post-start paused', {
+      eventStartAt: '2020-01-01T00:00:00.000Z', uploadsEnabled: 0, rsvpEnabled: 0,
+    }],
+    ['legacy waiting', {
+      eventStartAt: EVENT_START_MIGRATION_SENTINEL, uploadsEnabled: 0, rsvpEnabled: 0,
+    }],
+    ['legacy photos-primary', {
+      eventStartAt: EVENT_START_MIGRATION_SENTINEL, uploadsEnabled: 1, rsvpEnabled: 0,
+    }],
+  ] as const)('keeps My Deliveries available during %s', async (_label, state) => {
+    const access = await eventAccess(`Available ${_label}`);
+    const media = await uploadPending(access, `available-${_label.replaceAll(' ', '-')}`);
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET event_start_at = ?, uploads_enabled = ?, rsvp_enabled = ?, photos_open_from = NULL
+      WHERE id = ?
+    `).bind(
+      state.eventStartAt,
+      state.uploadsEnabled,
+      state.rsvpEnabled,
+      access.event.id,
+    ).run();
+
+    const response = await createApp().request(
+      `/api/event/${access.event.slug}/contributions`,
+      { headers: { cookie: access.guest.cookie } },
+      testEnv,
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data.media).toEqual([
+      expect.objectContaining({ id: media.id, originalFilename: media.originalFilename }),
+    ]);
+  });
+
+  it('keeps Gallery visibility independent after a paused event reaches the boundary', async () => {
+    const access = await eventAccess('Paused gallery setting');
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET event_start_at = '2020-01-01T00:00:00.000Z', uploads_enabled = 0,
+          photos_open_from = NULL, gallery_visible = 0
+      WHERE id = ?
+    `).bind(access.event.id).run();
+
+    const hidden = await createApp().request(`/api/event/${access.event.slug}/gallery`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect(hidden.status).toBe(403);
+    expect((await hidden.json<any>()).code).toBe('GALLERY_HIDDEN');
+
+    await testEnv.DB.prepare('UPDATE events SET gallery_visible = 1 WHERE id = ?')
+      .bind(access.event.id).run();
+    const visible = await createApp().request(`/api/event/${access.event.slug}/gallery`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect(visible.status).toBe(200);
   });
 });
 

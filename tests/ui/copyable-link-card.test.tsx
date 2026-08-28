@@ -148,6 +148,28 @@ describe('CopyableLinkCard', () => {
     expectSensitiveLinkHidden(container, SECRET_A);
   });
 
+  it('reports the settled sensitive copy outcome to a rotation save gate', async () => {
+    const onCopyOutcome = vi.fn();
+    installClipboard(vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Permission denied')));
+    render(
+      <CopyableLinkCard
+        label="Management link"
+        value={SECRET_A}
+        sensitive
+        onCopyOutcome={onCopyOutcome}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy management link' }));
+    await waitFor(() => expect(onCopyOutcome).toHaveBeenLastCalledWith('copied'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy management link' }));
+    await waitFor(() => expect(onCopyOutcome).toHaveBeenLastCalledWith('unavailable'));
+    expect(onCopyOutcome.mock.calls).toEqual([['copied'], ['unavailable']]);
+  });
+
   it.each(['rejected', 'absent'] as const)(
     '%s Clipboard refocuses and selects the complete sensitive fallback on every Copy attempt',
     async (clipboardState) => {

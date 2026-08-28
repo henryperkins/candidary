@@ -34,6 +34,7 @@ import {
   assertLegacyPointerCutoverEnabled,
   assertWorkerIngressEnabled,
 } from '../media-upload-release';
+import type { UploadAuthority } from '../services/upload-authority';
 
 export interface MediaRow {
   id: string;
@@ -76,6 +77,123 @@ export interface MediaRow {
  */
 const PHOTO_INTAKE_OPEN_SQL
   = 'uploads_enabled = 1 AND COALESCE(photos_open_from, event_start_at) <= ?';
+
+/** The event-state predicate this authority's writes must satisfy, in SQL. */
+export function intakePredicateSql(authority: UploadAuthority): string {
+  return authority.kind === 'guest'
+    ? PHOTO_INTAKE_OPEN_SQL
+    : 'management_access_expires_at > ?';
+}
+
+/** The `EXISTS (…)` fragment proving this authority is still authorized, in SQL. */
+export function authorityLivenessSql(authority: UploadAuthority): string {
+  if (authority.kind === 'manager-account') {
+    return `EXISTS (
+      SELECT 1
+      FROM event_sessions AS upload_authority_actor
+      JOIN event_access_tokens AS upload_authority_token
+        ON upload_authority_token.id = upload_authority_actor.access_token_id
+       AND upload_authority_token.event_id = upload_authority_actor.event_id
+      JOIN events AS upload_authority_event
+        ON upload_authority_event.id = upload_authority_actor.event_id
+      JOIN host_sessions AS upload_authority_host_session
+        ON upload_authority_host_session.id = ?
+       AND upload_authority_host_session.account_id = ?
+      JOIN host_accounts AS upload_authority_account
+        ON upload_authority_account.id = ?
+       AND upload_authority_account.id = upload_authority_host_session.account_id
+      JOIN event_hosts AS upload_authority_membership
+        ON upload_authority_membership.event_id = upload_authority_actor.event_id
+       AND upload_authority_membership.account_id = upload_authority_account.id
+      WHERE upload_authority_actor.id = ?
+        AND upload_authority_actor.event_id = ?
+        AND upload_authority_actor.manager_upload_account_id = ?
+        AND upload_authority_actor.role = 'manager'
+        AND upload_authority_actor.can_claim_owner = 0
+        AND upload_authority_actor.revoked_at IS NULL
+        AND upload_authority_actor.expires_at > ?
+        AND upload_authority_token.role = 'manager'
+        AND upload_authority_token.revoked_at IS NULL
+        AND upload_authority_token.expires_at > ?
+        AND upload_authority_event.deleted_at IS NULL
+        AND upload_authority_event.management_access_expires_at > ?
+        AND upload_authority_host_session.revoked_at IS NULL
+        AND upload_authority_host_session.expires_at > ?
+        AND upload_authority_host_session.auth_version = upload_authority_account.auth_version
+        AND upload_authority_account.disabled_at IS NULL
+        AND upload_authority_membership.role IN ('owner', 'cohost')
+    )`;
+  }
+
+  const role = authority.kind === 'guest' ? 'guest' : 'manager';
+  const eventExpiryColumn = authority.kind === 'guest'
+    ? 'guest_access_expires_at'
+    : 'management_access_expires_at';
+  return `EXISTS (
+    SELECT 1
+    FROM event_sessions AS upload_authority_session
+    JOIN event_access_tokens AS upload_authority_token
+      ON upload_authority_token.id = upload_authority_session.access_token_id
+     AND upload_authority_token.event_id = upload_authority_session.event_id
+    JOIN events AS upload_authority_event
+      ON upload_authority_event.id = upload_authority_session.event_id
+    WHERE upload_authority_session.id = ?
+      AND upload_authority_session.id = ?
+      AND upload_authority_session.event_id = ?
+      AND upload_authority_session.role = '${role}'
+      AND upload_authority_session.manager_upload_account_id IS NULL
+      AND upload_authority_session.revoked_at IS NULL
+      AND upload_authority_session.expires_at > ?
+      AND upload_authority_token.role = '${role}'
+      AND upload_authority_token.revoked_at IS NULL
+      AND upload_authority_token.expires_at > ?
+      AND upload_authority_event.deleted_at IS NULL
+      AND upload_authority_event.${eventExpiryColumn} > ?
+  )`;
+}
+
+/** Bindings in the exact order consumed by `authorityLivenessSql`. */
+export function authorityLivenessBindings(
+  authority: UploadAuthority,
+  eventId: string,
+  nowIso: string,
+): unknown[] {
+  if (authority.kind === 'manager-account') {
+    return [
+      authority.hostSessionId,
+      authority.accountId,
+      authority.accountId,
+      authority.actorSessionId,
+      eventId,
+      authority.accountId,
+      nowIso,
+      nowIso,
+      nowIso,
+      nowIso,
+    ];
+  }
+  return [
+    authority.actorSessionId,
+    authority.eventSessionId,
+    eventId,
+    nowIso,
+    nowIso,
+    nowIso,
+  ];
+}
+
+function sameUploadAuthority(left: UploadAuthority, right: UploadAuthority): boolean {
+  if (left.kind !== right.kind || left.actorSessionId !== right.actorSessionId) return false;
+  if (left.kind === 'guest') {
+    return right.kind === 'guest' && left.eventSessionId === right.eventSessionId;
+  }
+  if (left.kind === 'manager-link') {
+    return right.kind === 'manager-link' && left.eventSessionId === right.eventSessionId;
+  }
+  return right.kind === 'manager-account'
+    && left.hostSessionId === right.hostSessionId
+    && left.accountId === right.accountId;
+}
 
 /**
  * A row the host moved to Recently deleted.
@@ -237,6 +355,7 @@ export interface ReserveMediaRecord {
   id: string;
   eventId: string;
   uploaderSessionId: string;
+  authority: UploadAuthority;
   objectKey: string;
   originalFilename: string;
   mimeType: SupportedImageType;
@@ -247,6 +366,10 @@ export interface ReserveMediaRecord {
   reservationExpiresAt: string;
   createdAt: string;
 }
+
+export type UploadIngressOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: 'forbidden' | 'conflict' };
 
 export type ReserveMediaBatchResult =
   | { status: 'accepted'; media: MediaRecord }
@@ -588,6 +711,25 @@ export interface MediaObjectDeletionClaim {
   canonicalKeys: string[];
 }
 
+export interface ManagerLinkRotationMediaInput {
+  eventId: string;
+  predecessorId: string;
+  replacementId: string;
+  rotatedAt: string;
+  rotationMarker: string;
+}
+
+export interface ManagerLinkRotationMediaBatch {
+  statements: D1PreparedStatement[];
+  deletionClaimResultOffset: number;
+}
+
+export type UploadCancelOutcome =
+  | { kind: 'canceled'; claim: MediaObjectDeletionClaim }
+  | { kind: 'already-canceled' }
+  | { kind: 'forbidden' }
+  | { kind: 'conflict' };
+
 export interface ManagerMediaOptions {
   status?: PublicationStatus;
   guestName?: string;
@@ -664,6 +806,28 @@ export function buildManagerMediaQuery(
 
 export class MediaRepository {
   constructor(private readonly db: D1Database) {}
+
+  private async authorityIsLive(
+    authority: UploadAuthority,
+    eventId: string,
+    nowIso: string,
+  ): Promise<boolean> {
+    const permitted = await this.db.prepare(`
+      SELECT 1 AS permitted WHERE ${authorityLivenessSql(authority)}
+    `).bind(...authorityLivenessBindings(authority, eventId, nowIso)).first<number>('permitted');
+    return permitted === 1;
+  }
+
+  private async authorityFailure(
+    authority: UploadAuthority,
+    eventId: string,
+    nowIso: string,
+  ): Promise<ApiError> {
+    if (!await this.authorityIsLive(authority, eventId, nowIso)) {
+      return new ApiError('RESOURCE_FORBIDDEN', 'You no longer have access to this upload.', 403);
+    }
+    return new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload changed while it was being refreshed.', 409);
+  }
 
   async getById(id: string): Promise<MediaRecord | null> {
     const row = await this.db.prepare('SELECT * FROM media WHERE id = ?').bind(id).first<MediaRow>();
@@ -1252,7 +1416,7 @@ export class MediaRepository {
   async claimReservationIngress(input: {
     mediaId: string;
     eventId: string;
-    uploaderSessionId: string;
+    authority: UploadAuthority;
     sourceObjectKey: string;
     mimeType: SupportedImageType;
     byteSize: number;
@@ -1262,7 +1426,7 @@ export class MediaRepository {
     claimToken: string;
     claimedAt: string;
     leaseExpiresAt: string;
-  }): Promise<ClaimedMediaIngress | null> {
+  }): Promise<UploadIngressOutcome<ClaimedMediaIngress>> {
     assertWorkerIngressEnabled();
     const row = await this.db.prepare(`
       UPDATE media_object_promotions
@@ -1292,10 +1456,11 @@ export class MediaRepository {
         )
         AND EXISTS (
           SELECT 1 FROM events AS e
-          WHERE e.id = ? AND e.deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
+          WHERE e.id = ? AND e.deleted_at IS NULL AND ${intakePredicateSql(input.authority)}
         )
+        AND ${authorityLivenessSql(input.authority)}
       RETURNING *
-    `).bind(
+    `).bind(...[
       input.claimToken,
       input.leaseExpiresAt,
       `buffer:${input.sha256}`,
@@ -1316,22 +1481,35 @@ export class MediaRepository {
       input.sourceObjectKey,
       input.mediaId,
       input.eventId,
-      input.uploaderSessionId,
+      input.authority.actorSessionId,
       input.sourceObjectKey,
       input.mimeType,
       input.byteSize,
       input.claimedAt,
       input.eventId,
       input.claimedAt,
-    ).first<MediaObjectPromotionRow>();
-    if (!row) return null;
+      ...authorityLivenessBindings(input.authority, input.eventId, input.claimedAt),
+    ]).first<MediaObjectPromotionRow>();
+    if (!row) {
+      return {
+        ok: false,
+        reason: await this.authorityIsLive(input.authority, input.eventId, input.claimedAt)
+          ? 'conflict'
+          : 'forbidden',
+      };
+    }
     const media = await this.getById(input.mediaId);
     if (!media) throw new Error('Claimed media ingress row disappeared.');
-    return { promotion: mapPromotion(row), media, claimToken: input.claimToken };
+    return {
+      ok: true,
+      value: { promotion: mapPromotion(row), media, claimToken: input.claimToken },
+    };
   }
 
   async commitReservationIngress(input: {
     mediaId: string;
+    eventId: string;
+    authority: UploadAuthority;
     claimToken: string;
     finalObjectKey: string;
     byteSize: number;
@@ -1341,13 +1519,12 @@ export class MediaRepository {
     committedAt: string;
     capturedAt: string | null;
     timelineAt: string;
-  }): Promise<boolean> {
+  }): Promise<UploadIngressOutcome<null>> {
     if (input.timelineAt === MEDIA_TIMELINE_SENTINEL) {
       throw new Error('A stored photo requires a non-sentinel timeline instant.');
     }
     assertWorkerIngressEnabled();
     const current = await this.getById(input.mediaId);
-    if (!current || current.uploadState !== 'reserved') return false;
     const results = await this.db.batch([
       this.db.prepare(`
         UPDATE media
@@ -1355,7 +1532,8 @@ export class MediaRepository {
             byte_size = ?, width = ?, height = ?,
             upload_state = 'stored', stored_at = ?, captured_at = ?, timeline_at = ?,
             preview_object_key = NULL
-        WHERE id = ? AND upload_state = 'reserved' AND deleted_at IS NULL
+        WHERE id = ? AND event_id = ? AND uploader_session_id = ?
+          AND upload_state = 'reserved' AND deleted_at IS NULL
           AND object_key = (
             SELECT source_object_key FROM media_object_promotions WHERE media_id = ?
           )
@@ -1379,10 +1557,11 @@ export class MediaRepository {
           AND EXISTS (
             SELECT 1 FROM events AS e
             WHERE e.id = media.event_id AND e.deleted_at IS NULL
-              AND ${PHOTO_INTAKE_OPEN_SQL}
+              AND ${intakePredicateSql(input.authority)}
           )
+          AND ${authorityLivenessSql(input.authority)}
         RETURNING id
-      `).bind(
+      `).bind(...[
         input.finalObjectKey,
         input.byteSize,
         input.width,
@@ -1391,6 +1570,8 @@ export class MediaRepository {
         input.capturedAt,
         input.timelineAt,
         input.mediaId,
+        input.eventId,
+        input.authority.actorSessionId,
         input.mediaId,
         input.mediaId,
         input.committedAt,
@@ -1401,7 +1582,8 @@ export class MediaRepository {
         input.committedAt,
         input.finalObjectKey,
         input.committedAt,
-      ),
+        ...authorityLivenessBindings(input.authority, input.eventId, input.committedAt),
+      ]),
       this.db.prepare(`
         UPDATE events
         SET reserved_media_count = reserved_media_count - 1,
@@ -1409,7 +1591,7 @@ export class MediaRepository {
             stored_media_count = stored_media_count + 1,
             stored_bytes = stored_bytes + ?
         WHERE id = ? AND changes() = 1
-      `).bind(current.declaredByteSize, input.byteSize, current.eventId),
+      `).bind(current?.declaredByteSize ?? 0, input.byteSize, input.eventId),
       this.db.prepare(`
         UPDATE media_object_promotions
         SET state = 'cleanup_pending', final_pointer_committed = 1,
@@ -1425,9 +1607,16 @@ export class MediaRepository {
         input.claimToken,
       ),
     ]);
-    return (results[0]?.results?.length ?? 0) === 1
+    const committed = (results[0]?.results?.length ?? 0) === 1
       && (results[1]?.meta.changes ?? 0) === 1
       && (results[2]?.meta.changes ?? 0) === 1;
+    if (committed) return { ok: true, value: null };
+    return {
+      ok: false,
+      reason: await this.authorityIsLive(input.authority, input.eventId, input.committedAt)
+        ? 'conflict'
+        : 'forbidden',
+    };
   }
 
   async recordPromotionSource(
@@ -2157,6 +2346,9 @@ export class MediaRepository {
   }
 
   private async idempotentRefreshConflict(input: ReserveMediaRecord): Promise<ApiError> {
+    if (!await this.authorityIsLive(input.authority, input.eventId, input.createdAt)) {
+      return new ApiError('RESOURCE_FORBIDDEN', 'You no longer have access to this upload.', 403);
+    }
     const promotion = await this.getPromotion((await this.getIdempotent(input))?.id ?? input.id);
     if (!promotion || promotion.state !== 'pending') {
       return new ApiError(
@@ -2167,9 +2359,20 @@ export class MediaRepository {
     }
     const intakeOpen = await this.db.prepare(`
       SELECT 1 AS permitted FROM events
-      WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
-    `).bind(input.eventId, input.createdAt).first<number>('permitted');
+      WHERE id = ? AND deleted_at IS NULL AND ${intakePredicateSql(input.authority)}
+        AND ${authorityLivenessSql(input.authority)}
+    `).bind(...[
+      input.eventId,
+      input.createdAt,
+      ...authorityLivenessBindings(input.authority, input.eventId, input.createdAt),
+    ]).first<number>('permitted');
     if (intakeOpen !== 1) {
+      if (!await this.authorityIsLive(input.authority, input.eventId, input.createdAt)) {
+        return new ApiError('RESOURCE_FORBIDDEN', 'You no longer have access to this upload.', 403);
+      }
+      if (input.authority.kind !== 'guest') {
+        return new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload changed while it was being refreshed.', 409);
+      }
       return new ApiError('UPLOADS_DISABLED', 'Photo uploads are paused for this event.', 409);
     }
     return new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload changed while it was being refreshed.', 409);
@@ -2178,7 +2381,13 @@ export class MediaRepository {
   private async refreshIdempotent(input: ReserveMediaRecord, existing: MediaRecord): Promise<MediaRecord> {
     if (existing.uploadState === 'stored') return existing;
     if (existing.uploadState === 'deleted') {
-      throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This photo was removed. Choose it again.', 409);
+      throw input.authority.kind === 'guest'
+        ? new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This photo was removed. Choose it again.', 409)
+        : new ApiError(
+            'UPLOAD_RESERVATION_CANCELED',
+            'This upload reservation was canceled.',
+            409,
+          );
     }
 
     if (existing.uploadState === 'reserved') {
@@ -2194,10 +2403,11 @@ export class MediaRepository {
           )
           AND EXISTS (
             SELECT 1 FROM events
-            WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
+            WHERE id = ? AND deleted_at IS NULL AND ${intakePredicateSql(input.authority)}
+              AND ${authorityLivenessSql(input.authority)}
           )
         RETURNING *
-      `).bind(
+      `).bind(...[
         input.reservationExpiresAt,
         input.guestName,
         input.caption,
@@ -2207,8 +2417,13 @@ export class MediaRepository {
         existing.objectKey,
         input.eventId,
         input.createdAt,
-      ).first<MediaRow>();
-      if (!refreshed) throw await this.idempotentRefreshConflict(input);
+        ...authorityLivenessBindings(input.authority, input.eventId, input.createdAt),
+      ]).first<MediaRow>();
+      if (!refreshed) {
+        const current = await this.getById(existing.id);
+        if (current?.uploadState === 'stored') return current;
+        throw await this.idempotentRefreshConflict(input);
+      }
       return mapMedia(refreshed);
     }
 
@@ -2225,12 +2440,13 @@ export class MediaRepository {
           )
           AND EXISTS (
             SELECT 1 FROM events
-            WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
+            WHERE id = ? AND deleted_at IS NULL AND ${intakePredicateSql(input.authority)}
+              AND ${authorityLivenessSql(input.authority)}
               AND reserved_media_count + stored_media_count < ?
               AND reserved_bytes + stored_bytes + ? <= ?
           )
         RETURNING id
-      `).bind(
+      `).bind(...[
         input.reservationExpiresAt,
         input.guestName,
         input.caption,
@@ -2241,10 +2457,11 @@ export class MediaRepository {
         existing.objectKey,
         input.eventId,
         input.createdAt,
+        ...authorityLivenessBindings(input.authority, input.eventId, input.createdAt),
         MAX_EVENT_MEDIA,
         input.declaredByteSize,
         MAX_EVENT_BYTES,
-      ),
+      ]),
       this.db.prepare(`
         UPDATE events
         SET reserved_media_count = reserved_media_count + 1,
@@ -2258,10 +2475,19 @@ export class MediaRepository {
     if (raced && raced.uploadState !== 'failed') return this.refreshIdempotent(input, raced);
     const promotion = await this.getPromotion(existing.id);
     if (!promotion || promotion.state !== 'pending') throw await this.idempotentRefreshConflict(input);
+    const authorityFailure = await this.authorityFailure(
+      input.authority,
+      input.eventId,
+      input.createdAt,
+    );
+    if (authorityFailure.code === 'RESOURCE_FORBIDDEN') throw authorityFailure;
     throw await this.capacityError(input.eventId);
   }
 
   async reserve(input: ReserveMediaRecord): Promise<MediaRecord> {
+    if (input.uploaderSessionId !== input.authority.actorSessionId) {
+      throw new ApiError('RESOURCE_FORBIDDEN', 'You no longer have access to this upload.', 403);
+    }
     if (!input.guestName || input.guestName.trim().length < 1 || input.guestName.trim().length > 80) {
       throw new ApiError('VALIDATION_FAILED', 'Enter your name before adding photos.', 422, {
         guestName: 'Your name is required.',
@@ -2280,10 +2506,19 @@ export class MediaRepository {
               reserved_bytes = reserved_bytes + ?
           WHERE id = ?
             AND deleted_at IS NULL
-            AND ${PHOTO_INTAKE_OPEN_SQL}
+            AND ${intakePredicateSql(input.authority)}
+            AND ${authorityLivenessSql(input.authority)}
             AND reserved_media_count + stored_media_count + recoverable_media_count < ?
             AND reserved_bytes + stored_bytes + recoverable_bytes + ? <= ?
-        `).bind(input.declaredByteSize, input.eventId, input.createdAt, MAX_EVENT_MEDIA, input.declaredByteSize, MAX_EVENT_BYTES),
+        `).bind(...[
+          input.declaredByteSize,
+          input.eventId,
+          input.createdAt,
+          ...authorityLivenessBindings(input.authority, input.eventId, input.createdAt),
+          MAX_EVENT_MEDIA,
+          input.declaredByteSize,
+          MAX_EVENT_BYTES,
+        ]),
         this.db.prepare(`
           INSERT INTO media (
             id, event_id, uploader_session_id, object_key, original_filename, mime_type,
@@ -2309,11 +2544,18 @@ export class MediaRepository {
       ]);
     } catch (error) {
       const raced = await this.getIdempotent(input);
-      if (raced) return raced;
+      if (raced?.uploadState === 'stored') return raced;
+      if (raced) return this.refreshIdempotent(input, raced);
       throw error;
     }
 
     if ((results[0]?.meta.changes ?? 0) !== 1) {
+      const authorityFailure = await this.authorityFailure(
+        input.authority,
+        input.eventId,
+        input.createdAt,
+      );
+      if (authorityFailure.code === 'RESOURCE_FORBIDDEN') throw authorityFailure;
       throw await this.capacityError(input.eventId);
     }
 
@@ -2328,7 +2570,10 @@ export class MediaRepository {
     // One instant for the whole batch, taken from the request that built it, so
     // every capacity and schedule guard below answers the same question.
     const reservedAt = inputs[0]!.createdAt;
-    if (inputs.some((input) => input.eventId !== eventId)) {
+    const authority = inputs[0]!.authority;
+    if (inputs.some((input) => input.eventId !== eventId
+      || input.uploaderSessionId !== input.authority.actorSessionId
+      || !sameUploadAuthority(input.authority, authority))) {
       throw new ApiError('VALIDATION_FAILED', 'Every photo in a batch must belong to the same event.', 422);
     }
 
@@ -2362,8 +2607,13 @@ export class MediaRepository {
       const event = await this.db.prepare(`
         SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes,
           recoverable_media_count, recoverable_bytes
-        FROM events WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
-      `).bind(eventId, reservedAt).first<{
+        FROM events WHERE id = ? AND deleted_at IS NULL AND ${intakePredicateSql(authority)}
+          AND ${authorityLivenessSql(authority)}
+      `).bind(...[
+        eventId,
+        reservedAt,
+        ...authorityLivenessBindings(authority, eventId, reservedAt),
+      ]).first<{
         reserved_media_count: number;
         stored_media_count: number;
         reserved_bytes: number;
@@ -2371,6 +2621,9 @@ export class MediaRepository {
         recoverable_media_count: number;
         recoverable_bytes: number;
       }>();
+      if (!event && !await this.authorityIsLive(authority, eventId, reservedAt)) {
+        throw new ApiError('RESOURCE_FORBIDDEN', 'You no longer have access to this upload.', 403);
+      }
       // Recently deleted still counts. A photo the host can still restore has
       // not released its slot or its bytes, so planning a batch against space it
       // only looks like it freed is how a later Restore would fail.
@@ -2405,10 +2658,21 @@ export class MediaRepository {
               UPDATE events
               SET reserved_media_count = reserved_media_count + ?,
                   reserved_bytes = reserved_bytes + ?
-              WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
+              WHERE id = ? AND deleted_at IS NULL AND ${intakePredicateSql(authority)}
+                AND ${authorityLivenessSql(authority)}
                 AND reserved_media_count + stored_media_count + recoverable_media_count + ? <= ?
                 AND reserved_bytes + stored_bytes + recoverable_bytes + ? <= ?
-            `).bind(accepted.length, totalBytes, eventId, reservedAt, accepted.length, MAX_EVENT_MEDIA, totalBytes, MAX_EVENT_BYTES),
+            `).bind(...[
+              accepted.length,
+              totalBytes,
+              eventId,
+              reservedAt,
+              ...authorityLivenessBindings(authority, eventId, reservedAt),
+              accepted.length,
+              MAX_EVENT_MEDIA,
+              totalBytes,
+              MAX_EVENT_BYTES,
+            ]),
             ...accepted.map(({ input }) => this.db.prepare(`
               INSERT INTO media (
                 id, event_id, uploader_session_id, object_key, original_filename, mime_type,
@@ -3001,18 +3265,17 @@ export class MediaRepository {
     return (await this.getById(mediaId))!;
   }
 
-  /**
-   * Win the right to delete a photo's bytes, and report exactly which keys.
-   *
-   * Every physical retirement path goes through here. The suppression transition
-   * is the claim: a key an active export holds, or a recoverable photo owns, or
-   * another pass already suppressed, simply does not appear in the result, and
-   * its bytes stay for the existing tombstone janitor to collect once the reason
-   * is gone. Nothing about this is best-effort — a key absent from the claim is
-   * a key this caller is not allowed to delete.
-   */
-  async claimMediaObjectDeletion(media: MediaRecord, claimedAt: string): Promise<MediaObjectDeletionClaim> {
-    const aliases: Array<{ bucket: 'legacy' | 'canonical'; key: string; kind: 'source' | 'final' | 'preview' }> = [
+  private mediaObjectDeletionClaimStatements(
+    media: MediaRecord,
+    claimedAt: string,
+    winnerDeletedAt?: string,
+    settledDeletedAt?: string,
+  ): D1PreparedStatement[] {
+    const aliases: Array<{
+      bucket: 'legacy' | 'canonical';
+      key: string;
+      kind: 'source' | 'final' | 'preview';
+    }> = [
       { bucket: media.objectBucketGeneration, key: media.objectKey, kind: 'source' },
       {
         bucket: 'canonical',
@@ -3029,12 +3292,33 @@ export class MediaRepository {
       aliases.push({ bucket: 'legacy', key: media.previewObjectKey, kind: 'preview' });
     }
 
+    const winnerSql = winnerDeletedAt === undefined ? '' : 'AND deleted_at = ?';
+    const winnerBindings = winnerDeletedAt === undefined ? [] : [winnerDeletedAt];
     const statements = aliases.map((alias) => this.db.prepare(`
       INSERT OR IGNORE INTO media_object_write_tombstones (
         bucket_generation, object_key, event_id, media_id, object_kind,
         next_check_at, created_at, updated_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
-    `).bind(alias.bucket, alias.key, media.eventId, media.id, alias.kind, claimedAt));
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM media
+        WHERE id = ? AND event_id = ?
+          AND upload_state = 'deleted' AND deleted_at IS NOT NULL AND trashed_at IS NULL
+          ${winnerSql}
+      )
+    `).bind(
+      alias.bucket,
+      alias.key,
+      media.eventId,
+      media.id,
+      alias.kind,
+      claimedAt,
+      claimedAt,
+      claimedAt,
+      media.id,
+      media.eventId,
+      ...winnerBindings,
+    ));
 
     statements.push(this.db.prepare(`
       UPDATE media_object_write_tombstones AS target
@@ -3049,6 +3333,7 @@ export class MediaRepository {
             AND m.upload_state = 'deleted'
             AND m.deleted_at IS NOT NULL
             AND m.trashed_at IS NULL
+            ${winnerDeletedAt === undefined ? '' : 'AND m.deleted_at = ?4'}
         )
         AND NOT EXISTS (
           SELECT 1 FROM export_media_entries AS e
@@ -3061,7 +3346,22 @@ export class MediaRepository {
           SELECT 1 FROM media_object_promotions AS p
           WHERE p.media_id = ?3 AND p.event_id = ?2
         )
-    `).bind(claimedAt, media.eventId, media.id));
+    `).bind(
+      claimedAt,
+      media.eventId,
+      media.id,
+      ...(winnerDeletedAt === undefined ? [] : [winnerDeletedAt]),
+    ));
+
+    if (settledDeletedAt !== undefined && winnerDeletedAt !== undefined) {
+      statements.push(this.db.prepare(`
+        UPDATE media
+        SET deleted_at = ?
+        WHERE id = ? AND event_id = ?
+          AND upload_state = 'deleted'
+          AND deleted_at = ? AND trashed_at IS NULL
+      `).bind(settledDeletedAt, media.id, media.eventId, winnerDeletedAt));
+    }
 
     statements.push(this.db.prepare(`
       SELECT bucket_generation, object_key FROM media_object_write_tombstones
@@ -3069,8 +3369,13 @@ export class MediaRepository {
         AND object_kind NOT IN ('export', 'cover')
         AND suppression_started_at = ?3
     `).bind(media.eventId, media.id, claimedAt));
+    return statements;
+  }
 
-    const results = await this.db.batch(statements);
+  private mediaObjectDeletionClaimFromResults(
+    media: Pick<MediaRecord, 'id' | 'eventId'>,
+    results: readonly D1Result[],
+  ): MediaObjectDeletionClaim {
     const claimed = (results.at(-1)?.results ?? []) as Array<{
       bucket_generation: 'legacy' | 'canonical';
       object_key: string;
@@ -3078,9 +3383,455 @@ export class MediaRepository {
     return {
       mediaId: media.id,
       eventId: media.eventId,
-      legacyKeys: claimed.filter((row) => row.bucket_generation === 'legacy').map((row) => row.object_key),
-      canonicalKeys: claimed.filter((row) => row.bucket_generation === 'canonical').map((row) => row.object_key),
+      legacyKeys: claimed
+        .filter((row) => row.bucket_generation === 'legacy')
+        .map((row) => row.object_key),
+      canonicalKeys: claimed
+        .filter((row) => row.bucket_generation === 'canonical')
+        .map((row) => row.object_key),
     };
+  }
+
+  /**
+   * Cancel every unresolved reservation owned by a predecessor link actor.
+   *
+   * Every statement carries the replacement token ID as its stable winner
+   * guard. None relies on the previous optional statement changing a row, so
+   * sessions, account actors, and link reservations may each be empty without
+   * cutting off work that follows them in the rotation transaction.
+   */
+  managerLinkRotationStatements(
+    input: ManagerLinkRotationMediaInput,
+  ): ManagerLinkRotationMediaBatch {
+    const replacementGuard = `EXISTS (
+      SELECT 1 FROM event_access_tokens AS replacement
+      WHERE replacement.id = ? AND replacement.event_id = ?
+        AND replacement.role = 'manager' AND replacement.revoked_at IS NULL
+    )`;
+    const linkOwner = `EXISTS (
+      SELECT 1 FROM event_sessions AS uploader
+      WHERE uploader.id = media.uploader_session_id
+        AND uploader.event_id = media.event_id
+        AND uploader.access_token_id = ?
+        AND uploader.role = 'manager'
+        AND uploader.manager_upload_account_id IS NULL
+    )`;
+    const statements = [
+      this.db.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count - COALESCE((
+              SELECT COUNT(*) FROM media
+              WHERE media.event_id = events.id
+                AND media.upload_state = 'reserved'
+                AND media.deleted_at IS NULL AND media.trashed_at IS NULL
+                AND ${linkOwner}
+            ), 0),
+            reserved_bytes = reserved_bytes - COALESCE((
+              SELECT SUM(media.declared_byte_size) FROM media
+              WHERE media.event_id = events.id
+                AND media.upload_state = 'reserved'
+                AND media.deleted_at IS NULL AND media.trashed_at IS NULL
+                AND ${linkOwner}
+            ), 0)
+        WHERE id = ? AND ${replacementGuard}
+      `).bind(
+        input.predecessorId,
+        input.predecessorId,
+        input.eventId,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        UPDATE media
+        SET upload_state = 'deleted', deleted_at = ?,
+            trashed_at = NULL, restore_until = NULL
+        WHERE event_id = ?
+          AND upload_state IN ('reserved', 'failed')
+          AND deleted_at IS NULL AND trashed_at IS NULL
+          AND ${linkOwner}
+          AND ${replacementGuard}
+      `).bind(
+        input.rotationMarker,
+        input.eventId,
+        input.predecessorId,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        DELETE FROM media_object_promotions
+        WHERE event_id = ?
+          AND media_id IN (
+            SELECT id FROM media
+            WHERE event_id = ? AND upload_state = 'deleted' AND deleted_at = ?
+          )
+          AND ${replacementGuard}
+      `).bind(
+        input.eventId,
+        input.eventId,
+        input.rotationMarker,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        INSERT OR IGNORE INTO media_object_write_tombstones (
+          bucket_generation, object_key, event_id, media_id, object_kind,
+          next_check_at, created_at, updated_at
+        )
+        SELECT object_bucket_generation, object_key, event_id, id, 'source', ?, ?, ?
+        FROM media
+        WHERE event_id = ? AND upload_state = 'deleted' AND deleted_at = ?
+          AND ${replacementGuard}
+      `).bind(
+        input.rotatedAt,
+        input.rotatedAt,
+        input.rotatedAt,
+        input.eventId,
+        input.rotationMarker,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        INSERT OR IGNORE INTO media_object_write_tombstones (
+          bucket_generation, object_key, event_id, media_id, object_kind,
+          next_check_at, created_at, updated_at
+        )
+        SELECT 'canonical', 'events/' || event_id || '/media/final/' || id,
+          event_id, id, 'final', ?, ?, ?
+        FROM media
+        WHERE event_id = ? AND upload_state = 'deleted' AND deleted_at = ?
+          AND ${replacementGuard}
+      `).bind(
+        input.rotatedAt,
+        input.rotatedAt,
+        input.rotatedAt,
+        input.eventId,
+        input.rotationMarker,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        INSERT OR IGNORE INTO media_object_write_tombstones (
+          bucket_generation, object_key, event_id, media_id, object_kind,
+          next_check_at, created_at, updated_at
+        )
+        SELECT 'legacy', 'events/' || event_id || '/previews/' || id || '.webp',
+          event_id, id, 'preview', ?, ?, ?
+        FROM media
+        WHERE event_id = ? AND upload_state = 'deleted' AND deleted_at = ?
+          AND ${replacementGuard}
+      `).bind(
+        input.rotatedAt,
+        input.rotatedAt,
+        input.rotatedAt,
+        input.eventId,
+        input.rotationMarker,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        INSERT OR IGNORE INTO media_object_write_tombstones (
+          bucket_generation, object_key, event_id, media_id, object_kind,
+          next_check_at, created_at, updated_at
+        )
+        SELECT 'legacy', preview_object_key, event_id, id, 'preview', ?, ?, ?
+        FROM media
+        WHERE event_id = ? AND upload_state = 'deleted' AND deleted_at = ?
+          AND preview_object_key IS NOT NULL
+          AND ${replacementGuard}
+      `).bind(
+        input.rotatedAt,
+        input.rotatedAt,
+        input.rotatedAt,
+        input.eventId,
+        input.rotationMarker,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        UPDATE media_object_write_tombstones AS target
+        SET suppression_started_at = ?, next_check_at = min(next_check_at, ?), updated_at = ?
+        WHERE target.event_id = ?
+          AND target.media_id IN (
+            SELECT id FROM media
+            WHERE event_id = ? AND upload_state = 'deleted' AND deleted_at = ?
+          )
+          AND target.object_kind NOT IN ('export', 'cover')
+          AND target.suppression_started_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM export_media_entries AS entry
+            JOIN export_jobs AS job ON job.id = entry.export_job_id
+            WHERE entry.object_bucket_generation = target.bucket_generation
+              AND entry.object_key = target.object_key
+              AND job.state IN ('queued', 'running')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM media_object_promotions AS promotion
+            WHERE promotion.media_id = target.media_id
+              AND promotion.event_id = target.event_id
+          )
+          AND ${replacementGuard}
+      `).bind(
+        input.rotatedAt,
+        input.rotatedAt,
+        input.rotatedAt,
+        input.eventId,
+        input.eventId,
+        input.rotationMarker,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        SELECT target.media_id, target.event_id, target.bucket_generation, target.object_key
+        FROM media_object_write_tombstones AS target
+        WHERE target.event_id = ? AND target.suppression_started_at = ?
+          AND target.media_id IN (
+            SELECT id FROM media
+            WHERE event_id = ? AND upload_state = 'deleted' AND deleted_at = ?
+          )
+          AND ${replacementGuard}
+        ORDER BY target.media_id, target.bucket_generation, target.object_key
+      `).bind(
+        input.eventId,
+        input.rotatedAt,
+        input.eventId,
+        input.rotationMarker,
+        input.replacementId,
+        input.eventId,
+      ),
+      this.db.prepare(`
+        UPDATE media
+        SET deleted_at = ?
+        WHERE event_id = ? AND upload_state = 'deleted' AND deleted_at = ?
+          AND ${replacementGuard}
+      `).bind(
+        input.rotatedAt,
+        input.eventId,
+        input.rotationMarker,
+        input.replacementId,
+        input.eventId,
+      ),
+    ];
+    return { statements, deletionClaimResultOffset: statements.length - 2 };
+  }
+
+  managerLinkRotationDeletionClaims(result: D1Result): MediaObjectDeletionClaim[] {
+    const rows = (result.results ?? []) as Array<{
+      media_id: string;
+      event_id: string;
+      bucket_generation: 'legacy' | 'canonical';
+      object_key: string;
+    }>;
+    const claims = new Map<string, MediaObjectDeletionClaim>();
+    for (const row of rows) {
+      const claim = claims.get(row.media_id) ?? {
+        mediaId: row.media_id,
+        eventId: row.event_id,
+        legacyKeys: [],
+        canonicalKeys: [],
+      };
+      (row.bucket_generation === 'legacy' ? claim.legacyKeys : claim.canonicalKeys)
+        .push(row.object_key);
+      claims.set(row.media_id, claim);
+    }
+    return [...claims.values()];
+  }
+
+  private async classifyManagerReservationCancel(
+    mediaId: string,
+    authority: UploadAuthority,
+    nowIso: string,
+  ): Promise<Exclude<UploadCancelOutcome, { kind: 'canceled' }>> {
+    const current = await this.getById(mediaId);
+    if (!current || current.uploaderSessionId !== authority.actorSessionId) {
+      return { kind: 'forbidden' };
+    }
+    if (!await this.authorityIsLive(authority, current.eventId, nowIso)) {
+      return { kind: 'forbidden' };
+    }
+    if (current.uploadState === 'deleted'
+      && current.deletedAt !== null
+      && current.storedAt === null
+      && current.trashedAt === null) {
+      return { kind: 'already-canceled' };
+    }
+    return { kind: 'conflict' };
+  }
+
+  async cancelReservation(
+    mediaId: string,
+    authority: UploadAuthority,
+    canceledAt: string,
+  ): Promise<UploadCancelOutcome> {
+    const current = await this.getById(mediaId);
+    if (!current) return { kind: 'forbidden' };
+    const wasReserved = current.uploadState === 'reserved';
+    // A transaction-private marker is the stable winner fact for every
+    // downstream statement. It is settled to the public cancellation instant
+    // before commit, so even a same-millisecond replay cannot reactivate the
+    // inventory path after losing the media CAS.
+    const winnerDeletedAt = `cancel:${canceledAt}:${crypto.randomUUID()}`;
+    const claimStatements = this.mediaObjectDeletionClaimStatements(
+      current,
+      canceledAt,
+      winnerDeletedAt,
+      canceledAt,
+    );
+    const results = await this.db.batch([
+      this.db.prepare(`
+        UPDATE media
+        SET upload_state = 'deleted', deleted_at = ?, trashed_at = NULL, restore_until = NULL
+        WHERE id = ? AND event_id = ? AND uploader_session_id = ?
+          AND upload_state IN ('reserved', 'failed') AND upload_state = ?
+          AND deleted_at IS NULL AND trashed_at IS NULL
+          AND ${authorityLivenessSql(authority)}
+        RETURNING id
+      `).bind(...[
+        winnerDeletedAt,
+        mediaId,
+        current.eventId,
+        authority.actorSessionId,
+        current.uploadState,
+        ...authorityLivenessBindings(authority, current.eventId, canceledAt),
+      ]),
+      this.db.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count - ?,
+            reserved_bytes = reserved_bytes - ?
+        WHERE id = ? AND changes() = 1
+      `).bind(
+        wasReserved ? 1 : 0,
+        wasReserved ? current.declaredByteSize : 0,
+        current.eventId,
+      ),
+      this.db.prepare(`
+        DELETE FROM media_object_promotions
+        WHERE media_id = ?
+          AND EXISTS (
+            SELECT 1 FROM media
+            WHERE id = ? AND event_id = ? AND uploader_session_id = ?
+              AND upload_state = 'deleted' AND deleted_at = ? AND trashed_at IS NULL
+          )
+      `).bind(
+        mediaId,
+        mediaId,
+        current.eventId,
+        authority.actorSessionId,
+        winnerDeletedAt,
+      ),
+      ...claimStatements,
+    ]);
+    if ((results[0]?.results?.length ?? 0) !== 1) {
+      return this.classifyManagerReservationCancel(mediaId, authority, canceledAt);
+    }
+    return {
+      kind: 'canceled',
+      claim: this.mediaObjectDeletionClaimFromResults(current, results),
+    };
+  }
+
+  private async isGuestOwnedMedia(media: MediaRecord): Promise<boolean> {
+    const guest = await this.db.prepare(`
+      SELECT 1 AS present
+      FROM event_sessions
+      WHERE id = ? AND event_id = ? AND role = 'guest'
+        AND manager_upload_account_id IS NULL
+    `).bind(media.uploaderSessionId, media.eventId).first<number>('present');
+    return guest === 1;
+  }
+
+  private async classifyGuestReservationCancel(
+    mediaId: string,
+    eventId: string,
+  ): Promise<Exclude<UploadCancelOutcome, { kind: 'canceled' }>> {
+    const current = await this.getById(mediaId);
+    if (!current || current.eventId !== eventId || !await this.isGuestOwnedMedia(current)) {
+      return { kind: 'forbidden' };
+    }
+    if (current.uploadState === 'deleted'
+      && current.deletedAt !== null
+      && current.storedAt === null
+      && current.trashedAt === null) {
+      return { kind: 'already-canceled' };
+    }
+    return { kind: 'conflict' };
+  }
+
+  async cancelGuestReservationFromManager(
+    mediaId: string,
+    eventId: string,
+    canceledAt: string,
+  ): Promise<UploadCancelOutcome> {
+    const current = await this.getById(mediaId);
+    if (!current) return { kind: 'forbidden' };
+    const wasReserved = current.uploadState === 'reserved';
+    const winnerDeletedAt = `cancel:${canceledAt}:${crypto.randomUUID()}`;
+    const claimStatements = this.mediaObjectDeletionClaimStatements(
+      current,
+      canceledAt,
+      winnerDeletedAt,
+      canceledAt,
+    );
+    const results = await this.db.batch([
+      this.db.prepare(`
+        UPDATE media
+        SET upload_state = 'deleted', deleted_at = ?, trashed_at = NULL, restore_until = NULL
+        WHERE id = ? AND event_id = ?
+          AND upload_state IN ('reserved', 'failed') AND upload_state = ?
+          AND deleted_at IS NULL AND trashed_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM event_sessions AS uploader
+            WHERE uploader.id = media.uploader_session_id
+              AND uploader.event_id = media.event_id
+              AND uploader.role = 'guest'
+              AND uploader.manager_upload_account_id IS NULL
+          )
+        RETURNING id
+      `).bind(winnerDeletedAt, mediaId, eventId, current.uploadState),
+      this.db.prepare(`
+        UPDATE events
+        SET reserved_media_count = reserved_media_count - ?,
+            reserved_bytes = reserved_bytes - ?
+        WHERE id = ? AND changes() = 1
+      `).bind(
+        wasReserved ? 1 : 0,
+        wasReserved ? current.declaredByteSize : 0,
+        eventId,
+      ),
+      this.db.prepare(`
+        DELETE FROM media_object_promotions
+        WHERE media_id = ?
+          AND EXISTS (
+            SELECT 1 FROM media
+            WHERE id = ? AND event_id = ?
+              AND upload_state = 'deleted' AND deleted_at = ? AND trashed_at IS NULL
+          )
+      `).bind(mediaId, mediaId, eventId, winnerDeletedAt),
+      ...claimStatements,
+    ]);
+    if ((results[0]?.results?.length ?? 0) !== 1) {
+      return this.classifyGuestReservationCancel(mediaId, eventId);
+    }
+    return {
+      kind: 'canceled',
+      claim: this.mediaObjectDeletionClaimFromResults(current, results),
+    };
+  }
+
+  /**
+   * Win the right to delete a photo's bytes, and report exactly which keys.
+   *
+   * Every physical retirement path goes through here. The suppression transition
+   * is the claim: a key an active export holds, or a recoverable photo owns, or
+   * another pass already suppressed, simply does not appear in the result, and
+   * its bytes stay for the existing tombstone janitor to collect once the reason
+   * is gone. Nothing about this is best-effort — a key absent from the claim is
+   * a key this caller is not allowed to delete.
+   */
+  async claimMediaObjectDeletion(media: MediaRecord, claimedAt: string): Promise<MediaObjectDeletionClaim> {
+    const results = await this.db.batch(
+      this.mediaObjectDeletionClaimStatements(media, claimedAt),
+    );
+    return this.mediaObjectDeletionClaimFromResults(media, results);
   }
 
   /**

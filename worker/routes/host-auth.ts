@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 
+import type { HostSessionEventView, HostSessionResponse } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
 import { AccountsRepository } from '../db/accounts';
@@ -148,22 +149,40 @@ hostAuthRoutes.post('/host/register', async (context) => {
 
   setRegistrationCookie(context, started.registrationToken);
   return context.json({
-    data: { registrationPending: true },
+    data: {
+      registrationPending: true,
+      resumeExpiresAt: started.resumeExpiresAt,
+    },
     requestId: context.get('requestId'),
   }, 202);
+});
+
+hostAuthRoutes.get('/host/register/pending', async (context) => {
+  const rawRegistrationToken = getRegistrationCookie(context);
+  const status = rawRegistrationToken
+    ? await new HostAuthService(context.env).pendingRegistrationStatus(rawRegistrationToken)
+    : { pending: false, expiresAt: null };
+  context.header('Cache-Control', 'private, no-store');
+  return context.json({
+    data: status,
+    requestId: context.get('requestId'),
+  });
 });
 
 hostAuthRoutes.post('/host/register/resend', async (context) => {
   assertRequestOrigin(context);
   await assertHostAuthBoundary(context, 'registration_resend');
   const rawRegistrationToken = getRegistrationCookie(context);
-  const registrationToken = await new HostAuthService(context.env).resendRegistration(
+  const resent = await new HostAuthService(context.env).resendRegistration(
     rawRegistrationToken,
     { ipAddress: clientIp(context) },
   );
-  setRegistrationCookie(context, registrationToken, 15 * 60);
+  setRegistrationCookie(context, resent.registrationToken, 15 * 60);
   return context.json({
-    data: { registrationPending: true },
+    data: {
+      registrationPending: true,
+      resumeExpiresAt: resent.resumeExpiresAt,
+    },
     requestId: context.get('requestId'),
   }, 202);
 });
@@ -232,10 +251,11 @@ hostAuthRoutes.get('/host/session', async (context) => {
         name: event.name,
         slug: event.slug,
         eventDate: event.eventDate,
+        eventTimezone: event.eventTimezone,
         storedMediaCount: event.storedMediaCount,
         managementAccessExpiresAt: event.managementAccessExpiresAt,
-      })),
-    },
+      } satisfies HostSessionEventView)),
+    } satisfies HostSessionResponse,
     requestId: context.get('requestId'),
   });
 });

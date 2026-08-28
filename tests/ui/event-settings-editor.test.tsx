@@ -32,7 +32,10 @@ const EVENT: EventView = {
   },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
+  hostUploadAvailability: { enabled: true, reason: null },
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
+  managerLinkRevision: 0,
+  managerLinkRotationAvailability: { enabled: true, reason: null },
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',
   eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
@@ -49,12 +52,14 @@ function Harness({
   initial = EVENT,
   rosterVersion,
   synchronousResponses = false,
+  galleryVisibilityFocusEpoch = 0,
   onEventRead = (request) => request(),
   onSettingsMetadata = () => undefined,
 }: {
   initial?: EventView;
   rosterVersion?: number;
   synchronousResponses?: boolean;
+  galleryVisibilityFocusEpoch?: number;
   onEventRead?: <T>(request: () => Promise<T>) => Promise<T>;
   onSettingsMetadata?: (metadata: { scheduleChanged: boolean }) => void;
 }) {
@@ -67,6 +72,7 @@ function Harness({
     <EventSettingsEditor
       key={event.id}
       event={applied}
+      galleryVisibilityFocusEpoch={galleryVisibilityFocusEpoch}
       onEventWrite={(request) => request()}
       onEventRead={onEventRead}
       onSettingsSaved={(updated, metadata) => {
@@ -106,6 +112,28 @@ afterEach(() => {
 });
 
 describe('event settings editor', () => {
+  it('uses each positive availability focus epoch once, including epoch 1 on initial mount', () => {
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT })));
+    const initial = render(<Harness galleryVisibilityFocusEpoch={1} />);
+
+    const availability = screen.getByLabelText('Show the optional shared gallery');
+    expect(availability).toHaveFocus();
+
+    screen.getByLabelText('Event name').focus();
+    initial.rerender(<Harness galleryVisibilityFocusEpoch={1} />);
+    expect(screen.getByLabelText('Event name')).toHaveFocus();
+
+    initial.rerender(<Harness galleryVisibilityFocusEpoch={2} />);
+    expect(availability).toHaveFocus();
+  });
+
+  it('does not move availability focus for epoch 0', () => {
+    vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT })));
+    render(<Harness galleryVisibilityFocusEpoch={0} />);
+
+    expect(screen.getByLabelText('Show the optional shared gallery')).not.toHaveFocus();
+  });
+
   it('shows the confirmed values, offers no Save button, and starts saved', () => {
     vi.stubGlobal('fetch', vi.fn(() => json({ event: EVENT })));
     render(<Harness />);
@@ -381,6 +409,7 @@ describe('event settings editor', () => {
     }));
     const view = render(<StrictMode><EventSettingsEditor
       event={EVENT}
+      galleryVisibilityFocusEpoch={0}
       onEventWrite={(request) => request()}
       onEventRead={(request) => request()}
       onSettingsSaved={onSettingsSaved}

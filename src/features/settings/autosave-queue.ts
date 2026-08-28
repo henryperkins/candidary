@@ -58,6 +58,10 @@ export type AutosaveOutcome =
 
 export interface AutosaveHandle {
   flush(): void;
+  /** Suspend unstarted work and retire the adoption right of a request already sent. */
+  pause(): void;
+  /** Resume the newest retained valid intent after the pause boundary. */
+  resume(): void;
 }
 
 export interface DomainAutosaveState {
@@ -82,6 +86,8 @@ export interface AutosaveQueueOptions<S> {
 export interface AutosaveQueue<S> {
   submit(draft: AutosaveDraft<S>, immediate?: boolean): void;
   flush(): void;
+  pause(): void;
+  resume(): void;
   waitForSettled(): Promise<AutosaveState>;
   /** Drops work that has not started. A request already in flight still owns its response. */
   discardPending(): void;
@@ -112,6 +118,11 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
   let announced: AutosaveState = { status: 'saved', failure: null };
   let settleWaiters: Array<(state: AutosaveState) => void> = [];
   let disposed = false;
+  let paused = false;
+  // Fetch cannot prove that an already-sent write did not commit. A pause
+  // therefore retires its response and serializes the retained latest intent
+  // behind it; resume never races a replacement write against the old one.
+  let retiredInFlight: Ready<S> | null = null;
 
   function cancelTimer() {
     if (timer !== null) window.clearTimeout(timer);
@@ -157,6 +168,23 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
   function settle(sent: Ready<S>, error: unknown, outcome: AutosaveOutcome | null) {
     if (inFlight !== sent) return;
     inFlight = null;
+    if (retiredInFlight === sent) {
+      retiredInFlight = null;
+      rebasing = false;
+      // The response crossed a credential-transition boundary. It can neither
+      // advance the baseline nor create a failure. The newest visible intent
+      // was retained separately and is the only work allowed to resume.
+      if (paused) {
+        emit();
+        return;
+      }
+      const replacement = pending ?? scheduled;
+      pending = null;
+      scheduled = null;
+      if (replacement) start(replacement);
+      else emit();
+      return;
+    }
     // A response describes the snapshot it was sent for. If anything newer is
     // queued or on screen, its verdict is about intent that no longer exists.
     const superseded = pending !== null
@@ -182,6 +210,11 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
 
   function start(next: Ready<S>) {
     if (disposed) return;
+    if (paused) {
+      scheduled = next;
+      emit();
+      return;
+    }
     if (inFlight) {
       pending = next;
       emit();
@@ -213,6 +246,20 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
     }
     const next: Ready<S> = { key: draft.key, intent: draft.intent, snapshot: draft.snapshot };
     if (failure) failure = null;
+    if (paused) {
+      cancelTimer();
+      pending = null;
+      scheduled = retiredInFlight === null && next.key === baselineKey ? null : next;
+      emit();
+      return;
+    }
+    if (retiredInFlight !== null) {
+      cancelTimer();
+      scheduled = null;
+      pending = next;
+      emit();
+      return;
+    }
     // Equivalence is judged against the baseline, the in-flight snapshot, and
     // the pending snapshot together — never against the baseline alone.
     if (inFlight === null && next.key === baselineKey) {
@@ -269,9 +316,38 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
     flush() {
       if (disposed) return;
       cancelTimer();
+      if (paused) {
+        emit();
+        return;
+      }
       const ready = scheduled;
       scheduled = null;
       if (ready) start(ready);
+    },
+    pause() {
+      if (disposed || paused) return;
+      paused = true;
+      cancelTimer();
+      const hadUnsettledWork = inFlight !== null || scheduled !== null || pending !== null;
+      if (inFlight !== null) retiredInFlight = inFlight;
+      pending = null;
+      if (hadUnsettledWork && latest !== null && latest.snapshot !== null) {
+        scheduled = { key: latest.key, intent: latest.intent, snapshot: latest.snapshot };
+      }
+      emit();
+    },
+    resume() {
+      if (disposed || !paused) return;
+      paused = false;
+      const ready = scheduled;
+      scheduled = null;
+      if (inFlight !== null) {
+        pending = ready;
+        emit();
+        return;
+      }
+      if (ready) start(ready);
+      else emit();
     },
     waitForSettled() {
       const current: AutosaveState = { status: derive(), failure };
@@ -306,9 +382,11 @@ export function createAutosaveQueue<S>(options: AutosaveQueueOptions<S>): Autosa
      */
     dispose() {
       disposed = true;
+      paused = false;
       cancelTimer();
       scheduled = null;
       pending = null;
+      retiredInFlight = null;
       rebasing = false;
       emit();
     },

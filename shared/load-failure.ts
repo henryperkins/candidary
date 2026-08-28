@@ -30,6 +30,7 @@ const LOAD_FAILURE_DECISION = {
   EVENT_MEDIA_LIMIT: decision('retry'),
   EVENT_STORAGE_LIMIT: decision('retry'),
   UPLOAD_RESERVATION_EXPIRED: decision('retry'),
+  UPLOAD_RESERVATION_CANCELED: decision('retry'),
   UPLOAD_OBJECT_MISSING: decision('retry'),
   UPLOAD_FINALIZE_CONFLICT: decision('retry'),
   MEDIA_STATE_CONFLICT: decision('retry'),

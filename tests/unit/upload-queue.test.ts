@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { UPLOAD_BATCH_SIZE } from '../../shared/constants';
+import { ClientApiError } from '../../src/app/api';
 import {
   getReceiptCount,
   removeQueueItem,
@@ -106,16 +108,121 @@ describe('photo upload queue', () => {
 
   it('marks an idempotently replayed stored reservation delivered without uploading or finalizing it again', async () => {
     const transport = acceptingTransport({
-      reserve: async ([queued]) => [{ id: queued!.id, status: 'delivered' as const }],
+      reserve: async ([queued]) => [{
+        id: queued!.id,
+        status: 'delivered' as const,
+        mediaId: 'media-already-stored',
+      }],
     });
     const upload = vi.spyOn(transport, 'upload');
     const finalize = vi.spyOn(transport, 'finalize');
+    const onFinalized = vi.fn();
 
-    const result = await runUploadQueue([item('already-stored')], transport);
+    const result = await runUploadQueue([item('already-stored')], transport, { onFinalized });
 
     expect(result[0]).toMatchObject({ state: 'delivered', progress: 100 });
     expect(upload).not.toHaveBeenCalled();
     expect(finalize).not.toHaveBeenCalled();
+    expect(onFinalized).toHaveBeenCalledOnce();
+    expect(onFinalized).toHaveBeenCalledWith({
+      itemId: 'already-stored',
+      mediaId: 'media-already-stored',
+    });
+  });
+
+  it('signals each straightforward durable finalization once with its media id', async () => {
+    const onFinalized = vi.fn();
+
+    const result = await runUploadQueue([item('a')], acceptingTransport(), { onFinalized });
+
+    expect(result[0]).toMatchObject({ state: 'delivered', progress: 100 });
+    expect(onFinalized).toHaveBeenCalledOnce();
+    expect(onFinalized).toHaveBeenCalledWith({ itemId: 'a', mediaId: 'media-a' });
+  });
+
+  it('drops an already-canceled reservation quietly without transferring, retrying, or receipting it', async () => {
+    const transport = acceptingTransport({
+      reserve: async ([queued]) => [{ id: queued!.id, status: 'canceled' as const }],
+    });
+    const reserve = vi.spyOn(transport, 'reserve');
+    const upload = vi.spyOn(transport, 'upload');
+    const finalize = vi.spyOn(transport, 'finalize');
+    const onFinalized = vi.fn();
+
+    const canceled = await runUploadQueue([item('gone')], transport, { onFinalized });
+    const unchanged = await runUploadQueue(canceled, transport, { onFinalized });
+
+    expect(canceled).toEqual([]);
+    expect(unchanged).toEqual([]);
+    expect(reserve).toHaveBeenCalledOnce();
+    expect(upload).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+    expect(onFinalized).not.toHaveBeenCalled();
+    expect(getReceiptCount(canceled)).toBeNull();
+  });
+
+  it('keeps a reserve rejection failure beside its unchanged human-facing error', async () => {
+    const failure = { code: 'RESOURCE_FORBIDDEN' as const, status: 403, stage: 'reserve' as const };
+    const transport = acceptingTransport({
+      reserve: async ([queued]) => [{
+        id: queued!.id,
+        status: 'rejected' as const,
+        error: 'This photo could not be reserved.',
+        failure,
+      }],
+    });
+
+    const result = await runUploadQueue([item('refused')], transport);
+
+    expect(result[0]).toMatchObject({
+      state: 'failed',
+      error: 'This photo could not be reserved.',
+      failure,
+    });
+  });
+
+  it('records typed upload and finalize failures at the stage that failed', async () => {
+    const transport = acceptingTransport({
+      upload: async (queued) => {
+        if (queued.id === 'upload-refused') {
+          throw new ClientApiError(
+            'RESOURCE_FORBIDDEN',
+            'This upload is no longer authorized.',
+            undefined,
+            undefined,
+            403,
+          );
+        }
+      },
+      finalize: async (queued) => {
+        if (queued.id === 'finalize-conflict') {
+          throw new ClientApiError(
+            'UPLOAD_FINALIZE_CONFLICT',
+            'This photo could not be confirmed.',
+            undefined,
+            undefined,
+            409,
+          );
+        }
+      },
+    });
+
+    const result = await runUploadQueue(
+      [item('upload-refused'), item('finalize-conflict')],
+      transport,
+      { concurrency: 1 },
+    );
+
+    expect(result.find(({ id }) => id === 'upload-refused')).toMatchObject({
+      state: 'failed',
+      error: 'This upload is no longer authorized.',
+      failure: { code: 'RESOURCE_FORBIDDEN', status: 403, stage: 'upload' },
+    });
+    expect(result.find(({ id }) => id === 'finalize-conflict')).toMatchObject({
+      state: 'failed',
+      error: 'This photo could not be confirmed.',
+      failure: { code: 'UPLOAD_FINALIZE_CONFLICT', status: 409, stage: 'finalize' },
+    });
   });
 
   it('counts delivered photos when validation failures remain', () => {
@@ -145,10 +252,20 @@ describe('photo upload queue', () => {
       },
     });
     const failed = await runUploadQueue([item('same-id')], transport);
-    expect(failed[0]).toMatchObject({ id: 'same-id', state: 'failed', error: 'Reception dropped out.' });
+    expect(failed[0]).toMatchObject({
+      id: 'same-id',
+      state: 'failed',
+      error: 'Reception dropped out.',
+      failure: undefined,
+    });
 
     const delivered = await runUploadQueue(failed, transport);
-    expect(delivered[0]).toMatchObject({ id: 'same-id', state: 'delivered' });
+    expect(delivered[0]).toMatchObject({
+      id: 'same-id',
+      state: 'delivered',
+      error: undefined,
+      failure: undefined,
+    });
     expect(attempts).toBe(2);
   });
 
@@ -162,15 +279,128 @@ describe('photo upload queue', () => {
     });
     const reserve = vi.spyOn(queueTransport, 'reserve');
     const upload = vi.spyOn(queueTransport, 'upload');
+    const onFinalized = vi.fn();
 
-    const failed = await runUploadQueue([item('confirm-once')], queueTransport);
+    const failed = await runUploadQueue([item('confirm-once')], queueTransport, { onFinalized });
     expect(failed[0]).toMatchObject({ state: 'failed', retryStage: 'finalize' });
-    const delivered = await runUploadQueue(failed, queueTransport);
+    const delivered = await runUploadQueue(failed, queueTransport, { onFinalized });
 
     expect(delivered[0]).toMatchObject({ state: 'delivered' });
     expect(reserve).toHaveBeenCalledTimes(1);
     expect(upload).toHaveBeenCalledTimes(1);
     expect(finalizeAttempts).toBe(2);
+    expect(onFinalized).toHaveBeenCalledOnce();
+    expect(onFinalized).toHaveBeenCalledWith({
+      itemId: 'confirm-once',
+      mediaId: 'media-confirm-once',
+    });
+  });
+
+  it('keeps completed chunks, marks the attempted lost chunk, and leaves later chunks unattempted', async () => {
+    const selected = Array.from(
+      { length: 2 * UPLOAD_BATCH_SIZE + 3 },
+      (_, index) => item(`photo-${index}`),
+    );
+    let latest = selected;
+    let reservationCalls = 0;
+    const transport = acceptingTransport({
+      reserve: async (chunk) => {
+        reservationCalls += 1;
+        if (reservationCalls === 1) {
+          expect(chunk).toHaveLength(UPLOAD_BATCH_SIZE);
+          expect(latest.slice(0, UPLOAD_BATCH_SIZE).every(({ state }) => state === 'reserving')).toBe(true);
+          expect(latest.slice(UPLOAD_BATCH_SIZE).every(({ state }) => state === 'selected')).toBe(true);
+          return chunk.map(({ id }) => ({ id, status: 'delivered' as const, mediaId: `media-${id}` }));
+        }
+        expect(chunk).toHaveLength(UPLOAD_BATCH_SIZE);
+        expect(latest.slice(0, UPLOAD_BATCH_SIZE).every(({ state }) => state === 'delivered')).toBe(true);
+        expect(latest.slice(UPLOAD_BATCH_SIZE, 2 * UPLOAD_BATCH_SIZE)
+          .every(({ state }) => state === 'reserving')).toBe(true);
+        expect(latest.slice(2 * UPLOAD_BATCH_SIZE).every(({ state }) => state === 'selected')).toBe(true);
+        throw new Error('The reservation answer was lost.');
+      },
+    });
+
+    const result = await runUploadQueue(selected, transport, {
+      onChange: (items) => { latest = items; },
+    });
+
+    expect(reservationCalls).toBe(2);
+    expect(result.slice(0, UPLOAD_BATCH_SIZE).every(({ state }) => state === 'delivered')).toBe(true);
+    expect(result.slice(UPLOAD_BATCH_SIZE, 2 * UPLOAD_BATCH_SIZE)).toEqual(
+      expect.arrayContaining(Array.from({ length: UPLOAD_BATCH_SIZE }, () => expect.objectContaining({
+        state: 'failed',
+        error: 'The reservation answer was lost.',
+      }))),
+    );
+    expect(result.slice(2 * UPLOAD_BATCH_SIZE).every(({ state }) => state === 'selected')).toBe(true);
+  });
+
+  it('suppresses late progress, finalize, delivery, and callbacks after a sibling terminal failure aborts', async () => {
+    const controller = new AbortController();
+    let releaseSlow!: () => void;
+    const slow = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    const onFinalized = vi.fn();
+    const snapshots: UploadQueueItem[][] = [];
+    const transport = acceptingTransport({
+      upload: async (queued, _reservation, progress) => {
+        if (queued.id === 'terminal') {
+          throw new ClientApiError(
+            'RESOURCE_FORBIDDEN',
+            'This upload is no longer authorized.',
+            undefined,
+            undefined,
+            403,
+          );
+        }
+        await slow;
+        progress(75);
+      },
+    });
+    const finalize = vi.spyOn(transport, 'finalize');
+
+    const pending = runUploadQueue([item('terminal'), item('slow')], transport, {
+      concurrency: 2,
+      signal: controller.signal,
+      onFinalized,
+      onChange: (items) => {
+        snapshots.push(items);
+        if (items.some(({ failure }) => failure?.code === 'RESOURCE_FORBIDDEN')) controller.abort();
+      },
+    });
+    await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
+    releaseSlow();
+    const result = await pending;
+
+    expect(result.find(({ id }) => id === 'terminal')).toMatchObject({
+      state: 'failed',
+      failure: { code: 'RESOURCE_FORBIDDEN', status: 403, stage: 'upload' },
+    });
+    expect(result.find(({ id }) => id === 'slow')).toMatchObject({
+      state: 'failed',
+      progress: 0,
+      error: CANCELLED,
+    });
+    expect(finalize).not.toHaveBeenCalled();
+    expect(onFinalized).not.toHaveBeenCalled();
+    expect(snapshots.some((snapshot) => snapshot.some(({ id, progress }) => id === 'slow' && progress === 75)))
+      .toBe(false);
+  });
+
+  it('does not publish delivery or finalization after finalize aborts before resolving', async () => {
+    const controller = new AbortController();
+    const onFinalized = vi.fn();
+    const transport = acceptingTransport({
+      finalize: async () => { controller.abort(); },
+    });
+
+    const result = await runUploadQueue([item('late-finalize')], transport, {
+      signal: controller.signal,
+      onFinalized,
+    });
+
+    expect(result[0]).toMatchObject({ state: 'failed', error: CANCELLED });
+    expect(onFinalized).not.toHaveBeenCalled();
   });
 
   it('never creates a receipt when every photo is removed before delivery', () => {

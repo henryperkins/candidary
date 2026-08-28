@@ -1,5 +1,5 @@
 import { Check, ListChecks, Search, X } from 'lucide-react';
-import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 import { flushSync } from 'react-dom';
 
 import { api, ClientApiError } from '../../app/api';
@@ -12,7 +12,7 @@ import {
 import type { EventView, ManagerGalleryMediaView } from '../../../shared/contracts';
 import { galleryPhotoTitle } from './gallery-timeline';
 import { GalleryTimeline } from './GalleryTimeline';
-import { GalleryViewer } from './GalleryViewer';
+import { GalleryViewer, type ViewerContinuationOutcome } from './GalleryViewer';
 import { setAlbumPicks } from './album-api';
 import {
   transitionSelection,
@@ -20,6 +20,12 @@ import {
 } from './selection-state';
 import { SelectionTray, type SelectionTrayInput } from './SelectionTray';
 import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
+import type { GalleryAnchor } from '../../app/manager-history-state';
+import {
+  captureRenderedGalleryAnchor,
+  restoreRenderedGalleryAnchor,
+  type GalleryAnchorRestoreOutcome,
+} from './gallery-anchor';
 
 const SEARCH_MAX_CODE_POINTS = 120;
 
@@ -36,12 +42,24 @@ interface ManagerPrivateGalleryProps {
   invalidateGalleryAfterMutation(): void;
   live?: boolean;
   onAnnouncement?(message: string): void;
+  onAnchorReady?(): void;
+}
+
+export interface ManagerPrivateGalleryHandle {
+  captureAnchor(effectiveVisibleTop: number): GalleryAnchor | null;
+  restoreAnchor(anchor: GalleryAnchor, effectiveVisibleTop: number): GalleryAnchorRestoreOutcome;
 }
 
 interface GalleryPage {
   media: ManagerGalleryMediaView[];
   nextCursor: string | null;
 }
+
+type NextPageResult =
+  | { status: 'appended'; page: GalleryPage; rows: ManagerGalleryMediaView[] }
+  | { status: 'unavailable' }
+  | { status: 'failed'; caught: unknown }
+  | { status: 'retired' };
 
 interface FocusRequest {
   sequence: number;
@@ -149,7 +167,7 @@ function connectedPresentationFallback(target: HTMLElement | null): HTMLElement 
   return target?.isConnected ? target : null;
 }
 
-export function ManagerPrivateGallery({
+export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, ManagerPrivateGalleryProps>(function ManagerPrivateGallery({
   event,
   eventId,
   active = true,
@@ -159,7 +177,8 @@ export function ManagerPrivateGallery({
   invalidateGalleryAfterMutation,
   live = true,
   onAnnouncement,
-}: ManagerPrivateGalleryProps) {
+  onAnchorReady,
+}, ref) {
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -188,6 +207,9 @@ export function ManagerPrivateGallery({
   const loadMoreGeneration = useRef(0);
   const loadController = useRef<AbortController | null>(null);
   const loadMoreController = useRef<AbortController | null>(null);
+  const nextPageRequest = useRef<Promise<NextPageResult> | null>(null);
+  const rowsRef = useRef<ManagerGalleryMediaView[]>([]);
+  const cursorRef = useRef<string | null>(null);
   const confirmedEventId = useRef<string | null>(null);
   const hasConfirmedPage = useRef(false);
   const focusResults = useRef(false);
@@ -201,6 +223,34 @@ export function ManagerPrivateGallery({
   const emptyRef = useRef<HTMLHeadingElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const rows = rowState.rows;
+
+  const commitRows = useCallback((
+    action: GalleryRowsAction,
+    synchronizedRows?: ManagerGalleryMediaView[],
+  ) => {
+    rowsRef.current = synchronizedRows ?? galleryRowsReducer({
+      rows: rowsRef.current,
+      focusRequest: null,
+      focusSequence: 0,
+    }, action).rows;
+    dispatchRows(action);
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    captureAnchor: (effectiveVisibleTop) => rootRef.current
+      ? captureRenderedGalleryAnchor(rootRef.current, 'media', effectiveVisibleTop)
+      : null,
+    restoreAnchor: (anchor, effectiveVisibleTop) => {
+      const root = rootRef.current;
+      if ((loading && !hasConfirmedPage.current) || root === null) return 'pending';
+      return restoreRenderedGalleryAnchor(root, anchor, effectiveVisibleTop);
+    },
+  }), [loading]);
+
+  useLayoutEffect(() => {
+    if (!active || loading || rootRef.current === null) return;
+    onAnchorReady?.();
+  }, [active, loading, onAnchorReady]);
 
   useEffect(() => {
     if (!live && announcement) onAnnouncement?.(announcement);
@@ -223,18 +273,33 @@ export function ManagerPrivateGallery({
     return `/api/manage/events/${eventId}/gallery${search ? `?${search}` : ''}`;
   }, [eventId]);
 
-  const cancelContinuation = useCallback(() => {
+  const retireContinuation = useCallback(() => {
     loadMoreGeneration.current += 1;
     loadMoreController.current?.abort();
     loadMoreController.current = null;
-    setLoadingMore(false);
+    nextPageRequest.current = null;
   }, []);
+
+  const cancelContinuation = useCallback(() => {
+    retireContinuation();
+    setLoadingMore(false);
+  }, [retireContinuation]);
+
+  useEffect(() => () => {
+    // Owner teardown must fence even an abort-insensitive response. Do not call
+    // cancelContinuation here: its loading-state write would target an unmounted owner.
+    retireContinuation();
+  }, [retireContinuation]);
 
   const beginReplacement = useCallback(() => {
     loadGeneration.current += 1;
     loadController.current?.abort();
     loadController.current = null;
     cancelContinuation();
+    // A continuation can be requested before the replacement effect runs. Retire the
+    // previous query's cursor synchronously so it cannot append into the new query, but
+    // retain the confirmed rows that stay rendered if this same-event replacement fails.
+    cursorRef.current = null;
   }, [cancelContinuation]);
 
   useEffect(() => {
@@ -243,12 +308,13 @@ export function ManagerPrivateGallery({
     const controller = new AbortController();
     loadController.current = controller;
     cancelContinuation();
+    cursorRef.current = null;
 
     const hadConfirmedPage = confirmedEventId.current === eventId && hasConfirmedPage.current;
     if (confirmedEventId.current !== eventId) {
       confirmedEventId.current = eventId;
       hasConfirmedPage.current = false;
-      dispatchRows({ type: 'replace', rows: [] });
+      commitRows({ type: 'replace', rows: [] }, []);
     }
 
     setLoading(true);
@@ -263,7 +329,8 @@ export function ManagerPrivateGallery({
         if (generation !== loadGeneration.current) return;
         confirmedEventId.current = eventId;
         hasConfirmedPage.current = true;
-        dispatchRows({ type: 'replace', rows: page.media });
+        cursorRef.current = page.nextCursor;
+        commitRows({ type: 'replace', rows: page.media }, page.media);
         setCursor(page.nextCursor);
         if (focusResults.current) {
           focusResults.current = false;
@@ -288,7 +355,7 @@ export function ManagerPrivateGallery({
       });
 
     return () => controller.abort();
-  }, [cancelContinuation, eventId, favoritesOnly, galleryPath, order, query, retryEpoch]);
+  }, [cancelContinuation, commitRows, eventId, favoritesOnly, galleryPath, order, query, retryEpoch]);
 
   useEffect(() => {
     if (
@@ -339,35 +406,82 @@ export function ManagerPrivateGallery({
     target?.focus();
   }, [viewerPhotoId]);
 
-  async function loadMore() {
-    if (!cursor || loadingMore) return;
-    const requested = cursor;
+  /**
+   * Owns exactly one continuation request and commits its merged page before either
+   * presentation path observes it. Both the mosaic and viewer consume this result;
+   * only their wrappers choose where (or whether) to show a failure.
+   */
+  function appendNextPage(): Promise<NextPageResult> {
+    if (nextPageRequest.current) return nextPageRequest.current;
+    const requested = cursorRef.current;
+    if (requested === null) return Promise.resolve({ status: 'unavailable' });
+
     const generation = ++loadMoreGeneration.current;
     const controller = new AbortController();
-    loadMoreController.current?.abort();
     loadMoreController.current = controller;
     setLoadingMore(true);
-    setNotice((current) => current?.retry === 'append' ? null : current);
-    try {
-      const page = await api<GalleryPage>(galleryPath(query, favoritesOnly, order, requested), {
-        signal: controller.signal,
-      });
-      if (generation !== loadMoreGeneration.current) return;
-      dispatchRows({ type: 'append', rows: page.media });
-      setCursor(page.nextCursor);
-    } catch (caught) {
-      if (generation !== loadMoreGeneration.current) return;
-      if (caught instanceof DOMException && caught.name === 'AbortError') return;
-      setNotice({
-        message: errorMessage(caught, 'The next page of photos could not be loaded.'),
-        retry: 'append',
-      });
-    } finally {
-      if (generation === loadMoreGeneration.current) {
-        setLoadingMore(false);
-        loadMoreController.current = null;
+    const request: Promise<NextPageResult> = (async () => {
+      try {
+        const page = await api<GalleryPage>(galleryPath(query, favoritesOnly, order, requested), {
+          signal: controller.signal,
+        });
+        if (generation !== loadMoreGeneration.current) return { status: 'retired' };
+        const known = new Set(rowsRef.current.map(({ id }) => id));
+        const merged = [
+          ...rowsRef.current,
+          ...page.media.filter(({ id }) => !known.has(id)),
+        ];
+        // Keep the continuation source of truth ahead of React's asynchronous dispatch.
+        cursorRef.current = page.nextCursor;
+        commitRows({ type: 'append', rows: page.media }, merged);
+        setCursor(page.nextCursor);
+        return { status: 'appended', page, rows: merged };
+      } catch (caught) {
+        if (
+          generation !== loadMoreGeneration.current
+          || (caught instanceof DOMException && caught.name === 'AbortError')
+        ) return { status: 'retired' };
+        return { status: 'failed', caught };
+      } finally {
+        if (generation === loadMoreGeneration.current) {
+          setLoadingMore(false);
+          loadMoreController.current = null;
+        }
       }
+    })();
+    nextPageRequest.current = request;
+    void request.then(
+      () => {
+        if (nextPageRequest.current === request) nextPageRequest.current = null;
+      },
+      () => {
+        if (nextPageRequest.current === request) nextPageRequest.current = null;
+      },
+    );
+    return request;
+  }
+
+  async function loadMore() {
+    if (cursorRef.current === null && nextPageRequest.current === null) return;
+    setNotice((current) => current?.retry === 'append' ? null : current);
+    const result = await appendNextPage();
+    if (result.status !== 'failed') return;
+    setNotice({
+      message: errorMessage(result.caught, 'The next page of photos could not be loaded.'),
+      retry: 'append',
+    });
+  }
+
+  async function loadNextAfter(photoId: string): Promise<ViewerContinuationOutcome> {
+    const result = await appendNextPage();
+    if (result.status === 'appended') {
+      const currentIndex = result.rows.findIndex(({ id }) => id === photoId);
+      const successor = currentIndex >= 0 ? result.rows[currentIndex + 1] : undefined;
+      if (successor) return { status: 'advanced', nextPhotoId: successor.id };
+      return result.page.nextCursor === null ? { status: 'exhausted' } : { status: 'failed' };
     }
+    if (result.status === 'unavailable') return { status: 'exhausted' };
+    return { status: 'failed' };
   }
 
   function tileForId(photoId: string): HTMLElement | null {
@@ -381,11 +495,9 @@ export function ManagerPrivateGallery({
     setViewerPhotoId(photo.id);
   }
 
-  function changeViewerIndex(index: number) {
-    const nextPhoto = rows[index];
-    if (!nextPhoto) return;
-    setViewerPhotoId(nextPhoto.id);
-    viewerOrigin.current = tileForId(nextPhoto.id);
+  function changeViewerPhoto(photoId: string) {
+    if (!rowsRef.current.some((photo) => photo.id === photoId)) return;
+    setViewerPhotoId(photoId);
   }
 
   function closeViewer() {
@@ -409,7 +521,7 @@ export function ManagerPrivateGallery({
 
     const requestGeneration = loadGeneration.current;
     const confirmed = photo.isFavorite;
-    dispatchRows({ type: 'favorite', id: photo.id, favorite: next });
+    commitRows({ type: 'favorite', id: photo.id, favorite: next });
     try {
       const result = await api<{ media: ManagerGalleryMediaView }>(
         `/api/manage/events/${eventId}/media/${photo.id}/favorite`,
@@ -430,13 +542,13 @@ export function ManagerPrivateGallery({
       }
       if (favoritesOnly && !next) {
         const requestFocus = viewerPhotoId === photo.id;
-        dispatchRows({ type: 'remove', id: photo.id, requestFocus });
+        commitRows({ type: 'remove', id: photo.id, requestFocus });
         if (requestFocus) {
           setViewerPhotoId(null);
           viewerOrigin.current = null;
         }
       } else {
-        dispatchRows({ type: 'confirm', photo: result.media });
+        commitRows({ type: 'confirm', photo: result.media });
       }
       onPicksChanged();
       setAnnouncement(next
@@ -444,7 +556,7 @@ export function ManagerPrivateGallery({
         : `${galleryPhotoTitle(photo)} was removed from Album. The delivered photo remains.`);
     } catch (caught) {
       if (requestGeneration !== loadGeneration.current) return;
-      dispatchRows({ type: 'favorite', id: photo.id, favorite: confirmed });
+      commitRows({ type: 'favorite', id: photo.id, favorite: confirmed });
       setNotice({
         message: errorMessage(caught, 'The manager action could not be completed.'),
         retry: null,
@@ -669,7 +781,7 @@ export function ManagerPrivateGallery({
       // the same turn and leave focus on <body>.
       flushSync(() => {
         for (const id of changed) {
-          dispatchRows(filteredRemoval
+          commitRows(filteredRemoval
             ? { type: 'remove', id, requestFocus: false }
             : { type: 'favorite', id, favorite: picked });
         }
@@ -881,17 +993,18 @@ export function ManagerPrivateGallery({
       onRemove={(input) => void applyPicks(false, input)}
       onClear={clearSelection}
     />}
-    {viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer
+    {viewerPhotoId !== null && viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer
       photos={rows}
-      index={viewerIndex}
+      photoId={viewerPhotoId}
       timeZone={event.eventTimezone}
       hasMore={cursor !== null}
       favoritePendingIds={favoritePendingIds}
-      onIndexChange={changeViewerIndex}
+      onPhotoChange={changeViewerPhoto}
+      loadNextAfter={loadNextAfter}
       onClose={closeViewer}
       onFavorite={(photo) => void toggleFavorite(photo)}
       live={live}
       onAnnouncement={onAnnouncement}
     />}
   </div>;
-}
+});

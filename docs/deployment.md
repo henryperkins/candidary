@@ -182,6 +182,23 @@ Review the exact pending filenames before every apply. Do not rotate existing pe
 encryption keys merely to release application code. `npm run verify:bindings` proves required names in
 the checked-in/generated configuration; it cannot prove that a remote secret contains usable material.
 
+### 0021 migration-first compatibility
+
+`0021_manager_upload_and_album_era.sql` must be applied and its ledger verified before any 0021-aware
+Worker receives traffic. Its compatibility target is the exact deployed 0020 Worker, not a looser
+description of an older schema. Keep that 0020 Worker serving while the migration:
+
+- normalizes duplicate live Manager tokens deterministically and installs the one-live-token index;
+- adds the server-only Manager upload actor, Manager-link revision, and Album-era columns/triggers; and
+- preserves the 0020 Worker's one-column Album pick/unpick writes while deliberately refusing its exact
+  token insert if that insert would create a second live Manager token for an event.
+
+The populated-0020 upgrade fixture is the release proof for this ordering. Existing migrations
+`0001`–`0020` stay immutable, and 0021 is applied as one file; do not split its upload-actor and
+Album-era halves. If application rollout pauses after the migration, the proven 0020 Worker may keep
+serving against the additive schema. Never route the new Worker against a database whose ledger does
+not contain 0021, and never treat a Worker build or upload as evidence that D1 was migrated.
+
 ### 0020 admission exception
 
 Migration 0019 and migration 0020 have different preconditions. Apply 0019 only after every running

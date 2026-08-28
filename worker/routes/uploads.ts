@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
-import { z } from 'zod';
+import type { z } from 'zod';
 
-import { MAX_IMAGE_BYTES, UPLOAD_BATCH_SIZE } from '../../shared/constants';
+import { MAX_IMAGE_BYTES } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
 import { MediaRepository, uploadMediaView } from '../db/media';
@@ -9,25 +9,10 @@ import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertCsrf } from '../http/csrf';
 import { privateJson } from '../http/private-json';
+import { guestUploadBatchSchema, guestUploadSchema } from '../http/upload-schemas';
 import { UploadService } from '../services/uploads';
+import type { UploadAuthority } from '../services/upload-authority';
 import { receiveMediaUpload, retireMediaObjects } from '../storage/media';
-
-const fileSchema = z.object({
-  filename: z.string().min(1).max(255),
-  mimeType: z.string().max(100),
-  byteSize: z.number(),
-  idempotencyKey: z.string().min(1).max(128),
-  caption: z.string().max(300).nullish(),
-});
-
-const initiateSchema = fileSchema.extend({
-  guestName: z.string().trim().min(1).max(80),
-});
-
-const batchSchema = z.object({
-  guestName: z.string().trim().min(1).max(80),
-  files: z.array(fileSchema).min(1).max(UPLOAD_BATCH_SIZE),
-});
 
 function validationError(parsed: { error: z.ZodError }) {
   const guestNameIssue = parsed.error.issues.some((issue) => issue.path[0] === 'guestName');
@@ -48,6 +33,10 @@ async function guestForSlug(context: Parameters<typeof assertCsrf>[0]) {
   return auth;
 }
 
+function guestAuthority(sessionId: string): UploadAuthority {
+  return { kind: 'guest', actorSessionId: sessionId, eventSessionId: sessionId };
+}
+
 export const uploadRoutes = new Hono<AppBindings>();
 
 uploadRoutes.use('/event/:slug/uploads', privateJson);
@@ -58,17 +47,21 @@ uploadRoutes.use('/event/:slug/uploads/:mediaId/finalize', privateJson);
 
 uploadRoutes.post('/event/:slug/uploads', async (context) => {
   const auth = await guestForSlug(context);
-  const parsed = initiateSchema.safeParse(await context.req.json().catch(() => null));
+  const parsed = guestUploadSchema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw validationError(parsed);
-  const result = await new UploadService(context.env).initiate(auth, parsed.data);
+  const result = await new UploadService(context.env).initiate(
+    guestAuthority(auth.session.id), auth.event, parsed.data,
+  );
   return context.json({ data: result, requestId: context.get('requestId') }, 201);
 });
 
 uploadRoutes.post('/event/:slug/uploads/batch', async (context) => {
   const auth = await guestForSlug(context);
-  const parsed = batchSchema.safeParse(await context.req.json().catch(() => null));
+  const parsed = guestUploadBatchSchema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw validationError(parsed);
-  const result = await new UploadService(context.env).initiateBatch(auth, parsed.data);
+  const result = await new UploadService(context.env).initiateBatch(
+    guestAuthority(auth.session.id), auth.event, parsed.data,
+  );
   return context.json({ data: result, requestId: context.get('requestId') }, 201);
 });
 
@@ -183,7 +176,7 @@ uploadRoutes.put('/event/:slug/uploads/:mediaId/content', async (context) => {
       eventStartAt: auth.event.eventStartAt,
       eventTimezone: auth.event.eventTimezone,
     },
-    auth.session.id,
+    guestAuthority(auth.session.id),
     bytes,
     context.req.header('content-type') ?? '',
   );

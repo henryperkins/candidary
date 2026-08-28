@@ -7,6 +7,7 @@ import { measureDocument } from './helpers/geometry';
 
 const event = {
   ...EVENT_FIXTURE,
+  guestReadSurfaces: { available: true, reason: null } as const,
   galleryVisible: false,
   storedMediaCount: 2,
 };
@@ -119,7 +120,8 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
   const guestbookAction = page.getByRole('button', { name: 'Leave a guestbook note' });
   await expect(guestbookAction).toBeVisible();
   await expect(page.locator('.delivery-receipt').getByRole('button')).toHaveCount(1);
-  await expect(page.getByText(/Shared gallery/)).toHaveCount(0);
+  await expect(page.getByText(/Shared gallery/)).toBeVisible();
+  await expect(page.getByText(/My deliveries/)).toBeVisible();
   expect(finalizeAttempt).toBe(3);
   expect(await page.evaluate(() => localStorage.getItem('candidary_guest_name'))).toBe('Taylor Morgan');
 

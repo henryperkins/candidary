@@ -2,7 +2,13 @@ import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon,
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useBlocker, useLocation, useNavigate, useParams } from 'react-router-dom';
+import {
+  useBlocker,
+  useLocation,
+  useNavigate,
+  useNavigationType,
+  useParams,
+} from 'react-router-dom';
 
 import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
 import {
@@ -11,7 +17,22 @@ import {
   type GalleryMode,
   type ManagerLocation,
 } from '../app/manager-location';
-import { eventDateTimeDisplay, formatRetentionDate, TIME_UNAVAILABLE } from '../app/event-date-time';
+import {
+  consumeManagerIntent,
+  sanitizeManagerHistoryState,
+  withGalleryAnchor,
+  withManagerIntent,
+  type GalleryAnchor,
+  type ManagerNavigationIntent,
+  type PublicationFilter,
+  type RouterHistoryState,
+} from '../app/manager-history-state';
+import {
+  DATE_UNAVAILABLE,
+  TIME_UNAVAILABLE,
+  formatEventDate,
+  formatRetentionDate,
+} from '../app/event-date-time';
 import { useDeadlineClock } from '../app/use-deadline-clock';
 import { formatBytes } from '../app/format';
 import { hostSignInHref } from '../app/recovery';
@@ -37,6 +58,7 @@ import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
 import { EventSettingsEditor } from '../components/EventSettingsEditor';
 import { ManagementLinkRecovery } from '../components/ManagementLinkRecovery';
 import { ManagerPhotoIntakePanel } from '../components/ManagerPhotoIntakePanel';
+import { ModalSurface } from '../components/ModalSurface';
 import type { PhotoIntakeAction } from '../components/ManagerPhotoIntakePanel';
 import { ManagerRsvpPanel } from '../components/ManagerRsvpPanel';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
@@ -71,6 +93,9 @@ import {
   useManagerUndo,
 } from '../features/gallery/undo';
 import type { AutosaveHandle, DomainAutosaveState } from '../features/settings/autosave-queue';
+import { ManagerUploadDialog } from '../features/uploads/ManagerUploadDialog';
+import { resolveHostUploadAvailability } from '../features/uploads/host-upload-availability';
+import type { UploadExitState } from '../features/uploads/use-manager-upload-session';
 
 type Section = 'intake' | 'rsvp' | 'gallery' | 'guestbook' | 'share' | 'settings';
 type MediaStatus = 'all' | MediaView['publicationStatus'];
@@ -84,10 +109,24 @@ type MediaStatus = 'all' | MediaView['publicationStatus'];
  */
 type IntakeMode = 'active' | 'trash';
 
+const HOST_UPLOAD_UNAVAILABLE_MESSAGE = {
+  'media-cap': 'This event has reached its photo limit.',
+  'storage-cap': 'This event has reached its storage limit.',
+  'event-unavailable': 'This event is no longer available for uploads.',
+} as const;
+
 type ManagerSectionDestination =
   | { kind: 'section'; section: Section }
-  | { kind: 'recently-deleted' }
-  | { kind: 'settings-repair' };
+  | { kind: 'complete-export' }
+  | { kind: 'recently-deleted'; focusMediaId: string }
+  | { kind: 'settings-repair' }
+  | { kind: 'guest-gallery-settings'; publicationFilter: PublicationFilter }
+  | { kind: 'guest-gallery-return'; publicationFilter: PublicationFilter };
+
+type GuestGalleryReturn = Extract<
+ManagerNavigationIntent,
+{ kind: 'edit-guest-gallery-availability' }
+>['returnTo'];
 
 type ManagerLeaveDestination =
   | { kind: 'router'; locationKey: string }
@@ -103,6 +142,45 @@ type ManagerLeaveAttempt = {
 type PendingManagerAdoption = {
   destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>;
   target: string;
+  state: RouterHistoryState;
+};
+
+type PendingManagerStateCleanup = {
+  generation: number;
+  ownerEventId: string;
+  ownerEventGeneration: number;
+  sourceIdentity: string;
+  sourceKey: string;
+  sourceTarget: string;
+  target: string;
+  cleanupLocation: { pathname: string; search: string; hash: string };
+  cleanupState: RouterHistoryState;
+  initial: boolean;
+  anchor: GalleryAnchor | null;
+  intent: ManagerNavigationIntent | null;
+  destination: Exclude<ManagerLeaveDestination, { kind: 'router' }> | null;
+};
+
+type PendingGalleryAnchorCapture = {
+  ownerEventId: string;
+  ownerEventGeneration: number;
+  sourceKey: string;
+  sourceTarget: string;
+  state: RouterHistoryState;
+  outcome: 'pending' | 'committed' | 'retired';
+};
+
+type BrowserPopObservation = {
+  currentTarget: string;
+  nextTarget: string;
+  nextKey: string | null;
+};
+
+type PendingGalleryRestoration = {
+  generation: number;
+  mode: GalleryMode;
+  anchor: GalleryAnchor;
+  frameScheduled: boolean;
 };
 
 function sameManagerDestination(
@@ -118,6 +196,15 @@ function sameManagerDestination(
   }
   if (left.kind === 'section' && right.kind === 'section') {
     return left.section === right.section;
+  }
+  if (left.kind === 'recently-deleted' && right.kind === 'recently-deleted') {
+    return left.focusMediaId === right.focusMediaId;
+  }
+  if (
+    (left.kind === 'guest-gallery-settings' || left.kind === 'guest-gallery-return')
+    && (right.kind === 'guest-gallery-settings' || right.kind === 'guest-gallery-return')
+  ) {
+    return left.publicationFilter === right.publicationFilter;
   }
   return true;
 }
@@ -140,7 +227,48 @@ function managerLifecycleKey(event: EventView): string {
 
 // One confirmation is open at a time, so the exact-name field they share cannot
 // be ambiguous about which irreversible thing it is confirming.
-type EntryAction = 'rotate' | 'disable';
+type EntryAction = 'rotate' | 'disable' | 'delete';
+
+const ENTRY_ACTION_DETAILS: Record<EntryAction, {
+  verb: string;
+  warning: string;
+  danger: boolean;
+}> = {
+  rotate: {
+    verb: 'Sign out guest devices',
+    warning: 'Guests must scan again to get back in. The event link and every printed QR code stays the same.',
+    danger: false,
+  },
+  disable: {
+    verb: 'Disable printed event QR',
+    warning: 'This immediately signs out guests, pauses RSVP and photo delivery, and makes every invitation and sign using this QR stop working. It cannot be undone, and there is no replacement.',
+    danger: true,
+  },
+  delete: {
+    verb: 'Delete event',
+    warning: 'This immediately revokes access and schedules every private file for permanent deletion. It cannot be undone.',
+    danger: true,
+  },
+};
+
+type ManagerLinkRotationState =
+  | { phase: 'confirmation' }
+  | { phase: 'pending'; expectedRevision: number }
+  | {
+      phase: 'success';
+      managementLink: string;
+      managerLinkRevision: number;
+      saveStatus: 'required' | 'copied' | 'unavailable';
+    }
+  | { phase: 'failure'; message: string }
+  | {
+      phase: 'ambiguous';
+      refreshStatus: 'refreshing' | 'ready' | 'failed';
+      refreshError?: string;
+    };
+
+const AMBIGUOUS_MANAGER_LINK_ROTATION =
+  "Couldn't confirm whether the link changed. Rotate again to create a link you can save.";
 
 // The rows and the cursor that continues them are one value. Polling has to compare an incoming first
 // page against the rows on screen and decide the cursor from that same verdict, and React only
@@ -162,8 +290,14 @@ type EntryAction = 'rotate' | 'disable';
  * and no original to download.
  */
 type IntakePageState =
-  | { mode: 'active'; rows: MediaView[]; cursor: string | null }
-  | { mode: 'trash'; rows: TrashedMediaView[]; cursor: string | null };
+  | {
+      mode: 'active'; rows: MediaView[]; cursor: string | null;
+      firstPageIds: ReadonlySet<string>;
+    }
+  | {
+      mode: 'trash'; rows: TrashedMediaView[]; cursor: string | null;
+      firstPageIds: ReadonlySet<string>;
+    };
 
 interface EventEntryLoad {
   // Null once the printed entry has been disabled. There is no replacement to
@@ -214,10 +348,10 @@ const STORAGE_CAP = `${Math.round(MAX_EVENT_BYTES / 1024 ** 3)} GB`;
 // which now only says delivery is permitted. A permitted event that has not
 // reached its opening is scheduled, and no browser clock decides which.
 const UPLOAD_CHIP: Record<PhotoIntakeState, { tone: 'approved' | 'pending'; label: string }> = {
-  scheduled: { tone: 'pending', label: 'Photo delivery scheduled' },
-  'open-early': { tone: 'approved', label: 'Photo delivery open' },
-  open: { tone: 'approved', label: 'Photo delivery open' },
-  paused: { tone: 'pending', label: 'Photo delivery paused' },
+  scheduled: { tone: 'pending', label: 'Guest uploads scheduled' },
+  'open-early': { tone: 'approved', label: 'Guest uploads open early' },
+  open: { tone: 'approved', label: 'Guest uploads open' },
+  paused: { tone: 'pending', label: 'Guest uploads paused' },
 };
 
 export function ManagerPage() {
@@ -233,6 +367,7 @@ export function ManagerPage() {
 function ManagerEventPage({ eventId }: { eventId: string }) {
   const routerLocation = useLocation();
   const navigate = useNavigate();
+  const navigationType = useNavigationType();
   const parsedLocation = parseManagerLocation(routerLocation.search);
   const section = parsedLocation.location.section;
   const galleryMode = parsedLocation.location.section === 'gallery'
@@ -240,24 +375,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     : 'library';
   const canonicalManagerHref = managerHref(eventId, parsedLocation.location);
   const recoveryReturnTo = routerLocation.pathname + parsedLocation.canonicalSearch;
-  useLayoutEffect(() => {
-    if (!parsedLocation.needsReplace) return;
-    void navigate({
-      pathname: routerLocation.pathname,
-      search: parsedLocation.canonicalSearch,
-      hash: routerLocation.hash,
-    }, {
-      replace: true,
-      state: routerLocation.state,
-    });
-  }, [
-    navigate,
-    parsedLocation.canonicalSearch,
-    parsedLocation.needsReplace,
-    routerLocation.hash,
-    routerLocation.pathname,
-    routerLocation.state,
-  ]);
   // A route can change while a confirmation, Undo, or write from the previous
   // event is still settling.  Resource controllers reject that stale work; this
   // scope does the same for Manager-local UI state and imperative workspace refs.
@@ -265,12 +382,39 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   if (eventScope.current.eventId !== eventId) {
     eventScope.current = { eventId, generation: eventScope.current.generation + 1 };
   }
+  const managerMounted = useRef(true);
+  const managerAdoptionGeneration = useRef(0);
+  const pendingManagerStateCleanup = useRef<PendingManagerStateCleanup | null>(null);
+  const suspendedManagerStateCleanup = useRef<PendingManagerStateCleanup | null>(null);
+  const managerCleanupInvocation = useRef<PendingManagerStateCleanup | null>(null);
+  const pendingGalleryAnchorCapture = useRef<PendingGalleryAnchorCapture | null>(null);
+  const activeGalleryAnchorCapture = useRef<PendingGalleryAnchorCapture | null>(null);
+  const galleryAnchorCaptureInvocation = useRef<PendingGalleryAnchorCapture | null>(null);
+  const [managerAdoptionEpoch, setManagerAdoptionEpoch] = useState(0);
+
+  function retireGalleryAnchorCapture(capture: PendingGalleryAnchorCapture) {
+    capture.outcome = 'retired';
+    if (pendingGalleryAnchorCapture.current === capture) {
+      pendingGalleryAnchorCapture.current = null;
+    }
+    if (activeGalleryAnchorCapture.current === capture) {
+      activeGalleryAnchorCapture.current = null;
+    }
+    if (galleryAnchorCaptureInvocation.current === capture) {
+      galleryAnchorCaptureInvocation.current = null;
+    }
+  }
   // Every Manager resource is loaded by its own controller below. The event is
   // the only shell-critical one: it decides identity and lifecycle, and there is
   // no Manager to render without it. Intake, exports, the printed credential, and
   // the Guestbook summary each answer for themselves, so one of them failing
   // leaves the other three — and the header, the nav, and Settings — on screen.
   const [escalatedFailure, setEscalatedFailure] = useState<LoadFailure | null>(null);
+  const [hostUploadLifecycleFailure, setHostUploadLifecycleFailure] = useState<{
+    eventId: string;
+    eventGeneration: number;
+    failure: LoadFailure;
+  } | null>(null);
   // A dismissal acknowledges this event session's terminal access fact; it
   // does not make a second resource's copy of that same fact actionable again.
   // The keyed ManagerEventPage creates a fresh ref for the next event session.
@@ -292,10 +436,18 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
    * The first one wins: a second report is the same fact arriving again.
    */
   const escalate = useCallback((failure: LoadFailure) => {
+    if (failure.kind === 'ended-event') {
+      const eventGeneration = eventScope.current.generation;
+      setHostUploadLifecycleFailure((current) => (
+        current?.eventId === eventId && current.eventGeneration === eventGeneration
+          ? current
+          : { eventId, eventGeneration, failure }
+      ));
+    }
     if (escalationLocked.current) return;
     escalationLocked.current = true;
     setEscalatedFailure(failure);
-  }, []);
+  }, [eventId]);
   const [intakeMode, setIntakeMode] = useState<IntakeMode>('active');
   const [exportDownloads, setExportDownloads] = useState<Record<string, ExportDownloadView>>({});
   // Updated synchronously when disable confirms so an already-resolving
@@ -310,10 +462,23 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   // in-flight write, and an unsaved draft all survive a destination change.
   const [settingsMounted, setSettingsMounted] = useState(section === 'settings');
   const [settingsFocusEpoch, setSettingsFocusEpoch] = useState(0);
+  const [galleryVisibilityFocusEpoch, setGalleryVisibilityFocusEpoch] = useState(0);
+  const [guestGallerySettingsReturn, setGuestGallerySettingsReturn] = useState<
+    GuestGalleryReturn | null
+  >(null);
   const settingsFocusRequested = useRef(false);
+  const guestGallerySettingsFocusRequested = useRef<PublicationFilter | null>(null);
   const settingsHeading = useRef<HTMLHeadingElement>(null);
   const [entryAction, setEntryAction] = useState<EntryAction | null>(null);
   const [entryConfirm, setEntryConfirm] = useState('');
+  const [entryActionPending, setEntryActionPending] = useState(false);
+  const entryActionPendingRef = useRef(false);
+  const entryActionOrigin = useRef<HTMLElement | null>(null);
+  const entryActionCancel = useRef<HTMLButtonElement>(null);
+  const entryActionPendingStatus = useRef<HTMLParagraphElement>(null);
+  const entryActionNoticeFocusRequested = useRef(false);
+  const entryActionDisabledFocusRequested = useRef(false);
+  const entryDisabledResult = useRef<HTMLParagraphElement>(null);
   const [status, setStatus] = useState<MediaStatus>('all');
   const [searchInput, setSearchInput] = useState('');
   const [guestFilter, setGuestFilter] = useState('');
@@ -325,10 +490,13 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const trashKeepButton = useRef<HTMLButtonElement>(null);
   const trashOrigin = useRef<HTMLElement | null>(null);
   const intakeHeading = useRef<HTMLHeadingElement>(null);
-  const trashHeading = useRef<HTMLHeadingElement>(null);
+  const trashHeading = useRef<HTMLParagraphElement>(null);
+  const trashRestoreButtons = useRef(new Map<string, HTMLButtonElement>());
   const [recoveryAnnouncement, setRecoveryAnnouncement] = useState('');
   const managerUndo = useManagerUndo();
-  const recentlyDeletedFocusRequested = useRef(false);
+  const completeExportFocusRequested = useRef(false);
+  const recentlyDeletedFocusRequested = useRef<string | null>(null);
+  const [recentlyDeletedIntentGuidance, setRecentlyDeletedIntentGuidance] = useState(false);
   const [actionError, setActionError] = useState<ManagerNotice | null>(null);
   const [coverAccessFailure, setCoverAccessFailure] = useState<LoadFailure | null>(null);
   const [albumAccessFailure, setAlbumAccessFailure] = useState<LoadFailure | null>(null);
@@ -344,12 +512,41 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const [rsvpDraftDirty, setRsvpDraftDirty] = useState(false);
   const [rsvpCommitPending, setRsvpCommitPending] = useState(false);
   const [rsvpDiscardEpoch, setRsvpDiscardEpoch] = useState(0);
-  const [pendingSection, setPendingSection] = useState<Section | null>(null);
+  const [pendingSection, setPendingSection] = useState<ManagerSectionDestination | null>(null);
   const [pendingRsvpClose, setPendingRsvpClose] = useState(false);
-  const [pendingSettingsRepair, setPendingSettingsRepair] = useState(false);
   const pendingWorkPrompt = useRef<HTMLElement>(null);
   const managerNotice = useRef<HTMLElement>(null);
   const galleryWorkspace = useRef<ManagerGalleryWorkspaceHandle>(null);
+  const addPhotosTrigger = useRef<HTMLButtonElement>(null);
+  const managerUploadReturnFocus = useRef<HTMLElement | null>(null);
+  const managerLinkRotationTrigger = useRef<HTMLButtonElement>(null);
+  const managerLinkRotationKeep = useRef<HTMLButtonElement>(null);
+  const managerLinkRotationCopy = useRef<HTMLButtonElement>(null);
+  const managerLinkRotationContinue = useRef<HTMLButtonElement>(null);
+  const managerLinkRotationOutcome = useRef<HTMLButtonElement>(null);
+  const [managerLinkRotation, setManagerLinkRotation] = useState<ManagerLinkRotationState | null>(null);
+  const [rotationResourcesPaused, setRotationResourcesPaused] = useState(false);
+  const rotationResourcesPausedRef = useRef(false);
+  const deferredGalleryReconciliation = useRef(false);
+  const rotationRequestPending = useRef(false);
+  const rotationRequestGeneration = useRef(0);
+  const [managerUploadOpen, setManagerUploadOpen] = useState(false);
+  const [uploadExitState, setUploadExitState] = useState<UploadExitState>({
+    ownsBlock: false,
+    warnBeforeUnload: false,
+  });
+  const managerUploadOwner = useRef<{
+    eventId: string;
+    eventGeneration: number;
+    finalizedMediaIds: Set<string>;
+  } | null>(null);
+  const [managerUploadLibrarySignal, setManagerUploadLibrarySignal] = useState(() => ({
+    eventId,
+    eventGeneration: eventScope.current.generation,
+    version: 0,
+  }));
+  const galleryRestorationGeneration = useRef(0);
+  const pendingGalleryRestoration = useRef<PendingGalleryRestoration | null>(null);
   const [galleryMutationEpoch, setGalleryMutationEpoch] = useState(0);
   const [galleryAnnouncement, setGalleryAnnouncement] = useState('');
   const [galleryLiveHost] = useState(() => {
@@ -357,6 +554,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     element.dataset.galleryLiveHost = 'true';
     return element;
   });
+  const galleryLiveHostRef = useRef<HTMLElement | null>(galleryLiveHost);
   // GalleryViewer makes the application shell inert. Manager owns one sibling
   // body host so export progress remains live across destinations and viewer
   // movement never needs a competing status node inside the inert shell.
@@ -380,6 +578,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   // whole-event read checks whether it was overtaken before it is adopted.
   const eventReads = useRef(createEventReadGuard());
   const eventWrite = useCallback(async <T,>(request: () => Promise<T>): Promise<T> => {
+    if (rotationResourcesPausedRef.current) {
+      throw new DOMException('Manager writes are paused during link rotation.', 'AbortError');
+    }
     eventReads.current.beginWrite();
     try {
       return await request();
@@ -387,21 +588,54 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       eventReads.current.endWrite();
     }
   }, []);
-  const eventRead = useCallback(<T,>(request: () => Promise<T>): Promise<T> => (
-    eventReads.current.readFresh(request)
-  ), []);
+  const eventRead = useCallback(<T,>(request: () => Promise<T>): Promise<T> => {
+    if (rotationResourcesPausedRef.current) {
+      return Promise.reject(new DOMException(
+        'Manager reads are paused during link rotation.',
+        'AbortError',
+      ));
+    }
+    return eventReads.current.readFresh(() => {
+      if (rotationResourcesPausedRef.current) {
+        return Promise.reject(new DOMException(
+          'Manager reads are paused during link rotation.',
+          'AbortError',
+        ));
+      }
+      return request();
+    });
+  }, []);
   // `ManagerPage` keys this state owner by event id, so a route transition
   // unmounts the old session rather than letting it render into the new one.
   // Retire its imperative owners too: a held write can otherwise resume after
   // unmount and start an event-A reconciliation read even though B is visible.
-  useLayoutEffect(() => () => {
-    eventScope.current.generation += 1;
-    const more = loadMoreOwner.current;
-    loadMoreOwner.current = null;
-    more?.abort();
-    const poll = intakePollOwner.current;
-    intakePollOwner.current = null;
-    poll?.abort();
+  useLayoutEffect(() => {
+    managerMounted.current = true;
+    const suspendedCleanup = suspendedManagerStateCleanup.current;
+    suspendedManagerStateCleanup.current = null;
+    if (suspendedCleanup && suspendedCleanup.ownerEventId === eventId) {
+      suspendedCleanup.ownerEventGeneration = eventScope.current.generation;
+      pendingManagerStateCleanup.current = suspendedCleanup;
+    }
+    return () => {
+      managerMounted.current = false;
+      eventScope.current.generation += 1;
+      suspendedManagerStateCleanup.current = pendingManagerStateCleanup.current;
+      pendingManagerStateCleanup.current = null;
+      managerCleanupInvocation.current = null;
+      const pendingCapture = pendingGalleryAnchorCapture.current;
+      const activeCapture = activeGalleryAnchorCapture.current;
+      if (pendingCapture) retireGalleryAnchorCapture(pendingCapture);
+      if (activeCapture && activeCapture !== pendingCapture) {
+        retireGalleryAnchorCapture(activeCapture);
+      }
+      const more = loadMoreOwner.current;
+      loadMoreOwner.current = null;
+      more?.abort();
+      const poll = intakePollOwner.current;
+      intakePollOwner.current = null;
+      poll?.abort();
+    };
   }, []);
   // Leaving Settings flushes a valid scheduled write without waiting for its
   // response. The subtree remains mounted, so an in-flight request finishes.
@@ -440,23 +674,92 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const stuckDomains = unconfirmedDomains.filter(
     ({ status }) => status === 'invalid' || status === 'failed',
   );
+  const rotationSaveGate = managerLinkRotation?.phase === 'success'
+    && managerLinkRotation.saveStatus !== 'copied';
   const shouldBlockNavigation = unconfirmedDomains.length > 0
     || rsvpDraftDirty
-    || rsvpCommitPending;
+    || rsvpCommitPending
+    || uploadExitState.ownsBlock
+    || rotationSaveGate;
   const authorizedAlbumTarget = useRef<string | null>(null);
+  const authorizedGalleryTarget = useRef<string | null>(null);
+  const blockedGalleryCaptureKey = useRef<string | null>(null);
   const pendingManagerAdoption = useRef<PendingManagerAdoption | null>(null);
-  const blocker = useBlocker(({ currentLocation, nextLocation }) => {
-    if (shouldBlockNavigation) return true;
+  const browserPopObservation = useRef<BrowserPopObservation | null>(null);
+  const routerLocationRef = useRef(routerLocation);
+  useLayoutEffect(() => {
+    routerLocationRef.current = routerLocation;
+  }, [routerLocation]);
+  useLayoutEffect(() => {
+    const observeBrowserPop = (event: PopStateEvent) => {
+      const currentTarget = locationTarget(routerLocationRef.current);
+      const nextTarget = locationTarget(window.location);
+      const eventState = event.state;
+      const nextKey = eventState !== null
+        && typeof eventState === 'object'
+        && !Array.isArray(eventState)
+        && typeof (eventState as Record<string, unknown>).key === 'string'
+        ? (eventState as Record<string, unknown>).key as string
+        : null;
+      // React Router reverses a blocked POP before it publishes the blocker.
+      // A same-target event is the original request when it names a different
+      // entry key; the compensating return names the committed current key.
+      const committedKey = routerLocationRef.current.key;
+      const namesCommittedEntry = nextKey === committedKey
+        || (committedKey === 'default' && nextKey === null);
+      if (nextTarget === currentTarget && namesCommittedEntry) return;
+      browserPopObservation.current = { currentTarget, nextTarget, nextKey };
+    };
+    window.addEventListener('popstate', observeBrowserPop, { capture: true });
+    return () => {
+      window.removeEventListener('popstate', observeBrowserPop, { capture: true });
+    };
+  }, []);
+  function managerOwnerIsLive(owner: {
+    ownerEventId: string;
+    ownerEventGeneration: number;
+  }): boolean {
+    return managerMounted.current
+      && eventScope.current.eventId === owner.ownerEventId
+      && eventScope.current.generation === owner.ownerEventGeneration;
+  }
+
+  const blocker = useBlocker(({ currentLocation, nextLocation, historyAction }) => {
     const currentManagerLocation = parseManagerLocation(currentLocation.search);
-    const currentIsCanonicalAlbum = currentLocation.pathname === `/manage/event/${eventId}`
+    const currentIsCanonicalGallery = currentLocation.pathname === `/manage/event/${eventId}`
       && !currentManagerLocation.needsReplace
-      && currentManagerLocation.location.section === 'gallery'
-      && currentManagerLocation.location.mode === 'album';
-    if (!currentIsCanonicalAlbum) return false;
+      && currentManagerLocation.location.section === 'gallery';
     const currentTarget = locationTarget(currentLocation);
     const nextTarget = locationTarget(nextLocation);
-    if (nextTarget === currentTarget) return false;
-    return authorizedAlbumTarget.current !== nextTarget;
+    const cleanupInvocation = managerCleanupInvocation.current;
+    if (
+      historyAction === 'REPLACE'
+      && cleanupInvocation
+      && managerOwnerIsLive(cleanupInvocation)
+      && currentLocation.key === cleanupInvocation.sourceKey
+      && currentTarget === cleanupInvocation.sourceTarget
+      && nextTarget === cleanupInvocation.target
+      && nextLocation.state === cleanupInvocation.cleanupState
+    ) {
+      return false;
+    }
+    const anchorInvocation = galleryAnchorCaptureInvocation.current;
+    if (
+      historyAction === 'REPLACE'
+      && anchorInvocation
+      && managerOwnerIsLive(anchorInvocation)
+      && currentLocation.key === anchorInvocation.sourceKey
+      && currentTarget === anchorInvocation.sourceTarget
+      && nextTarget === anchorInvocation.sourceTarget
+      && nextLocation.state === anchorInvocation.state
+    ) {
+      return false;
+    }
+    if (shouldBlockNavigation) return true;
+    if (!currentIsCanonicalGallery) return false;
+    if (nextTarget === currentTarget) return true;
+    return authorizedGalleryTarget.current !== nextTarget
+      && authorizedAlbumTarget.current !== nextTarget;
   });
   const blockedNavigationKey = blocker.state === 'blocked'
     ? blocker.location.key
@@ -479,6 +782,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
 
   function clearPendingManagerAdoption() {
     authorizedAlbumTarget.current = null;
+    authorizedGalleryTarget.current = null;
     pendingManagerAdoption.current = null;
   }
 
@@ -498,6 +802,8 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   function cancelBlockedNavigation() {
     if (blocker.state === 'blocked') blocker.reset();
     blockerStateRef.current = 'unblocked';
+    blockedGalleryCaptureKey.current = null;
+    browserPopObservation.current = null;
     retireAlbumLeaveAttempt();
   }
 
@@ -527,7 +833,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     // A Router request that arrived while a section was settling owns the page.
     if (blockerStateRef.current === 'blocked') return;
     finishAlbumLeavePreparation();
-    commitManagerLeaveDestination(destination);
+    await commitManagerLeaveDestination(destination);
   }
 
   // Values below belong to one event, not to a revision of the next one.  Clear
@@ -543,6 +849,11 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     setSelected([]);
     setEntryAction(null);
     setEntryConfirm('');
+    setEntryActionPending(false);
+    entryActionPendingRef.current = false;
+    entryActionOrigin.current = null;
+    entryActionNoticeFocusRequested.current = false;
+    entryActionDisabledFocusRequested.current = false;
     setStatus('all');
     setSearchInput('');
     setGuestFilter('');
@@ -561,18 +872,38 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     setRsvpDiscardEpoch(0);
     setPendingSection(null);
     setPendingRsvpClose(false);
-    setPendingSettingsRepair(false);
+    setGuestGallerySettingsReturn(null);
+    rotationResourcesPausedRef.current = false;
+    deferredGalleryReconciliation.current = false;
+    rotationRequestPending.current = false;
+    rotationRequestGeneration.current += 1;
+    setRotationResourcesPaused(false);
+    setManagerLinkRotation(null);
+    setManagerUploadOpen(false);
+    setUploadExitState({ ownsBlock: false, warnBeforeUnload: false });
+    managerUploadOwner.current = null;
+    managerUploadReturnFocus.current = null;
+    guestGallerySettingsFocusRequested.current = null;
     retireAlbumLeaveAttempt();
-    recentlyDeletedFocusRequested.current = false;
   }, [eventId]);
 
   useEffect(() => {
     if (blockedNavigationKey === null) {
+      blockedGalleryCaptureKey.current = null;
+      browserPopObservation.current = null;
       if (albumLeaveAttemptRef.current?.destination.kind === 'router') {
         retireAlbumLeaveAttempt();
       }
       return;
     }
+    if (rotationSaveGate) {
+      if (blocker.state === 'blocked') blocker.reset();
+      blockerStateRef.current = 'unblocked';
+      blockedGalleryCaptureKey.current = null;
+      browserPopObservation.current = null;
+      return;
+    }
+    if (uploadExitState.ownsBlock) return;
     settingsAutosave.current?.flush();
     appearanceAutosave.current?.flush();
     if (authorizedAlbumTarget.current === blockedNavigationTarget) return;
@@ -581,7 +912,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       pendingManagerAdoption.current = null;
     }
     void beginAlbumLeave({ kind: 'router', locationKey: blockedNavigationKey });
-  }, [blockedNavigationKey, blockedNavigationTarget]);
+  }, [blockedNavigationKey, blockedNavigationTarget, blocker, rotationSaveGate, uploadExitState.ownsBlock]);
   useEffect(() => {
     // The requested navigation happens by itself the moment both domains
     // confirm; the host never has to answer the prompt twice.
@@ -595,28 +926,54 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           && albumLeaveAttempt.outcome.status === 'ready'
         )
       )
+      && !uploadExitState.ownsBlock
+      && !rotationSaveGate
       && unconfirmedDomains.length === 0
       && !rsvpDraftDirty
       && !rsvpCommitPending
-    ) blocker.proceed();
-  }, [albumLeaveAttempt, blockedNavigationKey, blockedNavigationTarget, blocker, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
+    ) void proceedBlockedNavigation();
+  }, [albumLeaveAttempt, blockedNavigationKey, blockedNavigationTarget, blocker, rotationSaveGate, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length, uploadExitState.ownsBlock]);
   useEffect(() => {
-    if (unconfirmedDomains.length === 0 && !rsvpDraftDirty && !rsvpCommitPending) return;
+    if (
+      unconfirmedDomains.length === 0
+      && !rsvpDraftDirty
+      && !rsvpCommitPending
+      && !uploadExitState.warnBeforeUnload
+      && !rotationSaveGate
+    ) return;
     // A browser may cancel background requests during unload, so this warns
     // rather than pretending a last-millisecond save is guaranteed.
     const warn = (unloadEvent: BeforeUnloadEvent) => { unloadEvent.preventDefault(); };
     window.addEventListener('beforeunload', warn);
     return () => { window.removeEventListener('beforeunload', warn); };
-  }, [rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length]);
+  }, [rotationSaveGate, rsvpCommitPending, rsvpDraftDirty, unconfirmedDomains.length, uploadExitState.warnBeforeUnload]);
   useEffect(() => {
     if (!albumAccessFailure && autosaveRecovery?.domain !== 'album') return;
     managerNotice.current?.focus();
   }, [albumAccessFailure, autosaveRecovery]);
+  useLayoutEffect(() => {
+    if (!entryActionPending) return;
+    entryActionPendingStatus.current?.focus();
+  }, [entryActionPending]);
+  useLayoutEffect(() => {
+    if (
+      entryAction !== null
+      || !entryActionNoticeFocusRequested.current
+      || (!actionError && !escalatedFailure)
+    ) return;
+    entryActionNoticeFocusRequested.current = false;
+    managerNotice.current?.focus();
+  }, [actionError, entryAction, escalatedFailure]);
   useEffect(() => {
     if (rsvpDraftDirty && (blocker.state === 'blocked' || pendingSection !== null || pendingRsvpClose)) {
       pendingWorkPrompt.current?.focus();
     }
   }, [blocker.state, pendingRsvpClose, pendingSection, rsvpDraftDirty]);
+  useEffect(() => {
+    if (managerLinkRotation?.phase === 'success' && managerLinkRotation.saveStatus === 'copied') {
+      managerLinkRotationContinue.current?.focus();
+    }
+  }, [managerLinkRotation]);
 
   /**
    * The Intake query, as one identity.
@@ -652,6 +1009,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     queryKey: 'event',
     fallbackMessage: 'The event manager could not be loaded.',
     onEscalate: escalate,
+    enabled: !rotationResourcesPaused,
     load: useCallback(async (signal: AbortSignal) => {
       const readToken = eventReads.current.openRead();
       const loaded = await api<{ event: EventView }>(`/api/manage/events/${eventId}`, { signal });
@@ -680,13 +1038,24 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       ? 'Recently deleted could not be loaded.'
       : 'The live intake could not be loaded.',
     onEscalate: escalate,
+    enabled: !rotationResourcesPaused,
     load: useCallback(async (signal: AbortSignal) => {
       if (intakeMode === 'trash') {
         const page = await api<ManagerTrashPage>(intakePath(), { signal });
-        return { mode: 'trash' as const, rows: page.media, cursor: page.nextCursor ?? null };
+        return {
+          mode: 'trash' as const,
+          rows: page.media,
+          cursor: page.nextCursor ?? null,
+          firstPageIds: new Set(page.media.map(({ id }) => id)),
+        };
       }
       const page = await api<ManagerMediaPage>(intakePath(), { signal });
-      return { mode: 'active' as const, rows: page.media, cursor: page.nextCursor ?? null };
+      return {
+        mode: 'active' as const,
+        rows: page.media,
+        cursor: page.nextCursor ?? null,
+        firstPageIds: new Set(page.media.map(({ id }) => id)),
+      };
     }, [intakeMode, intakePath]),
   });
   const intakePage = intakeResource.state.value;
@@ -696,6 +1065,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const media = intakePage?.mode === 'active' ? intakePage.rows : [];
   const trashRows = intakePage?.mode === 'trash' ? intakePage.rows : [];
   const nextMediaCursor = intakePage?.cursor ?? null;
+  const showRecentlyDeletedIntentGuidance = recentlyDeletedIntentGuidance
+    && intakePage?.mode === 'trash'
+    && intakePage.cursor !== null;
   // Recently deleted does not need a poll just to cross a known server deadline.
   // The shared hook caps long waits at the browser timer maximum and re-evaluates,
   // so a 30-day recovery window cannot turn into an immediate-loop timeout.
@@ -706,6 +1078,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     queryKey: 'exports',
     fallbackMessage: 'The export status could not be loaded.',
     onEscalate: escalate,
+    enabled: !rotationResourcesPaused,
     load: useCallback(async (signal: AbortSignal) => (
       (await api<{ exports: ExportView[] }>(`/api/manage/events/${eventId}/exports`, { signal })).exports
     ), [eventId]),
@@ -719,6 +1092,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     queryKey: 'gallery-audience-summary',
     fallbackMessage: 'The Gallery audience status could not be loaded.',
     onEscalate: escalate,
+    enabled: !rotationResourcesPaused,
     load: useCallback(async (signal: AbortSignal) => (
       await api<{ summary: GalleryAudienceSummaryView }>(
         `/api/manage/events/${eventId}/gallery/summary`,
@@ -751,6 +1125,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     queryKey: 'entry',
     fallbackMessage: 'The printed event credential could not be loaded.',
     onEscalate: escalate,
+    enabled: !rotationResourcesPaused,
     load: useCallback(async (signal: AbortSignal) => {
       try {
         return await api<EventEntryLoad>(`/api/manage/events/${eventId}/entry`, { signal });
@@ -769,12 +1144,24 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   useEffect(() => {
     if (entryResource.state.value) entryDisabled.current = entryResource.state.value.disabledAt !== null;
   }, [entryResource.state.value]);
+  useLayoutEffect(() => {
+    if (
+      !entryActionDisabledFocusRequested.current
+      || entryAction !== null
+      || entryResource.state.value?.eventLink !== null
+    ) return;
+    const result = entryDisabledResult.current;
+    if (!result?.isConnected) return;
+    entryActionDisabledFocusRequested.current = false;
+    result.focus();
+  }, [entryAction, entryResource.state.value?.eventLink]);
 
   const guestbookResource = useManagerResource<GuestbookSummary>({
     eventId,
     queryKey: 'guestbook-summary',
     fallbackMessage: 'The Guestbook summary could not be loaded.',
     onEscalate: escalate,
+    enabled: !rotationResourcesPaused,
     load: useCallback(async (signal: AbortSignal) => (
       (await api<{ summary: GuestbookSummary }>(
         `/api/manage/events/${eventId}/guestbook/summary`,
@@ -785,6 +1172,49 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const guestbookSummary = guestbookResource.state.value;
   const guestbookSummaryFailure = guestbookResource.state.failure?.message ?? null;
   const refreshGuestbookSummary = guestbookResource.reload;
+
+  function retireManagerResourcesForRotation() {
+    rotationResourcesPausedRef.current = true;
+    setRotationResourcesPaused(true);
+    // These editors stay mounted outside their visible destination. Retire the
+    // adoption right of a sent save and keep the newest unsent intent queued;
+    // otherwise its debounce would hit the write guard and become a false
+    // failure while the credential transition is deliberately paused.
+    settingsAutosave.current?.pause();
+    appearanceAutosave.current?.pause();
+    // Move the row-read epoch as well as each controller generation. A quiet
+    // lifecycle read that ignores AbortSignal cannot adopt or retry after the
+    // rotation boundary.
+    eventReads.current.beginWrite();
+    eventReads.current.endWrite();
+    const more = loadMoreOwner.current;
+    loadMoreOwner.current = null;
+    more?.abort();
+    const intakePoll = intakePollOwner.current;
+    intakePollOwner.current = null;
+    intakePoll?.abort();
+    eventResource.update((current) => current);
+    intakeResource.update((current) => current);
+    exportsResource.update((current) => current);
+    audienceResource.update((current) => current);
+    entryResource.update((current) => current);
+    guestbookResource.update((current) => current);
+  }
+
+  function resumeManagerResourcesAfterRotation() {
+    if (!rotationResourcesPausedRef.current) return;
+    rotationResourcesPausedRef.current = false;
+    setRotationResourcesPaused(false);
+    settingsAutosave.current?.resume();
+    appearanceAutosave.current?.resume();
+    // Every controller restarts when `enabled` becomes true. Carry only the
+    // local Gallery epoch across the pause; issuing the four invalidators here
+    // as well would duplicate those canonical resume reads.
+    if (deferredGalleryReconciliation.current) {
+      deferredGalleryReconciliation.current = false;
+      setGalleryMutationEpoch((current) => current + 1);
+    }
+  }
 
   // Every mutation that changes Gallery membership crosses this one boundary.
   // The ref follows the currently committed Intake query while the callback
@@ -815,6 +1245,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     // response belongs to that old event, but it must not start reconciliation
     // reads or bump the epoch of the Manager now on screen.
     if (eventScope.current.generation !== galleryMutationOwner.current) return;
+    if (rotationResourcesPausedRef.current) {
+      deferredGalleryReconciliation.current = true;
+      return;
+    }
     setGalleryMutationEpoch((current) => current + 1);
     const owners = galleryResourceInvalidators.current;
     void owners.audience();
@@ -822,6 +1256,68 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     void owners.intake();
     void owners.guestbook();
   }, []);
+
+  const invalidateAfterManagerUpload = useCallback(() => {
+    const owner = managerUploadOwner.current;
+    if (
+      owner === null
+      || owner.eventId !== eventId
+      || owner.eventGeneration !== eventScope.current.generation
+    ) return;
+    if (rotationResourcesPausedRef.current) {
+      deferredGalleryReconciliation.current = true;
+      return;
+    }
+    void eventResource.invalidate();
+    if (intakeMode === 'active') void intakeResource.invalidate();
+    void guestbookResource.invalidate();
+  }, [eventId, eventResource.invalidate, guestbookResource.invalidate, intakeMode, intakeResource.invalidate]);
+
+  const handleManagerUploadFinalized = useCallback(({ mediaId }: { mediaId: string }) => {
+    const owner = managerUploadOwner.current;
+    if (
+      owner === null
+      || owner.eventId !== eventId
+      || owner.eventGeneration !== eventScope.current.generation
+      || owner.finalizedMediaIds.has(mediaId)
+    ) return;
+    owner.finalizedMediaIds.add(mediaId);
+    setManagerUploadLibrarySignal((current) => ({
+      eventId: owner.eventId,
+      eventGeneration: owner.eventGeneration,
+      version: current.eventId === owner.eventId
+        && current.eventGeneration === owner.eventGeneration
+        ? current.version + 1
+        : 1,
+    }));
+    invalidateAfterManagerUpload();
+  }, [eventId, invalidateAfterManagerUpload]);
+
+  const handleManagerUploadExitGate = useCallback((next: UploadExitState) => {
+    setUploadExitState((current) => (
+      current.ownsBlock === next.ownsBlock
+      && current.warnBeforeUnload === next.warnBeforeUnload
+        ? current
+        : next
+    ));
+  }, []);
+
+  const closeManagerUpload = useCallback(() => {
+    const owner = managerUploadOwner.current;
+    const hasFinalizedMediaForCurrentEvent = owner !== null
+      && owner.eventId === eventId
+      && owner.eventGeneration === eventScope.current.generation
+      && owner.finalizedMediaIds.size > 0;
+    if (
+      hasFinalizedMediaForCurrentEvent
+      || (managerUploadReturnFocus.current && !managerUploadReturnFocus.current.isConnected)
+    ) {
+      const toolbarTrigger = addPhotosTrigger.current;
+      managerUploadReturnFocus.current = toolbarTrigger?.isConnected ? toolbarTrigger : null;
+    }
+    managerUploadOwner.current = null;
+    setManagerUploadOpen(false);
+  }, [eventId]);
 
   /**
    * Only the event can empty the Manager.
@@ -860,7 +1356,8 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
    */
   const refreshIntake = useCallback(async () => {
     if (
-      intakeMode !== 'active'
+      rotationResourcesPausedRef.current
+      || intakeMode !== 'active'
       || intakeResource.state.terminal
       || eventResource.state.terminal
       || intakeResource.isTerminal()
@@ -900,12 +1397,18 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           mode: 'active' as const,
           rows: firstPage.media,
           cursor: firstPage.nextCursor ?? null,
+          firstPageIds: new Set(firstPage.media.map(({ id }) => id)),
         };
         if (!current || current.mode !== 'active') return fresh;
         const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
         const retained = current.rows.filter(({ id }) => !refreshedIds.has(id));
         if (current.rows.length === 0 || retained.length === current.rows.length) return fresh;
-        return { mode: 'active', rows: [...firstPage.media, ...retained], cursor: current.cursor };
+        return {
+          mode: 'active',
+          rows: [...firstPage.media, ...retained],
+          cursor: current.cursor,
+          firstPageIds: fresh.firstPageIds,
+        };
       });
     }).catch((caught) => {
       if (!ownsPoll() || (caught instanceof DOMException && caught.name === 'AbortError')) return;
@@ -947,12 +1450,14 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
               mode: 'trash',
               rows: [...current.rows, ...(appended as TrashedMediaView[])],
               cursor: page.nextCursor ?? null,
+              firstPageIds: current.firstPageIds,
             }
           : {
               mode: 'active',
               rows: [...current.rows, ...(appended as MediaView[])],
               cursor: page.nextCursor ?? null,
-          };
+              firstPageIds: current.firstPageIds,
+            };
       });
       // A newer query, poll, or confirmed mutation owns any panel notice it
       // installed. An old successful page must not erase that newer feedback
@@ -1030,6 +1535,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   // Every host mutation reports through here, so a rejected write leaves the current cards, filters,
   // and section exactly where they were and only adds a dismissible notice.
   async function runManagerAction(action: () => Promise<void>, rethrow = false) {
+    if (rotationResourcesPausedRef.current) return;
     const scope = eventScope.current.generation;
     setActionError(null);
     try {
@@ -1046,7 +1552,8 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   // beside it.
   useEffect(() => {
     if (
-      section !== 'intake'
+      rotationResourcesPaused
+      || section !== 'intake'
       || intakeMode !== 'active'
       || intakeResource.state.terminal
       || eventResource.state.terminal
@@ -1055,7 +1562,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       if (document.visibilityState === 'visible') void refreshIntake();
     }, 5_000);
     return () => window.clearInterval(interval);
-  }, [eventResource.state.terminal, intakeMode, intakeResource.state.terminal, refreshIntake, section]);
+  }, [eventResource.state.terminal, intakeMode, intakeResource.state.terminal, refreshIntake, rotationResourcesPaused, section]);
   /**
    * An export is the terminal act of the whole product and it runs in a Workflow, so its
    * card is the one place the host waits on work they cannot see. Nothing polled it: the
@@ -1076,6 +1583,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     if (activeExport) lastActiveExport.current = { eventId, id: activeExport.id };
   }, [activeExport, eventId]);
   useEffect(() => {
+    if (rotationResourcesPaused) return;
     if (exportsResource.state.terminal || eventResource.state.terminal) return;
     if (activeExportState !== 'queued' && activeExportState !== 'running') return;
     const refreshVisibleExports = () => {
@@ -1087,7 +1595,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       window.clearInterval(interval);
       window.removeEventListener('focus', refreshVisibleExports);
     };
-  }, [activeExportState, eventResource.state.terminal, exportsResource.state.terminal, refreshExports]);
+  }, [activeExportState, eventResource.state.terminal, exportsResource.state.terminal, refreshExports, rotationResourcesPaused]);
   // A retry keeps its original createdAt. Once that tracked job terminalizes,
   // a cross-kind createdAt sort can otherwise switch the announcement to an
   // older terminal result and never announce the job the host was waiting on.
@@ -1125,6 +1633,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }`);
   });
   useEffect(() => {
+    if (rotationResourcesPaused) return;
     if (section !== 'guestbook') return;
     const refreshVisibleSummary = () => {
       if (document.visibilityState === 'visible') void refreshGuestbookSummary();
@@ -1135,7 +1644,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       window.clearInterval(interval);
       window.removeEventListener('focus', refreshVisibleSummary);
     };
-  }, [refreshGuestbookSummary, section]);
+  }, [refreshGuestbookSummary, rotationResourcesPaused, section]);
   useEffect(() => {
     let current = true;
     // The event link never changes, so this renders once. It is still cleared
@@ -1156,6 +1665,158 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     return () => { current = false; };
   }, [eventLink]);
 
+  function currentGalleryStateWithAnchor(): RouterHistoryState {
+    const currentLocation = parsedLocation.location;
+    const clean = sanitizeManagerHistoryState(routerLocation.state, eventId, currentLocation).state;
+    if (currentLocation.section !== 'gallery') return clean;
+    const anchor = galleryWorkspace.current?.captureAnchor(currentLocation.mode) ?? null;
+    return withGalleryAnchor(clean, eventId, currentLocation.mode, anchor);
+  }
+
+  async function replaceCurrentGalleryEntryWithAnchor(): Promise<RouterHistoryState | null> {
+    const state = currentGalleryStateWithAnchor();
+    if (parsedLocation.location.section !== 'gallery') return state;
+    const currentTarget = locationTarget(routerLocation);
+    const previousActiveCapture = activeGalleryAnchorCapture.current;
+    const previousPendingCapture = pendingGalleryAnchorCapture.current;
+    if (previousActiveCapture) retireGalleryAnchorCapture(previousActiveCapture);
+    if (previousPendingCapture && previousPendingCapture !== previousActiveCapture) {
+      retireGalleryAnchorCapture(previousPendingCapture);
+    }
+    const capture: PendingGalleryAnchorCapture = {
+      ownerEventId: eventId,
+      ownerEventGeneration: eventScope.current.generation,
+      sourceKey: routerLocation.key,
+      sourceTarget: currentTarget,
+      state,
+      outcome: 'pending',
+    };
+    pendingGalleryAnchorCapture.current = capture;
+    activeGalleryAnchorCapture.current = capture;
+    galleryAnchorCaptureInvocation.current = capture;
+    let navigation: void | Promise<void>;
+    try {
+      navigation = navigate({
+        pathname: routerLocation.pathname,
+        search: routerLocation.search,
+        hash: routerLocation.hash,
+      }, { replace: true, state });
+    } finally {
+      if (galleryAnchorCaptureInvocation.current === capture) {
+        galleryAnchorCaptureInvocation.current = null;
+      }
+    }
+    try {
+      await navigation;
+    } catch {
+      retireGalleryAnchorCapture(capture);
+      return null;
+    }
+    const mayContinue = managerOwnerIsLive(capture)
+      && activeGalleryAnchorCapture.current === capture
+      && (
+        capture.outcome === 'committed'
+        || (
+          capture.outcome === 'pending'
+          && pendingGalleryAnchorCapture.current === capture
+        )
+      );
+    if (activeGalleryAnchorCapture.current === capture) {
+      activeGalleryAnchorCapture.current = null;
+    }
+    if (!mayContinue) {
+      retireGalleryAnchorCapture(capture);
+      return null;
+    }
+    return state;
+  }
+
+  function prepareAdoptedManagerState(consumeGalleryAnchor = true): {
+    anchor: GalleryAnchor | null;
+    intent: ManagerNavigationIntent | null;
+    state: RouterHistoryState;
+    needsReplace: boolean;
+  } {
+    const clean = sanitizeManagerHistoryState(
+      routerLocation.state,
+      eventId,
+      parsedLocation.location,
+    );
+    const anchor = consumeGalleryAnchor && parsedLocation.location.section === 'gallery'
+      ? clean.envelope?.anchors?.[parsedLocation.location.mode] ?? null
+      : null;
+    const stateWithoutAnchor = anchor && parsedLocation.location.section === 'gallery'
+      ? withGalleryAnchor(clean.state, eventId, parsedLocation.location.mode, null)
+      : clean.state;
+    const consumed = consumeManagerIntent(
+      stateWithoutAnchor,
+      eventId,
+      parsedLocation.location,
+    );
+    return {
+      anchor,
+      intent: consumed.intent,
+      state: consumed.state,
+      needsReplace: parsedLocation.needsReplace
+        || anchor !== null
+        || clean.needsReplace
+        || consumed.intent !== null,
+    };
+  }
+
+  async function proceedBlockedNavigation() {
+    if (blocker.state !== 'blocked') return;
+    const navigationKey = blocker.location.key;
+    if (blockedGalleryCaptureKey.current === navigationKey) return;
+    blockedGalleryCaptureKey.current = navigationKey;
+    const target = locationTarget(blocker.location);
+    let proceeded = false;
+    try {
+      const state = currentGalleryStateWithAnchor();
+      authorizedGalleryTarget.current = target;
+      authorizedAlbumTarget.current = target;
+      const observation = browserPopObservation.current;
+      const targetKeyMatches = observation?.nextKey === navigationKey
+        || (navigationKey === 'default' && observation?.nextKey === null);
+      const isObservedBrowserPop = pendingManagerAdoption.current?.target !== target
+        && observation?.currentTarget === locationTarget(routerLocation)
+        && observation.nextTarget === target
+        && targetKeyMatches;
+      const rawHistoryState = window.history.state;
+      const historyState = rawHistoryState !== null
+        && typeof rawHistoryState === 'object'
+        && !Array.isArray(rawHistoryState)
+        ? rawHistoryState as Record<string, unknown>
+        : null;
+      const historyKey = historyState?.key;
+      const ownsCurrentBrowserEntry = historyState !== null
+        && typeof historyState.idx === 'number'
+        && Number.isFinite(historyState.idx)
+        && (
+          historyKey === routerLocation.key
+          || (
+            routerLocation.key === 'default'
+            && historyKey === undefined
+            && historyState.idx === 0
+          )
+        );
+      if (
+        isObservedBrowserPop
+        && locationTarget(window.location) === locationTarget(routerLocation)
+        && ownsCurrentBrowserEntry
+      ) {
+        window.history.replaceState({ ...historyState, usr: state }, '');
+      }
+      browserPopObservation.current = null;
+      blocker.proceed();
+      proceeded = true;
+    } finally {
+      if (!proceeded && blockedGalleryCaptureKey.current === navigationKey) {
+        blockedGalleryCaptureKey.current = null;
+      }
+    }
+  }
+
   function managerLocationForDestination(
     destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
   ): ManagerLocation {
@@ -1163,66 +1824,378 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       return { section: 'gallery', mode: destination.mode };
     }
     if (destination.kind === 'settings-repair') return { section: 'settings' };
+    if (destination.kind === 'guest-gallery-settings') return { section: 'settings' };
+    if (destination.kind === 'guest-gallery-return') {
+      return { section: 'gallery', mode: 'guest-gallery' };
+    }
     if (destination.kind === 'recently-deleted') return { section: 'intake' };
+    if (destination.kind === 'complete-export') return { section: 'gallery', mode: 'library' };
     return destination.section === 'gallery'
       ? { section: 'gallery', mode: 'library' }
       : { section: destination.section };
   }
 
-  function commitManagerLeaveDestination(
+  async function commitManagerLeaveDestination(
     destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
   ) {
+    const departureState = parsedLocation.location.section === 'gallery'
+      ? await replaceCurrentGalleryEntryWithAnchor()
+      : currentGalleryStateWithAnchor();
+    if (departureState === null) return;
     const target = managerHref(eventId, managerLocationForDestination(destination));
-    pendingManagerAdoption.current = { destination, target };
+    const cleanTargetState = sanitizeManagerHistoryState(
+      departureState,
+      eventId,
+      managerLocationForDestination(destination),
+    ).state;
+    const targetState = destination.kind === 'complete-export'
+      ? withManagerIntent(cleanTargetState, eventId, { kind: 'focus-complete-export' })
+      : destination.kind === 'recently-deleted'
+        ? withManagerIntent(cleanTargetState, eventId, {
+            kind: 'open-recently-deleted',
+            focusMediaId: destination.focusMediaId,
+          })
+        : destination.kind === 'guest-gallery-settings'
+          || destination.kind === 'guest-gallery-return'
+          ? withManagerIntent(cleanTargetState, eventId, {
+              kind: 'edit-guest-gallery-availability',
+              returnTo: {
+                section: 'gallery',
+                mode: 'guest-gallery',
+                publicationFilter: destination.publicationFilter,
+              },
+            })
+        : cleanTargetState;
+    pendingManagerAdoption.current = { destination, target, state: targetState };
     authorizedAlbumTarget.current = target;
-    void navigate(target);
+    authorizedGalleryTarget.current = target;
+    await navigate(target, { state: targetState });
   }
 
   function adoptManagerDestination(
     destination: Exclude<ManagerLeaveDestination, { kind: 'router' }>,
   ) {
-    if (destination.kind === 'recently-deleted') {
-      recentlyDeletedFocusRequested.current = true;
-      setIntakeMode('trash');
-    } else if (destination.kind === 'settings-repair') {
+    if (destination.kind === 'settings-repair') {
       settingsFocusRequested.current = true;
       setSettingsFocusEpoch((current) => current + 1);
     }
   }
 
-  function cleanUpAdoptedManagerLocation() {
+  function adoptManagerIntent(intent: ManagerNavigationIntent | null) {
+    if (intent?.kind === 'edit-guest-gallery-availability') {
+      if (section === 'settings') {
+        setGuestGallerySettingsReturn({ ...intent.returnTo });
+        setGalleryVisibilityFocusEpoch((current) => current + 1);
+        return;
+      }
+      if (section === 'gallery' && galleryMode === 'guest-gallery') {
+        guestGallerySettingsFocusRequested.current = intent.returnTo.publicationFilter;
+        settleGuestGallerySettingsIntentFocus();
+      }
+      return;
+    }
+    if (intent?.kind === 'focus-complete-export') {
+      completeExportFocusRequested.current = true;
+      if (
+        section === 'gallery'
+        && galleryMode === 'library'
+        && galleryWorkspace.current !== null
+      ) {
+        completeExportFocusRequested.current = false;
+        galleryWorkspace.current.focusCompleteExport();
+      }
+      return;
+    }
+    if (intent?.kind === 'open-recently-deleted') {
+      recentlyDeletedFocusRequested.current = intent.focusMediaId;
+      setIntakeMode('trash');
+      settleRecentlyDeletedIntentFocus();
+    }
+  }
+
+  function settleGuestGallerySettingsIntentFocus(): boolean {
+    const requestedFilter = guestGallerySettingsFocusRequested.current;
+    if (
+      requestedFilter === null
+      || section !== 'gallery'
+      || galleryMode !== 'guest-gallery'
+      || galleryWorkspace.current === null
+    ) return false;
+    galleryWorkspace.current.setGuestGalleryFilter(requestedFilter);
+    galleryWorkspace.current.focusGuestGallerySettingsAction();
+    guestGallerySettingsFocusRequested.current = null;
+    return true;
+  }
+
+  function retireRetainedIntentFocus() {
+    recentlyDeletedFocusRequested.current = null;
+    setRecentlyDeletedIntentGuidance(false);
+  }
+
+  function retireManagerIntentFocus() {
+    completeExportFocusRequested.current = false;
+    galleryWorkspace.current?.retireCompleteExportFocus();
+    guestGallerySettingsFocusRequested.current = null;
+    galleryWorkspace.current?.retireGuestGallerySettingsFocus();
+    retireRetainedIntentFocus();
+  }
+
+  function chooseIntakeMode(mode: IntakeMode) {
+    retireRetainedIntentFocus();
+    setIntakeMode(mode);
+  }
+
+  const scheduleGalleryAnchorRestoration = useCallback((generation: number) => {
+    const requested = pendingGalleryRestoration.current;
+    if (requested?.generation !== generation || requested.frameScheduled) return;
+    requested.frameScheduled = true;
+    requestAnimationFrame(() => {
+      const pending = pendingGalleryRestoration.current;
+      if (
+        generation !== galleryRestorationGeneration.current
+        || pending?.generation !== generation
+      ) return;
+      pending.frameScheduled = false;
+      const outcome = galleryWorkspace.current?.restoreAnchor(pending.mode, pending.anchor)
+        ?? 'pending';
+      if (outcome !== 'pending') pendingGalleryRestoration.current = null;
+    });
+  }, []);
+
+  function cleanUpAdoptedManagerLocation(anchor: GalleryAnchor | null) {
     if (section === 'settings') setSettingsMounted(true);
+    setGuestGallerySettingsReturn(null);
     setSelected([]);
     setActionError(null);
     setEntryAction(null);
     setEntryConfirm('');
+    retireManagerIntentFocus();
     if (section === 'intake') setStatus('all');
     // Deep in a 120-photo intake grid, the new section would otherwise open somewhere in its middle —
     // or under the sticky header. Restore the top once the new section has actually been laid out, and
     // only when there is something to restore. `instant` rather than `auto`, because the document
     // carries `scroll-behavior: smooth` and `auto` would defer to it.
+    const generation = ++galleryRestorationGeneration.current;
+    pendingGalleryRestoration.current = null;
+    if (anchor && parsedLocation.location.section === 'gallery') {
+      pendingGalleryRestoration.current = {
+        generation,
+        mode: parsedLocation.location.mode,
+        anchor,
+        frameScheduled: false,
+      };
+      scheduleGalleryAnchorRestoration(generation);
+      return;
+    }
     requestAnimationFrame(() => {
+      if (generation !== galleryRestorationGeneration.current) return;
       if (window.scrollY > 0) window.scrollTo({ top: 0, behavior: 'instant' });
     });
   }
 
-  const adoptedManagerHref = useRef(canonicalManagerHref);
+  const handleGalleryAnchorReady = useCallback((mode: GalleryMode) => {
+    const pending = pendingGalleryRestoration.current;
+    if (pending?.mode !== mode) return;
+    scheduleGalleryAnchorRestoration(pending.generation);
+  }, [scheduleGalleryAnchorRestoration]);
+
+  const managerEntryIdentity = `${routerLocation.key}\u0000${canonicalManagerHref}`;
+  const adoptedManagerEntry = useRef<string | null>(null);
+  const initialManagerAdoptionPending = useRef(true);
+
+  function finishCommittedManagerAdoption(adopted: PendingManagerStateCleanup) {
+    if (!adopted.initial) {
+      if (adopted.destination) adoptManagerDestination(adopted.destination);
+      finishAlbumLeavePreparation();
+      cleanUpAdoptedManagerLocation(adopted.anchor);
+    }
+    adoptManagerIntent(adopted.intent);
+  }
+
+  function managerIdentityFor(location: typeof routerLocation): string {
+    const parsed = parseManagerLocation(location.search);
+    return `${location.key}\u0000${managerHref(eventId, parsed.location)}`;
+  }
+
+  function clearPendingManagerCleanup(staged: PendingManagerStateCleanup) {
+    if (pendingManagerStateCleanup.current === staged) {
+      pendingManagerStateCleanup.current = null;
+    }
+    if (managerCleanupInvocation.current === staged) {
+      managerCleanupInvocation.current = null;
+    }
+  }
+
+  function committedLocationMatchesCleanup(staged: PendingManagerStateCleanup): boolean {
+    const committed = routerLocationRef.current;
+    return managerOwnerIsLive(staged)
+      && staged.generation === managerAdoptionGeneration.current
+      && committed.key !== staged.sourceKey
+      && locationTarget(committed) === staged.target
+      && committed.state === staged.cleanupState;
+  }
+
+  function finishExactManagerCleanup(staged: PendingManagerStateCleanup) {
+    if (!committedLocationMatchesCleanup(staged)) return;
+    const committed = routerLocationRef.current;
+    clearPendingManagerCleanup(staged);
+    adoptedManagerEntry.current = managerIdentityFor(committed);
+    finishCommittedManagerAdoption(staged);
+  }
+
+  function runManagerCleanup(staged: PendingManagerStateCleanup, attempt = 0) {
+    if (
+      !managerOwnerIsLive(staged)
+      || managerIdentityFor(routerLocationRef.current) !== staged.sourceIdentity
+    ) return;
+    if (attempt > 0) {
+      // A rejected attempt retires its state-object capability. The one
+      // bounded retry gets a distinct object so a late attempt-0 commit cannot
+      // be mistaken for the retry's exact successor.
+      staged.cleanupState = { ...staged.cleanupState };
+    }
+    pendingManagerStateCleanup.current = staged;
+    managerCleanupInvocation.current = staged;
+    let navigation: void | Promise<void>;
+    try {
+      navigation = navigate(staged.cleanupLocation, {
+        replace: true,
+        state: staged.cleanupState,
+      });
+    } catch {
+      navigation = Promise.reject(new Error('Manager cleanup navigation failed.'));
+    } finally {
+      if (managerCleanupInvocation.current === staged) {
+        managerCleanupInvocation.current = null;
+      }
+    }
+    void Promise.resolve(navigation).then(() => {
+      if (pendingManagerStateCleanup.current !== staged || !managerOwnerIsLive(staged)) return;
+      if (committedLocationMatchesCleanup(staged)) {
+        finishExactManagerCleanup(staged);
+        return;
+      }
+      // Router navigation completion can precede the React commit that
+      // publishes its location. Keep the exact cleanup pending while the
+      // source entry is still what this component has committed; the location
+      // effect below will finish only the matching successor.
+      if (managerIdentityFor(routerLocationRef.current) !== staged.sourceIdentity) {
+        clearPendingManagerCleanup(staged);
+        adoptedManagerEntry.current = null;
+        setManagerAdoptionEpoch((current) => current + 1);
+      }
+    }).catch(() => {
+      if (pendingManagerStateCleanup.current !== staged || !managerOwnerIsLive(staged)) return;
+      clearPendingManagerCleanup(staged);
+      adoptedManagerEntry.current = null;
+      if (
+        attempt === 0
+        && managerIdentityFor(routerLocationRef.current) === staged.sourceIdentity
+      ) runManagerCleanup(staged, 1);
+    });
+  }
+
   useLayoutEffect(() => {
-    if (adoptedManagerHref.current === canonicalManagerHref) return;
-    adoptedManagerHref.current = canonicalManagerHref;
-    const pending = pendingManagerAdoption.current;
-    if (pending?.target === canonicalManagerHref) adoptManagerDestination(pending.destination);
+    if (adoptedManagerEntry.current === managerEntryIdentity) return;
+
+    const pendingCleanup = pendingManagerStateCleanup.current;
+    if (pendingCleanup) {
+      const isExactCleanupSuccessor = managerOwnerIsLive(pendingCleanup)
+        && pendingCleanup.generation === managerAdoptionGeneration.current
+        && navigationType === 'REPLACE'
+        && routerLocation.key !== pendingCleanup.sourceKey
+        && locationTarget(routerLocation) === pendingCleanup.target
+        && routerLocation.state === pendingCleanup.cleanupState;
+      // The exact state object is created for one cleanup call and retained by
+      // Router on its committed Location. Equal foreign state from a different
+      // REPLACE cannot claim the cleanup's intent or anchor side effects.
+      if (isExactCleanupSuccessor) {
+        finishExactManagerCleanup(pendingCleanup);
+        return;
+      }
+      clearPendingManagerCleanup(pendingCleanup);
+      adoptedManagerEntry.current = null;
+    }
+
+    const pendingAnchorCapture = pendingGalleryAnchorCapture.current;
+    if (pendingAnchorCapture) {
+      const isExactAnchorCapture = managerOwnerIsLive(pendingAnchorCapture)
+        && navigationType === 'REPLACE'
+        && routerLocation.key !== pendingAnchorCapture.sourceKey
+        && locationTarget(routerLocation) === pendingAnchorCapture.sourceTarget
+        && routerLocation.state === pendingAnchorCapture.state;
+      if (isExactAnchorCapture) {
+        // Capturing the departing Gallery anchor replaces this same browser
+        // entry before the actual navigation. Leave the stored anchor for the
+        // later POP that returns to this exact entry.
+        pendingAnchorCapture.outcome = 'committed';
+        pendingGalleryAnchorCapture.current = null;
+        adoptedManagerEntry.current = managerEntryIdentity;
+        return;
+      }
+      retireGalleryAnchorCapture(pendingAnchorCapture);
+    }
+
+    // Exact commit classification clears the pending slot before the Router
+    // Promise necessarily settles. A newer entry must still retire that
+    // committed capture's awaiting destination continuation.
+    const activeAnchorCapture = activeGalleryAnchorCapture.current;
+    if (activeAnchorCapture) {
+      retireGalleryAnchorCapture(activeAnchorCapture);
+    }
+
+    // Any entry other than the staged REPLACE successor is a newer adoption.
+    // Retire the old task before decoding the new one so late resources cannot
+    // focus hidden/abandoned work.
+    const generation = ++managerAdoptionGeneration.current;
+    adoptedManagerEntry.current = managerEntryIdentity;
+    browserPopObservation.current = null;
+    retireManagerIntentFocus();
+    setGuestGallerySettingsReturn(null);
+    const initial = initialManagerAdoptionPending.current;
+    initialManagerAdoptionPending.current = false;
+    const adopted = prepareAdoptedManagerState(!initial);
+    const pending = pendingManagerAdoption.current?.target === canonicalManagerHref
+      && pendingManagerAdoption.current.state === routerLocation.state
+      ? pendingManagerAdoption.current.destination
+      : null;
     clearPendingManagerAdoption();
-    finishAlbumLeavePreparation();
-    cleanUpAdoptedManagerLocation();
-  }, [canonicalManagerHref]);
+    const sourceTarget = locationTarget(routerLocation);
+    const cleanupLocation = {
+      pathname: routerLocation.pathname,
+      search: parsedLocation.canonicalSearch,
+      hash: routerLocation.hash,
+    };
+    const target = locationTarget(cleanupLocation);
+    const staged: PendingManagerStateCleanup = {
+      generation,
+      ownerEventId: eventId,
+      ownerEventGeneration: eventScope.current.generation,
+      sourceIdentity: managerEntryIdentity,
+      sourceKey: routerLocation.key,
+      sourceTarget,
+      target,
+      cleanupLocation,
+      cleanupState: adopted.state,
+      initial,
+      anchor: adopted.anchor,
+      intent: adopted.intent,
+      destination: pending,
+    };
+    if (!adopted.needsReplace) {
+      finishCommittedManagerAdoption(staged);
+      return;
+    }
+
+    runManagerCleanup(staged);
+  }, [managerAdoptionEpoch, managerEntryIdentity, navigationType]);
 
   function requestGalleryMode(mode: GalleryMode) {
     if (mode === galleryMode) return;
+    if (mode !== 'library') galleryWorkspace.current?.retireCompleteExportFocus();
     if (galleryWorkspace.current?.requiresAlbumLeavePreparation() !== true) {
       clearPendingManagerAdoption();
-      commitManagerLeaveDestination({ kind: 'gallery-mode', mode });
-      authorizedAlbumTarget.current = null;
+      void commitManagerLeaveDestination({ kind: 'gallery-mode', mode });
       return;
     }
     clearPendingManagerAdoption();
@@ -1234,7 +2207,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       ? destination.section
       : destination.kind === 'recently-deleted'
         ? 'intake'
-        : 'settings';
+        : destination.kind === 'complete-export'
+          || destination.kind === 'guest-gallery-return'
+          ? 'gallery'
+          : 'settings';
     if (section === 'settings' && next !== 'settings') {
       // Leaving flushes the newest valid drafts. It deliberately does not wait
       // for their responses: the subtree stays mounted, so they finish anyway.
@@ -1243,9 +2219,15 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
     if (next === section) {
       if (destination.kind === 'recently-deleted') {
-        recentlyDeletedFocusRequested.current = true;
+        recentlyDeletedFocusRequested.current = destination.focusMediaId;
+        setRecentlyDeletedIntentGuidance(false);
         setIntakeMode('trash');
+      } else if (destination.kind === 'complete-export') {
+        completeExportFocusRequested.current = true;
+        galleryWorkspace.current?.focusCompleteExport();
+        completeExportFocusRequested.current = false;
       } else if (destination.kind === 'settings-repair') {
+        setGuestGallerySettingsReturn(null);
         settingsFocusRequested.current = true;
         setSettingsFocusEpoch((current) => current + 1);
       }
@@ -1259,15 +2241,13 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
     if (rsvpCommitPending && next !== 'rsvp') return;
     if (rsvpDraftDirty && next !== 'rsvp') {
-      setPendingSection(next);
-      setPendingSettingsRepair(destination.kind === 'settings-repair');
+      setPendingSection(destination);
       return;
     }
     if (section === 'gallery') {
       if (galleryWorkspace.current?.requiresAlbumLeavePreparation() !== true) {
         clearPendingManagerAdoption();
-        commitManagerLeaveDestination(destination);
-        authorizedAlbumTarget.current = null;
+        void commitManagerLeaveDestination(destination);
         return;
       }
       clearPendingManagerAdoption();
@@ -1275,26 +2255,40 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       return;
     }
     clearPendingManagerAdoption();
-    commitManagerLeaveDestination(destination);
-    authorizedAlbumTarget.current = null;
+    void commitManagerLeaveDestination(destination);
   }
 
   function openSection(next: Section) {
     requestSectionDestination({ kind: 'section', section: next });
   }
 
-  function openRecentlyDeleted() {
-    requestSectionDestination({ kind: 'recently-deleted' });
+  function openCompleteExport() {
+    requestSectionDestination({ kind: 'complete-export' });
+  }
+
+  function openRecentlyDeleted(mediaId: string) {
+    requestSectionDestination({ kind: 'recently-deleted', focusMediaId: mediaId });
   }
 
   function openSettingsForRepair() {
     if (rsvpCommitPending) return;
     if (rsvpDraftDirty) {
-      setPendingSection('settings');
-      setPendingSettingsRepair(true);
+      setPendingSection({ kind: 'settings-repair' });
       return;
     }
     requestSectionDestination({ kind: 'settings-repair' });
+  }
+
+  function openGuestGallerySettings(publicationFilter: PublicationFilter) {
+    requestSectionDestination({ kind: 'guest-gallery-settings', publicationFilter });
+  }
+
+  function returnToGuestGallery() {
+    if (section !== 'settings' || guestGallerySettingsReturn === null) return;
+    requestSectionDestination({
+      kind: 'guest-gallery-return',
+      publicationFilter: guestGallerySettingsReturn.publicationFilter,
+    });
   }
 
   function retryAlbumLeave() {
@@ -1331,12 +2325,12 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         return;
       }
       retireAlbumLeaveAttempt();
-      blocker.proceed();
+      void proceedBlockedNavigation();
       return;
     }
     if (blockerStateRef.current === 'blocked') return;
     retireAlbumLeaveAttempt();
-    commitManagerLeaveDestination(destination);
+    void commitManagerLeaveDestination(destination);
   }
 
   // Initial focus is Keep photo, every time the dialog opens.
@@ -1349,11 +2343,45 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     settingsFocusRequested.current = false;
     settingsHeading.current?.focus();
   }, [section, settingsFocusEpoch]);
-  useEffect(() => {
-    if (!recentlyDeletedFocusRequested.current || section !== 'intake' || intakeMode !== 'trash') return;
-    recentlyDeletedFocusRequested.current = false;
-    window.requestAnimationFrame(() => intakeHeading.current?.focus());
-  }, [intakeMode, section]);
+  useLayoutEffect(() => {
+    settleGuestGallerySettingsIntentFocus();
+  }, [event, galleryMode, section]);
+  useLayoutEffect(() => {
+    if (
+      !completeExportFocusRequested.current
+      || section !== 'gallery'
+      || galleryMode !== 'library'
+      || galleryWorkspace.current === null
+    ) return;
+    completeExportFocusRequested.current = false;
+    galleryWorkspace.current.focusCompleteExport();
+  }, [event, galleryMode, section]);
+  function settleRecentlyDeletedIntentFocus(): boolean {
+    const requestedId = recentlyDeletedFocusRequested.current;
+    if (
+      !requestedId
+      || section !== 'intake'
+      || intakeMode !== 'trash'
+      || intakePage?.mode !== 'trash'
+      || intakeResource.state.status !== 'ready'
+    ) return false;
+    const restore = intakePage.firstPageIds.has(requestedId)
+      ? trashRestoreButtons.current.get(requestedId) ?? null
+      : null;
+    recentlyDeletedFocusRequested.current = null;
+    if (restore) {
+      setRecentlyDeletedIntentGuidance(false);
+      restore.focus();
+      return true;
+    }
+    setRecentlyDeletedIntentGuidance(intakePage.cursor !== null);
+    intakeHeading.current?.focus();
+    return true;
+  }
+
+  useLayoutEffect(() => {
+    settleRecentlyDeletedIntentFocus();
+  }, [intakeMode, intakePage, intakeResource.state.status, nextMediaCursor, section]);
 
   function adoptPublicationRows(changed: MediaView[]) {
     const changedById = new Map(changed.map((item) => [item.id, item]));
@@ -1445,16 +2473,17 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       // four reads and retires them together; no child ref participates.
       invalidateGalleryAfterMutation();
       fallback?.focus();
-      const deadline = eventDateTimeDisplay(trashed.restoreUntil, event?.eventTimezone ?? 'UTC');
+      const deadline = formatRetentionDate(trashed.restoreUntil, event?.eventTimezone ?? 'UTC')
+        ?? TIME_UNAVAILABLE;
       const name = trashed.caption || trashed.originalFilename;
       setRecoveryAnnouncement(
-        `${name} moved to Recently deleted. Restore is available until ${deadline.value}.`,
+        `${name} moved to Recently deleted. Restore is available until ${deadline}.`,
       );
       const inverseEventId = eventId;
       const inverseMediaId = trashed.id;
       managerUndo.present({
         eventId: inverseEventId,
-        message: `${name} moved to Recently deleted. The original is retained until ${deadline.value}.`,
+        message: `${name} moved to Recently deleted. The original is retained until ${deadline}.`,
         durationMs: TRASH_UNDO_WINDOW_MS,
         absoluteDeadline: trashed.restoreUntil,
         input: activation,
@@ -1573,37 +2602,198 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     adoptAcceptedExport(result.export);
     await exportsResource.reload();
   }
-  async function rotateManagerLink() {
-    const scope = eventScope.current.generation;
-    if (!window.confirm('Rotate the management link? This session will stop working immediately.')) return;
-    const rotated = await api<{ managementLink: string }>(`/api/manage/events/${eventId}/links/manager/rotate`, { method: 'POST', body: '{}' });
-    if (eventScope.current.generation !== scope) return;
-    window.location.assign(rotated.managementLink);
+  function managerLinkRotationIsAvailable(
+    candidate: EventView | null,
+  ): candidate is EventView & { managerLinkRevision: number } {
+    return candidate !== null
+      && candidate.managerLinkRevision !== null
+      && candidate.managerLinkRotationAvailability?.enabled === true;
   }
-  // Two irreversible-feeling entry actions, both confirmed by the exact event
-  // name. Only one touches the printed credential; the copy has to keep them
-  // apart, because a host cannot undo the second one.
-  async function runEntryAction(action: EntryAction) {
-    const scope = eventScope.current.generation;
-    const path = action === 'rotate' ? 'guest-sessions/rotate' : 'entry/disable';
-    const result = await eventWrite(() => api<{ disabledAt?: string }>(`/api/manage/events/${eventId}/${path}`, {
-      method: 'POST',
-      body: JSON.stringify({ confirmName: entryConfirm.trim() }),
-    }));
-    if (eventScope.current.generation !== scope) return;
-    if (action === 'disable') {
-      entryDisabled.current = true;
-      entryResource.update(() => ({
-        eventLink: null,
-        disabledAt: result.disabledAt ?? null,
-      }));
-      eventResource.update((current: EventView | null) => current
-        ? { ...current, uploadsEnabled: false, photosOpen: false, photoIntakeState: 'paused', rsvpEnabled: false }
-        : current);
+
+  function openManagerLinkRotation() {
+    if (managerLinkRotation !== null || !managerLinkRotationIsAvailable(event)) return;
+    setActionError(null);
+    setManagerLinkRotation({ phase: 'confirmation' });
+  }
+
+  function closeManagerLinkRotation() {
+    if (
+      managerLinkRotation?.phase === 'pending'
+      || (
+        managerLinkRotation?.phase === 'success'
+        && managerLinkRotation.saveStatus !== 'copied'
+      )
+    ) return;
+    rotationRequestGeneration.current += 1;
+    rotationRequestPending.current = false;
+    resumeManagerResourcesAfterRotation();
+    setManagerLinkRotation(null);
+  }
+
+  async function refreshManagerLinkRevisionAfterAmbiguous(requestGeneration: number) {
+    try {
+      const loaded = await api<{ event: EventView }>(`/api/manage/events/${eventId}`);
+      if (
+        requestGeneration !== rotationRequestGeneration.current
+        || !managerMounted.current
+        || eventScope.current.eventId !== eventId
+      ) return;
+      if (!managerLinkRotationIsAvailable(loaded.event)) {
+        setManagerLinkRotation({
+          phase: 'ambiguous',
+          refreshStatus: 'failed',
+          refreshError: 'Account access could not be confirmed. Try refreshing again.',
+        });
+        return;
+      }
+      eventResource.adopt(loaded.event);
+      setManagerLinkRotation({ phase: 'ambiguous', refreshStatus: 'ready' });
+    } catch (caught) {
+      if (requestGeneration !== rotationRequestGeneration.current) return;
+      setManagerLinkRotation({
+        phase: 'ambiguous',
+        refreshStatus: 'failed',
+        refreshError: caught instanceof ClientApiError
+          ? caught.message
+          : 'Account access could not be refreshed. Try again.',
+      });
     }
+  }
+
+  function retryAmbiguousManagerLinkRefresh() {
+    if (managerLinkRotation?.phase !== 'ambiguous' || managerLinkRotation.refreshStatus !== 'failed') return;
+    const requestGeneration = rotationRequestGeneration.current;
+    setManagerLinkRotation({ phase: 'ambiguous', refreshStatus: 'refreshing' });
+    void refreshManagerLinkRevisionAfterAmbiguous(requestGeneration);
+  }
+
+  async function confirmManagerLinkRotation() {
+    if (rotationRequestPending.current || managerLinkRotation?.phase !== 'confirmation') return;
+    const authorizedEvent = shownEvent.current;
+    if (!managerLinkRotationIsAvailable(authorizedEvent)) return;
+    const expectedRevision = authorizedEvent.managerLinkRevision;
+    const requestGeneration = ++rotationRequestGeneration.current;
+    rotationRequestPending.current = true;
+    retireManagerResourcesForRotation();
+    setManagerLinkRotation({ phase: 'pending', expectedRevision });
+    try {
+      const rotated = await api<{
+        managementLink: string;
+        managerLinkRevision: number;
+      }>(`/api/manage/events/${eventId}/links/manager/rotate`, {
+        method: 'POST',
+        body: JSON.stringify({ expectedManagerLinkRevision: expectedRevision }),
+      });
+      if (requestGeneration !== rotationRequestGeneration.current || !managerMounted.current) return;
+      eventResource.update((current) => current
+        ? { ...current, managerLinkRevision: rotated.managerLinkRevision }
+        : current);
+      setManagerLinkRotation({
+        phase: 'success',
+        managementLink: rotated.managementLink,
+        managerLinkRevision: rotated.managerLinkRevision,
+        saveStatus: 'required',
+      });
+    } catch (caught) {
+      if (requestGeneration !== rotationRequestGeneration.current || !managerMounted.current) return;
+      if (caught instanceof ClientApiError) {
+        resumeManagerResourcesAfterRotation();
+        setManagerLinkRotation({
+          phase: 'failure',
+          message: `The current management link was not changed. ${caught.message}`,
+        });
+      } else {
+        setManagerLinkRotation({ phase: 'ambiguous', refreshStatus: 'refreshing' });
+        await refreshManagerLinkRevisionAfterAmbiguous(requestGeneration);
+      }
+    } finally {
+      if (requestGeneration === rotationRequestGeneration.current) {
+        rotationRequestPending.current = false;
+      }
+    }
+  }
+
+  function recordManagerLinkCopyOutcome(outcome: 'copied' | 'unavailable') {
+    setManagerLinkRotation((current) => current?.phase === 'success'
+      ? { ...current, saveStatus: outcome === 'copied' ? 'copied' : 'unavailable' }
+      : current);
+  }
+
+  function acknowledgeSavedManagerLink() {
+    if (managerLinkRotation?.phase !== 'success' || managerLinkRotation.saveStatus !== 'unavailable') return;
+    resumeManagerResourcesAfterRotation();
+    setManagerLinkRotation(null);
+  }
+  function openEntryAction(action: EntryAction, origin: HTMLElement) {
+    if (entryActionPendingRef.current) return;
+    entryActionNoticeFocusRequested.current = false;
+    entryActionOrigin.current = origin;
+    setEntryConfirm('');
+    setEntryAction(action);
+  }
+
+  function cancelEntryAction() {
+    if (entryActionPendingRef.current) return;
     setEntryAction(null);
     setEntryConfirm('');
-    if (action === 'rotate') await entryResource.reload();
+  }
+
+  // The broad actions share exact-name validation and one in-flight owner. The
+  // client guard is repeated here, immediately beside request creation, so a
+  // stale or synthetic activation cannot bypass the disabled button.
+  async function runEntryAction(action: EntryAction) {
+    if (
+      entryActionPendingRef.current
+      || entryAction !== action
+      || event === null
+      || entryConfirm.trim() !== event.name
+    ) return;
+    const scope = eventScope.current.generation;
+    entryActionPendingRef.current = true;
+    setEntryActionPending(true);
+    try {
+      if (action === 'delete') {
+        await api(`/api/manage/events/${eventId}`, {
+          method: 'DELETE',
+          body: JSON.stringify({ confirmation: entryConfirm.trim() }),
+        });
+        if (eventScope.current.generation === scope) window.location.assign('/');
+        return;
+      }
+
+      const path = action === 'rotate' ? 'guest-sessions/rotate' : 'entry/disable';
+      const result = await eventWrite(() => api<{ disabledAt?: string }>(`/api/manage/events/${eventId}/${path}`, {
+        method: 'POST',
+        body: JSON.stringify({ confirmName: entryConfirm.trim() }),
+      }));
+      if (eventScope.current.generation !== scope) return;
+      if (action === 'disable') {
+        entryActionDisabledFocusRequested.current = true;
+        entryDisabled.current = true;
+        entryResource.update(() => ({
+          eventLink: null,
+          disabledAt: result.disabledAt ?? null,
+        }));
+        eventResource.update((current: EventView | null) => current
+          ? { ...current, uploadsEnabled: false, photosOpen: false, photoIntakeState: 'paused', rsvpEnabled: false }
+          : current);
+      }
+      setEntryAction(null);
+      setEntryConfirm('');
+      if (action === 'rotate') await entryResource.reload();
+    } catch (caught) {
+      if (eventScope.current.generation === scope) {
+        entryActionNoticeFocusRequested.current = true;
+        setEntryAction(null);
+        setEntryConfirm('');
+      }
+      throw caught;
+    } finally {
+      if (eventScope.current.generation === scope) {
+        entryActionPendingRef.current = false;
+        setEntryActionPending(false);
+      }
+    }
   }
   // Roster and activation changes land on the event record, not on the media the
   // whole manager refresh pays for.
@@ -1658,6 +2848,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   // deliberately stays off the manager notice: a background refresh that fails
   // must leave the working page exactly as it is, and the hook backs off instead.
   async function recheckPhotoIntake(): Promise<LifecycleRecheckOutcome> {
+    if (rotationResourcesPausedRef.current) return 'unchanged';
     const scope = eventScope.current.generation;
     const loaded = await eventRead(() => api<{ event: EventView }>(`/api/manage/events/${eventId}`));
     if (eventScope.current.generation !== scope) return 'unchanged';
@@ -1681,14 +2872,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     recheckPhotoIntake,
     event ? managerLifecycleKey(event) : null,
   );
-  async function deleteEvent(element: HTMLFormElement) {
-    const scope = eventScope.current.generation;
-    const form = new FormData(element);
-    await api(`/api/manage/events/${eventId}`, { method: 'DELETE', body: JSON.stringify({ confirmation: form.get('confirmation') }) });
-    if (eventScope.current.generation !== scope) return;
-    window.location.assign('/');
-  }
-
   const selectionAtLimit = selected.length >= MANAGER_BULK_SELECTION_MAX;
   const activeAlbumLeaveAttempt = albumLeaveAttempt && (
     albumLeaveAttempt.destination.kind !== 'router'
@@ -1727,7 +2910,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     const zone = event?.eventTimezone ?? 'UTC';
     return <>
       <ul className="trash-list">{trashRows.map((row) => {
-        const deadline = eventDateTimeDisplay(row.restoreUntil, zone);
+        const deadline = formatRetentionDate(row.restoreUntil, zone);
         const expired = Date.parse(row.restoreUntil) <= trashNow;
         const name = row.caption || row.originalFilename;
         return <li key={row.id} data-intake-card={row.id}>
@@ -1736,15 +2919,21 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
             <small>From {row.guestName}</small>
             {expired
               ? <small className="trash-list__state">Recovery expired · cleanup pending</small>
-              : <small className="trash-list__state">Restore until {deadline.dateTime
-                  ? <time dateTime={deadline.dateTime}>{deadline.value}</time>
-                  : deadline.value}</small>}
+              : <small className="trash-list__state">Restore until {deadline === null
+                  ? TIME_UNAVAILABLE
+                  : <time dateTime={row.restoreUntil}>{deadline}</time>}</small>}
           </div>
           {/* No Restore past the deadline. An accepted export may still be holding
               the bytes, which is why the row is here at all, but recovery is over. */}
           {!expired && <button
+            ref={(button) => {
+              if (button) trashRestoreButtons.current.set(row.id, button);
+              else trashRestoreButtons.current.delete(row.id);
+            }}
             type="button"
             className="button button--secondary"
+            aria-label={`Restore ${row.originalFilename}`}
+            data-restore-media-id={row.id}
             onClick={() => void restoreFromTrashRow(row)}
           ><RotateCcw aria-hidden="true" /> Restore</button>}
         </li>;
@@ -1765,7 +2954,49 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     // A failed new query has no authoritative answer. The recovery panel above
     // explains the failure; calling an unanswered query empty would be false.
     if (intakeResource.state.status === 'failed' && !intakePage) return null;
-    if (!media.length) return <div className="empty-state"><ImageIcon aria-hidden="true" /><h3>No matching photos.</h3><p>New delivered photos will appear here immediately.</p></div>;
+    if (!media.length) {
+      if (status !== 'all' || guestFilter) {
+        return <div className="empty-state">
+          <ImageIcon aria-hidden="true" />
+          <h3>No matching photos</h3>
+          <p>No delivered photos match the active filters.</p>
+          <button
+            type="button"
+            className="button button--secondary"
+            onClick={() => {
+              setStatus('all');
+              setSearchInput('');
+              setGuestFilter('');
+            }}
+          >Clear filters</button>
+        </div>;
+      }
+      return <div className="empty-state">
+        <ImageIcon aria-hidden="true" />
+        <h3>No photos yet</h3>
+        <p>Guests&apos; photos arrive privately here.</p>
+        <div className="button-row">
+          <button
+            type="button"
+            className="button button--primary"
+            onClick={() => { void openSection('share'); }}
+          >Share event</button>
+          <button
+            type="button"
+            className="button button--secondary"
+            aria-disabled={!hostUploadAvailability.enabled}
+            aria-describedby={hostUploadUnavailableMessage === null
+              ? undefined
+              : 'empty-host-upload-unavailable-reason'}
+            onClick={(click) => openManagerUpload(click.currentTarget)}
+          >Add photos</button>
+        </div>
+        {hostUploadUnavailableMessage !== null && <p
+          id="empty-host-upload-unavailable-reason"
+          className="intake-note"
+        >{hostUploadUnavailableMessage}</p>}
+      </div>;
+    }
     return <>
       <div className="moderation-grid intake-grid">{media.map((item) => {
         const isSelected = selected.includes(item.id);
@@ -1833,33 +3064,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const recoverableCount = event.recoverableMediaCount ?? 0;
   const heldCount = photoCount + recoverableCount;
   const heldBytes = (event.storedBytes ?? 0) + (event.recoverableBytes ?? 0);
+  const managerEventDate = formatEventDate(event.eventDate) ?? DATE_UNAVAILABLE;
   const purgeAfterDisplay = formatRetentionDate(event.purgeAfter, event.eventTimezone);
   const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
-  // Both entry actions are confirmed the same way, and both name the event so the
-  // host cannot mistake which one they are typing into.
-  const entryConfirmationForm = (action: EntryAction, verb: string, warning: string) => <fieldset
-    className={action === 'disable' ? 'entry-confirm entry-confirm--danger' : 'entry-confirm'}
-  >
-    <legend>{verb}</legend>
-    <p>{warning}</p>
-    <label htmlFor="entry-confirm-name">Confirm event name</label>
-    <input
-      id="entry-confirm-name"
-      value={entryConfirm}
-      autoComplete="off"
-      spellCheck={false}
-      onChange={(change) => setEntryConfirm(change.target.value)}
-    />
-    <div className="button-row">
-      <button
-        type="button"
-        className={action === 'disable' ? 'button button--danger-outline' : 'button button--secondary'}
-        disabled={entryConfirm.trim() !== event.name}
-        onClick={() => void runManagerAction(() => runEntryAction(action))}
-      >{verb} for {event.name}</button>
-      <button type="button" className="text-button" onClick={() => { setEntryAction(null); setEntryConfirm(''); }}>Cancel</button>
-    </div>
-  </fieldset>;
+  const entryActionDetails = entryAction === null ? null : ENTRY_ACTION_DETAILS[entryAction];
 
   const visibleNotice: ManagerNotice | null = autosaveRecovery
     ? { type: 'load', failure: autosaveRecovery.failure }
@@ -1873,6 +3081,39 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       : escalatedFailure
           ? { type: 'load', failure: escalatedFailure }
           : actionError;
+  const durableHostUploadLifecycleFailure = hostUploadLifecycleFailure?.eventId === eventId
+    && hostUploadLifecycleFailure.eventGeneration === eventScope.current.generation
+    ? hostUploadLifecycleFailure.failure
+    : null;
+  const hostUploadAvailability = resolveHostUploadAvailability(
+    event.hostUploadAvailability,
+    durableHostUploadLifecycleFailure ?? escalatedFailure,
+  );
+  const hostUploadUnavailableMessage = hostUploadAvailability.reason === null
+    ? null
+    : HOST_UPLOAD_UNAVAILABLE_MESSAGE[hostUploadAvailability.reason];
+  function openManagerUpload(invoker: HTMLElement) {
+    if (!hostUploadAvailability.enabled || managerUploadOpen) return;
+    managerUploadReturnFocus.current = invoker;
+    managerUploadOwner.current = {
+      eventId,
+      eventGeneration: eventScope.current.generation,
+      finalizedMediaIds: new Set(),
+    };
+    setManagerUploadOpen(true);
+  }
+  const managerLinkRotationInitialFocus = managerLinkRotation?.phase === 'success'
+    ? managerLinkRotationCopy
+    : managerLinkRotation?.phase === 'confirmation' || managerLinkRotation?.phase === 'pending'
+      ? managerLinkRotationKeep
+      : managerLinkRotationOutcome;
+  const managerLinkRotationCanClose = managerLinkRotation?.phase === 'confirmation'
+    || managerLinkRotation?.phase === 'failure'
+    || managerLinkRotation?.phase === 'ambiguous'
+    || (
+      managerLinkRotation?.phase === 'success'
+      && managerLinkRotation.saveStatus === 'copied'
+    );
   return <>
     {createPortal(
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{galleryAnnouncement}</p>,
@@ -1892,7 +3133,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     </nav></header>
 
     <main className="manager-main">
-      <header className="manager-title"><div><p>{new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${event.eventDate}T12:00:00`))}</p><h1>{event.name}</h1></div><span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span></header>
+      <header className="manager-title"><div><p>{managerEventDate}</p><h1>{event.name}</h1></div><span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span></header>
       {eventResource.state.failure && <ErrorState
         message={eventResource.state.failure.message}
         recoveryHint={eventResource.state.failure.recoveryHint}
@@ -1983,7 +3224,22 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           <h2 id="intake-title" tabIndex={-1} ref={intakeHeading}>
             {intakeMode === 'trash' ? 'Recently deleted' : 'Live intake'}
           </h2>
-        </div></div>
+        </div>{intakeMode === 'active' && <div className="intake-upload-action">
+          <button
+            ref={addPhotosTrigger}
+            type="button"
+            className="button button--primary"
+            aria-disabled={!hostUploadAvailability.enabled}
+            aria-describedby={hostUploadUnavailableMessage === null
+              ? undefined
+              : 'host-upload-unavailable-reason'}
+            onClick={(click) => openManagerUpload(click.currentTarget)}
+          >Add photos</button>
+          {hostUploadUnavailableMessage !== null && <p
+            id="host-upload-unavailable-reason"
+            className="intake-note"
+          >{hostUploadUnavailableMessage}</p>}
+        </div>}</div>
         {/* A filter over Intake, not a destination of its own: Recently deleted is
             the same collection seen from the other side, and it keeps its own
             rows, its own cursor, and none of the live list's filters. */}
@@ -1992,13 +3248,13 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
             type="button"
             aria-pressed={intakeMode === 'active'}
             className={intakeMode === 'active' ? 'active' : ''}
-            onClick={() => setIntakeMode('active')}
+            onClick={() => chooseIntakeMode('active')}
           >Live intake</button>
           <button
             type="button"
             aria-pressed={intakeMode === 'trash'}
             className={intakeMode === 'trash' ? 'active' : ''}
-            onClick={() => setIntakeMode('trash')}
+            onClick={() => chooseIntakeMode('trash')}
           >Recently deleted{event.recoverableMediaCount > 0 ? ` (${event.recoverableMediaCount})` : ''}</button>
         </div>
         {intakeMode === 'trash'
@@ -2007,6 +3263,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
                 These photos still use this event's capacity until they are restored or their
                 recovery ends.
               </p>
+              {showRecentlyDeletedIntentGuidance && <p className="intake-note">
+                The retained photo may be under Load more.
+              </p>}
               {intakeResource.state.failure && <ErrorState
                 message={intakeResource.state.failure.message}
                 recoveryHint={intakeResource.state.failure.recoveryHint}
@@ -2018,7 +3277,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
               <form className="intake-search" onSubmit={(formEvent) => { formEvent.preventDefault(); setGuestFilter(searchInput.trim()); }}>
                 <label><span className="sr-only">Filter by guest name</span><Search aria-hidden="true" /><input aria-label="Filter by guest name" value={searchInput} onChange={(change) => setSearchInput(change.target.value)} placeholder="Find a guest by name" /></label>
                 <button className="button button--secondary">Filter</button>
-                {guestFilter && <button type="button" className="text-button" onClick={() => { setSearchInput(''); setGuestFilter(''); }}>Clear</button>}
+                {guestFilter && <button type="button" className="text-button" onClick={() => { setStatus('all'); setSearchInput(''); setGuestFilter(''); }}>Clear</button>}
               </form>
               {intakeResource.state.failure && <ErrorState
                 message={intakeResource.state.failure.message}
@@ -2052,16 +3311,19 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         mode={galleryMode}
         onModeChange={requestGalleryMode}
         galleryMutationEpoch={galleryMutationEpoch}
+        libraryInvalidationVersion={managerUploadLibrarySignal.eventId === eventId
+          && managerUploadLibrarySignal.eventGeneration === eventScope.current.generation
+          ? managerUploadLibrarySignal.version
+          : 0}
         invalidateGalleryAfterMutation={invalidateGalleryAfterMutation}
         audience={audienceAuthority}
         onAnnouncement={setGalleryAnnouncement}
         shared={{
           onPublicationChanged: adoptPublicationRows,
           onOpenRecentlyDeleted: openRecentlyDeleted,
-          // Same route the stuck-autosave notice takes: it honours the guest-list guards and puts
-          // focus on the Settings heading, so the host does not land on `body` when the notice they
-          // pressed unmounts with the Gallery.
-          onOpenSettings: openSettingsForRepair,
+          // The filter travels through Manager's one-use Settings intent after
+          // the same guest-list, autosave, Album, and anchor settlement gates.
+          onOpenSettings: openGuestGallerySettings,
           settingsBlocked: rsvpCommitPending,
         }}
         onResourceEscalate={escalate}
@@ -2071,6 +3333,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           activeJob: activeExport,
           download: completeExport ? exportDownloads[completeExport.id] : undefined,
           albumDownload: albumExport ? exportDownloads[albumExport.id] : undefined,
+          status: exportsResource.state.status,
           onPrepare: (kind = 'complete') => runManagerAction(() => prepareExport(kind)),
           onDownload: (job) => runManagerAction(() => downloadExport(job)),
           onRetry: (job) => runManagerAction(() => retryExport(job)),
@@ -2084,6 +3347,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         }}
         onAlbumAutosaveStateChange={recordAutosaveState}
         onAlbumAccessFailure={setAlbumAccessFailure}
+        onAnchorReady={handleGalleryAnchorReady}
       />}
 
       {section === 'share' && <section className="manager-panel">
@@ -2097,7 +3361,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         <div className="share-layout">
           <div>{eventLink
             ? <CopyableLinkCard label="Event link" value={eventLink} />
-            : <p className="manager-notice">{entryDisabledAt
+            : <p ref={entryDisabledResult} className="manager-notice" tabIndex={-1}>{entryDisabledAt
               ? 'This event QR was disabled and cannot be replaced.'
               : 'This event has no printed entry.'}</p>}
             <p className="form-note">One code for RSVPs now and event photos later. Print it once.</p>
@@ -2106,30 +3370,20 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         </div>
         {eventLink && <section className="entry-controls" aria-labelledby="entry-controls-title">
           <h3 id="entry-controls-title">Event entry controls</h3>
-          {entryAction === null && <div className="entry-controls__choices">
+          <div className="entry-controls__choices">
             <div>
               <p>Guests must scan again to get back in. The event link and every printed QR code stays the same.</p>
-              <button type="button" className="button button--secondary" onClick={() => { setEntryAction('rotate'); setEntryConfirm(''); }}>Sign out guest devices</button>
+              <button type="button" className="button button--secondary" onClick={(click) => openEntryAction('rotate', click.currentTarget)}>Sign out guest devices</button>
             </div>
             <div className="entry-controls__danger">
               <p>This immediately signs out guests, pauses RSVP and photo delivery, and makes every invitation and sign using this QR stop working. It cannot be undone.</p>
-              <button type="button" className="button button--danger-outline" onClick={() => { setEntryAction('disable'); setEntryConfirm(''); }}>Disable printed event QR</button>
+              <button type="button" className="button button--danger-outline" onClick={(click) => openEntryAction('disable', click.currentTarget)}>Disable printed event QR</button>
             </div>
-          </div>}
-          {entryAction === 'rotate' && entryConfirmationForm(
-            'rotate',
-            'Sign out guest devices',
-            'Guests must scan again to get back in. The event link and every printed QR code stays the same.',
-          )}
-          {entryAction === 'disable' && entryConfirmationForm(
-            'disable',
-            'Disable printed event QR',
-            'This immediately signs out guests, pauses RSVP and photo delivery, and makes every invitation and sign using this QR stop working. It cannot be undone, and there is no replacement.',
-          )}
+          </div>
         </section>}
         <section className="manager-export-route">
           <p>Prepare or retrieve the complete collection from the Gallery.</p>
-          <button type="button" className="button button--secondary" onClick={() => { void openSection('gallery'); }}>Open Gallery</button>
+          <button type="button" className="button button--secondary" onClick={openCompleteExport}>Open Gallery</button>
         </section>
       </section>}
 
@@ -2147,10 +3401,18 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>
         <p className="section-label">Event controls</p>
         <h2 ref={settingsHeading} tabIndex={-1}>Settings</h2>
+        {guestGallerySettingsReturn && (
+          <button
+            type="button"
+            className="button button--secondary"
+            onClick={returnToGuestGallery}
+          >Return to Guest gallery</button>
+        )}
         <EventSettingsEditor
           key={'settings-' + event.id}
           ref={settingsAutosave}
           event={event}
+          galleryVisibilityFocusEpoch={galleryVisibilityFocusEpoch}
           onEventWrite={eventWrite}
           onEventRead={eventRead}
           onSettingsSaved={(updated, { scheduleChanged }) => {
@@ -2187,19 +3449,28 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         <section className="manager-credential" aria-labelledby="manager-credential-title">
           <h3 id="manager-credential-title">Manager access</h3>
           <p>Rotating issues a new management link and stops this one immediately. It does not change the printed event QR.</p>
-          <button type="button" className="button button--secondary" onClick={() => void runManagerAction(rotateManagerLink)}>Rotate manager link</button>
+          <button
+            ref={managerLinkRotationTrigger}
+            type="button"
+            className="button button--secondary"
+            aria-disabled={!managerLinkRotationIsAvailable(event)}
+            aria-describedby={managerLinkRotationIsAvailable(event)
+              ? undefined
+              : 'manager-link-rotation-unavailable'}
+            onClick={openManagerLinkRotation}
+          >Rotate manager link</button>
+          {!managerLinkRotationIsAvailable(event) && <p id="manager-link-rotation-unavailable">
+            Sign in to an account that owns or cohosts this event to rotate its link
+          </p>}
         </section>
         <div className="danger-zone">
           <h3>Delete this event</h3>
           <p>Type <strong>{event.name}</strong> to revoke access immediately and schedule every private file for permanent deletion.</p>
-          <form onSubmit={(formEvent) => {
-            formEvent.preventDefault();
-            const element = formEvent.currentTarget;
-            void runManagerAction(() => deleteEvent(element));
-          }}>
-            <input name="confirmation" aria-label="Confirm event name" autoComplete="off" />
-            <button className="button button--danger-outline"><Trash2 aria-hidden="true" /> Delete event</button>
-          </form>
+          <button
+            type="button"
+            className="button button--danger-outline"
+            onClick={(click) => openEntryAction('delete', click.currentTarget)}
+          ><Trash2 aria-hidden="true" /> Delete event</button>
         </div>
       </section>}
 
@@ -2230,27 +3501,20 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
             setRsvpDraftDirty(false);
             setRsvpDiscardEpoch((current) => current + 1);
             if (blocker.state === 'blocked') {
-              blocker.proceed();
+              void proceedBlockedNavigation();
             } else if (pendingSection) {
-              const next = pendingSection;
-              const destination: ManagerSectionDestination = next === 'settings' && pendingSettingsRepair
-                ? { kind: 'settings-repair' }
-                : { kind: 'section', section: next };
+              const destination = pendingSection;
               setPendingSection(null);
               setPendingRsvpClose(false);
-              setPendingSettingsRepair(false);
               clearPendingManagerAdoption();
-              commitManagerLeaveDestination(destination);
-              authorizedAlbumTarget.current = null;
+              void commitManagerLeaveDestination(destination);
             } else {
               setPendingRsvpClose(false);
-              setPendingSettingsRepair(false);
             }
           }}>Discard draft</button>
           <button type="button" className="button button--primary" onClick={() => {
             setPendingSection(null);
             setPendingRsvpClose(false);
-            setPendingSettingsRepair(false);
             if (blocker.state === 'blocked') cancelBlockedNavigation();
           }}>Stay</button>
         </div>
@@ -2294,7 +3558,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
                 && activeAlbumLeaveAttempt.outcome.status === 'ready'
               )
             )
-          ) blocker.proceed();
+          ) void proceedBlockedNavigation();
         }}
         onRetryAlbum={retryAlbumLeave}
         onDiscardAlbum={discardAlbumAndLeave}
@@ -2305,10 +3569,23 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
               const pending = pendingManagerAdoption.current;
               if (
                 blocker.state === 'blocked'
-                && pending?.destination.kind === 'settings-repair'
+                && pending?.destination.kind === 'guest-gallery-return'
                 && pending.target === blockedNavigationTarget
               ) {
-                blocker.proceed();
+                cancelBlockedNavigation();
+                settingsFocusRequested.current = true;
+                setSettingsFocusEpoch((current) => current + 1);
+                return;
+              }
+              if (
+                blocker.state === 'blocked'
+                && (
+                  pending?.destination.kind === 'settings-repair'
+                  || pending?.destination.kind === 'guest-gallery-settings'
+                )
+                && pending.target === blockedNavigationTarget
+              ) {
+                void proceedBlockedNavigation();
                 return;
               }
               if (blocker.state === 'blocked') cancelBlockedNavigation();
@@ -2317,6 +3594,181 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           : undefined}
       />}
     </main>
+
+    {managerUploadOpen && <ManagerUploadDialog
+      eventId={eventId}
+      event={event}
+      availability={hostUploadAvailability}
+      returnFocusRef={managerUploadReturnFocus}
+      inertExceptionRef={galleryLiveHostRef}
+      hasUsableAccountCredential={event.managerLinkRevision !== null}
+      onClose={closeManagerUpload}
+      onExitGateChange={handleManagerUploadExitGate}
+      onEscalate={escalate}
+      onFinalized={handleManagerUploadFinalized}
+      onRefreshAfterTerminal={invalidateAfterManagerUpload}
+    />}
+
+    {managerLinkRotation && <ModalSurface
+      labelledBy="manager-link-rotation-title"
+      initialFocusRef={managerLinkRotationInitialFocus}
+      returnFocusRef={managerLinkRotationTrigger}
+      onRequestClose={closeManagerLinkRotation}
+      closePolicy={{
+        escape: managerLinkRotationCanClose,
+        backdrop: managerLinkRotationCanClose,
+      }}
+    >
+      <div className="modal-backdrop">
+        <div className="modal-card">
+          {(managerLinkRotation.phase === 'confirmation' || managerLinkRotation.phase === 'pending') && <>
+            <h2 id="manager-link-rotation-title">Rotate management link?</h2>
+            <p>The current management link will stop working immediately.</p>
+            <p>You must save the replacement before continuing.</p>
+            <div className="button-row">
+              <button
+                ref={managerLinkRotationKeep}
+                type="button"
+                className="button button--secondary"
+                disabled={managerLinkRotation.phase === 'pending'}
+                onClick={closeManagerLinkRotation}
+              >Keep current link</button>
+              <button
+                type="button"
+                className="button button--danger-outline"
+                disabled={managerLinkRotation.phase === 'pending'}
+                onClick={() => { void confirmManagerLinkRotation(); }}
+              >{managerLinkRotation.phase === 'pending' ? 'Rotating…' : 'Rotate link'}</button>
+            </div>
+          </>}
+
+          {managerLinkRotation.phase === 'failure' && <>
+            <h2 id="manager-link-rotation-title">The link was not rotated</h2>
+            <p role="alert">{managerLinkRotation.message}</p>
+            <button
+              ref={managerLinkRotationOutcome}
+              type="button"
+              className="button button--primary"
+              onClick={closeManagerLinkRotation}
+            >Close</button>
+          </>}
+
+          {managerLinkRotation.phase === 'ambiguous' && <>
+            <h2 id="manager-link-rotation-title">Confirm the replacement</h2>
+            <p role="alert">{AMBIGUOUS_MANAGER_LINK_ROTATION}</p>
+            {managerLinkRotation.refreshError && <p className="form-error">
+              {managerLinkRotation.refreshError}
+            </p>}
+            <div className="button-row">
+              {managerLinkRotation.refreshStatus === 'ready' && <button
+                ref={managerLinkRotationOutcome}
+                type="button"
+                className="button button--primary"
+                onClick={() => { setManagerLinkRotation({ phase: 'confirmation' }); }}
+              >Rotate again</button>}
+              {managerLinkRotation.refreshStatus === 'failed' && <button
+                ref={managerLinkRotationOutcome}
+                type="button"
+                className="button button--primary"
+                onClick={retryAmbiguousManagerLinkRefresh}
+              >Refresh account access</button>}
+              {managerLinkRotation.refreshStatus === 'refreshing' && <button
+                ref={managerLinkRotationOutcome}
+                type="button"
+                className="button button--primary"
+                disabled
+              >Refreshing account access…</button>}
+              <button
+                type="button"
+                className="button button--secondary"
+                onClick={closeManagerLinkRotation}
+              >Close</button>
+            </div>
+          </>}
+
+          {managerLinkRotation.phase === 'success' && <>
+            <h2 id="manager-link-rotation-title">Save your new management link</h2>
+            <p>The prior management link is no longer valid.</p>
+            <CopyableLinkCard
+              ref={managerLinkRotationCopy}
+              label="Management link"
+              value={managerLinkRotation.managementLink}
+              sensitive
+              onCopyOutcome={recordManagerLinkCopyOutcome}
+            />
+            <div className="button-row">
+              <button
+                ref={managerLinkRotationContinue}
+                type="button"
+                className="button button--primary"
+                disabled={managerLinkRotation.saveStatus !== 'copied'}
+                onClick={closeManagerLinkRotation}
+              >Continue managing</button>
+              {managerLinkRotation.saveStatus === 'unavailable' && <button
+                type="button"
+                className="button button--secondary"
+                onClick={acknowledgeSavedManagerLink}
+              >I've saved this link — continue</button>}
+            </div>
+          </>}
+        </div>
+      </div>
+    </ModalSurface>}
+
+    {entryAction && entryActionDetails && <ModalSurface
+      labelledBy="entry-action-confirmation-title"
+      initialFocusRef={entryActionCancel}
+      returnFocusRef={entryActionOrigin}
+      onRequestClose={cancelEntryAction}
+      closePolicy={{
+        escape: !entryActionPending,
+        backdrop: !entryActionPending,
+      }}
+    >
+      <div className="modal-backdrop">
+        <div className="modal-card">
+          <h2 id="entry-action-confirmation-title">{entryActionDetails.verb}?</h2>
+          <fieldset className={entryActionDetails.danger
+            ? 'entry-confirm entry-confirm--danger'
+            : 'entry-confirm'}>
+            <legend>{entryActionDetails.verb}</legend>
+            <p>{entryActionDetails.warning}</p>
+            <p>Type <strong>{event.name}</strong> to confirm.</p>
+            {entryActionPending && <p
+              ref={entryActionPendingStatus}
+              role="status"
+              tabIndex={0}
+            >{entryActionDetails.verb} is in progress. Wait for it to finish.</p>}
+            <label htmlFor="entry-confirm-name">Confirm event name</label>
+            <input
+              id="entry-confirm-name"
+              value={entryConfirm}
+              autoComplete="off"
+              spellCheck={false}
+              disabled={entryActionPending}
+              onChange={(change) => setEntryConfirm(change.target.value)}
+            />
+            <div className="button-row">
+              <button
+                ref={entryActionCancel}
+                type="button"
+                className="button button--secondary"
+                disabled={entryActionPending}
+                onClick={cancelEntryAction}
+              >Cancel</button>
+              <button
+                type="button"
+                className={entryActionDetails.danger
+                  ? 'button button--danger-outline'
+                  : 'button button--secondary'}
+                disabled={entryActionPending || entryConfirm.trim() !== event.name}
+                onClick={() => void runManagerAction(() => runEntryAction(entryAction))}
+              >{entryActionPending ? `${entryActionDetails.verb}…` : `${entryActionDetails.verb} for ${event.name}`}</button>
+            </div>
+          </fieldset>
+        </div>
+      </div>
+    </ModalSurface>}
 
 
     {/*

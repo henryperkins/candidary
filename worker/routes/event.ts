@@ -32,8 +32,7 @@ eventRoutes.get('/manage/events/:eventId', async (context) => {
   // both, so the selection and the projection cannot disagree.
   const now = new Date();
   return context.json({
-    data: { event: await selectManagerEventView(context.env, auth.event, now) },
+    data: { event: await selectManagerEventView(context.env, auth.event, now, auth.via) },
     requestId: context.get('requestId'),
   });
 });
-

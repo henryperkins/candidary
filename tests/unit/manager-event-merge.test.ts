@@ -38,7 +38,10 @@ const current: EventView = {
   welcomeMessage: 'Welcome.', guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT, cover: covered,
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
+  hostUploadAvailability: { enabled: true, reason: null },
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
+  managerLinkRevision: 0,
+  managerLinkRotationAvailability: { enabled: true, reason: null },
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',
   eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
@@ -126,6 +129,17 @@ describe('manager event merges', () => {
     expect(merged.rsvpRosterVersion).toBe(7);
     expect(merged.theme).toBe(garden);
     expect(merged.cover).toBe(covered);
+  });
+
+  it('adopts newer host upload availability without carrying stale settings', () => {
+    const merged = mergePhotoIntakeResponse(current, {
+      ...intakeAnswer,
+      name: 'Stale server name',
+      hostUploadAvailability: { enabled: false, reason: 'media-cap' },
+    });
+
+    expect(merged.hostUploadAvailability).toEqual({ enabled: false, reason: 'media-cap' });
+    expect(merged.name).toBe('Maya & Theo');
   });
 
   it('takes the complete schedule tuple with intake only for a lifecycle read', () => {

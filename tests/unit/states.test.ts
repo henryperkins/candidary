@@ -20,6 +20,7 @@ describe('load failure classification', () => {
     ['EVENT_NOT_FOUND', 'ended-event'],
     ['EVENT_EXPIRED', 'ended-event'],
     ['UPLOADS_DISABLED', 'retry'],
+    ['UPLOAD_RESERVATION_CANCELED', 'retry'],
     ['VALIDATION_FAILED', 'retry'],
     ['TOKEN_REVOKED', 'latest-link'],
     ['HOST_SESSION_REQUIRED', 'sign-in'],

@@ -56,6 +56,77 @@ header signature, and dimensions, creates the deterministic canonical object onl
 the complete object, and commits the canonical D1 generation. A transient confirmation failure can
 observe the already Stored row without sending the bytes again.
 
+### Manager upload authority and management-link rotation (0021)
+
+Manager uploads use the same reservation, buffering, R2, promotion, and commit path as guest uploads.
+The route constructs one of two Manager authorities; the client never supplies one. A
+management-link Manager uses the authenticated Manager event session. An account owner or cohost uses
+one live server-only `event_sessions` actor for `(event_id, manager_upload_account_id)`, bound to the
+event's current live Manager token. The actor stores random secret and CSRF digests whose source
+secrets are discarded. It is identity storage only: it cannot mint a cookie, and browser session
+resolution rejects an actor row before comparing any secret. Reservation may create/reuse this actor;
+content, finalize, and cancel are lookup-only and never create one while probing an upload.
+
+Authority and intake are independent SQL predicates. Reserve, idempotent refresh, post-buffer claim,
+commit, and cancel all re-prove the target event and exact authority. Guest authority still carries
+the guest schedule and pause predicate. Both Manager authorities ignore only that guest predicate;
+they still require a live management window, Worker ingress, capacity, and all file and promotion
+checks. Manager attribution is always the server-owned `guest_name = 'Host'`.
+
+Management-link rotation compares the client-observed `manager_link_revision`, increments it with a
+CAS, revokes the exact predecessor only for that CAS winner, and inserts the replacement only for that
+revoke winner. The same D1 batch revokes predecessor bearer sessions, rebinds live account actors to
+the replacement, and terminally cancels the predecessor link actor's `reserved` and `failed` rows
+with exact counter deltas. Account-owned reservations survive. Every optional statement is guarded
+independently by the replacement token ID, never by a timestamp or the previous optional statement's
+change count. Post-commit object deletion remains tombstone/janitor owned if R2 deletion fails.
+
+The following read-only query finds account actors that are still marked live but are no longer usable
+because their account, membership, event, expiry, or current-token binding is invalid. A healthy row
+has an active account, owner/cohost membership, a live management window, a future actor expiry, and
+`current_token_id = actor_token_id`. Rotation should rebind the token, and membership removal should
+revoke the actor, so any returned row is an invariant alarm; do not repair it by creating a cookie or
+reconstructing a discarded secret.
+
+```sql
+SELECT
+  s.id AS actor_id,
+  s.event_id,
+  s.manager_upload_account_id AS account_id,
+  s.access_token_id AS actor_token_id,
+  current_token.id AS current_token_id,
+  s.expires_at AS actor_expires_at,
+  account.disabled_at AS account_disabled_at,
+  membership.role AS membership_role,
+  event.deleted_at AS event_deleted_at,
+  event.management_access_expires_at
+FROM event_sessions AS s
+JOIN events AS event ON event.id = s.event_id
+LEFT JOIN host_accounts AS account ON account.id = s.manager_upload_account_id
+LEFT JOIN event_hosts AS membership
+  ON membership.event_id = s.event_id
+ AND membership.account_id = s.manager_upload_account_id
+LEFT JOIN event_access_tokens AS current_token
+  ON current_token.event_id = s.event_id
+ AND current_token.role = 'manager'
+ AND current_token.revoked_at IS NULL
+ AND current_token.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE s.manager_upload_account_id IS NOT NULL
+  AND s.revoked_at IS NULL
+  AND (
+    s.expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    OR account.id IS NULL
+    OR account.disabled_at IS NOT NULL
+    OR membership.role IS NULL
+    OR membership.role NOT IN ('owner', 'cohost')
+    OR event.deleted_at IS NOT NULL
+    OR event.management_access_expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    OR current_token.id IS NULL
+    OR current_token.id <> s.access_token_id
+  )
+ORDER BY s.event_id, s.manager_upload_account_id;
+```
+
 ### Distinct-bucket media cutover
 
 Migration 0015 records `legacy` or `canonical` generation on every media and export pointer. The legacy
@@ -335,7 +406,9 @@ Ask for the response request ID and inspect Worker logs. Common expected codes:
 - `MESSAGE_EVENT_LIMIT` — the event has reached its retained standalone-note cap. Existing Guestbook content remains readable and manageable.
 - `EVENT_PHASE_CONFLICT` — the event phase no longer accepts a new note. Preserve the draft and keep the existing book readable.
 - `MESSAGE_STATE_CONFLICT`, `MEDIA_STATE_CONFLICT` — a conditional host action lost a race; refresh the affected surface. For a stale Manager Guestbook action, refetch the row or first page instead of replaying the mutation. On the recovery routes this is also the ordinary answer to a repeated `trash`, a `restore` past `restore_until`, a `restore` that lost to permanent cleanup, and a `cancel-reservation` aimed at a delivered photo. Every one of those changes no counter.
-- `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event.
+- `UPLOAD_RESERVATION_CANCELED` — Manager-only 409 for an idempotent reservation replay whose row was terminally canceled or deleted. The row is not resurrected; choose the photo again with a new key. The equivalent guest replay deliberately keeps the existing `UPLOAD_FINALIZE_CONFLICT` contract.
+- `RESOURCE_FORBIDDEN` — a host action referred to a photo, note, cover, or export outside the current event. On upload reserve, idempotent refresh, post-buffer claim, commit, or cancel, it also means the credential or exact actor lost liveness. That 403 is authorization-terminal and must not be retried as a row race; obtain current authority and start again.
+- `UPLOAD_FINALIZE_CONFLICT` and the other upload-specific 409 outcomes — the authority is still live but the reservation or intake state moved. Preserve the selection and follow the queue's retry path rather than treating the response as credential revocation.
 - `OWNER_CLAIM_REQUIRED` — save an ownerless event from its original creator session before rotating its management link.
 - `EVENT_ENTRY_UNAVAILABLE` — the printed entry is missing or was disabled. It cannot be replaced; the event needs a new event and a new printed code. This is also what a **Sign out guest devices** attempt returns once the entry has been disabled.
 - `EVENT_EXPIRED` on a scan — the printed credential is valid but the event's internal guest grant has expired. The event's own guest window has ended; nothing about the QR is wrong. (`GUEST_LINK_UNAVAILABLE` is retired: the route that raised it was replaced by `GET /api/manage/events/:eventId/entry`, and no code path emits it any more.)

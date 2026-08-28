@@ -33,8 +33,11 @@ const EVENT_VIEW_KEYS = [
   'storedBytes',
   'recoverableMediaCount',
   'recoverableBytes',
+  'hostUploadAvailability',
   'guestAccessExpiresAt',
   'managementAccessExpiresAt',
+  'managerLinkRevision',
+  'managerLinkRotationAvailability',
   'purgeAfter',
   'createdAt',
   'deletedAt',
@@ -70,6 +73,7 @@ const GUEST_EVENT_VIEW_KEYS = [
   'rsvpState',
   'rsvpAccess',
   'lifecycleRecheckAfterMs',
+  'guestReadSurfaces',
   'theme',
 ] as const;
 
@@ -164,6 +168,30 @@ function putTheme(
 
 beforeEach(resetDatabase);
 
+describe('guest read surfaces', () => {
+  it('adds only the server-owned read projection to the exact guest allowlist', async () => {
+    const access = await eventAccess('Guest read projection keys', false);
+    const guestRead = await createApp().request(`/api/event/${access.event.slug}`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    const guest = (await guestRead.json<any>()).data.event;
+
+    expect(guestRead.status).toBe(200);
+    expect(Object.keys(guest).sort()).toEqual([...GUEST_EVENT_VIEW_KEYS].sort());
+    expect(guest.guestReadSurfaces).toEqual({
+      available: false,
+      reason: 'before-photo-open',
+    });
+
+    const managerRead = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    const manager = (await managerRead.json<any>()).data.event;
+    expect(Object.keys(manager).sort()).toEqual([...EVENT_VIEW_KEYS].sort());
+    expect(manager).not.toHaveProperty('guestReadSurfaces');
+  });
+});
+
 describe('event theme create and read serialization', () => {
   it('creates an omitted theme as the canonical default with every resolved token', async () => {
     const { body } = await createdEvent();
@@ -226,6 +254,7 @@ describe('event theme create and read serialization', () => {
     // may cross into the guest projection.
     expect(guestBody.data.event).not.toHaveProperty('recoverableMediaCount');
     expect(guestBody.data.event).not.toHaveProperty('recoverableBytes');
+    expect(guestBody.data.event).not.toHaveProperty('hostUploadAvailability');
     expect(guestBody.data.event.theme).toEqual(body.data.event.theme);
   });
 

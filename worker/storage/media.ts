@@ -13,6 +13,7 @@ import {
 } from '../media-upload-release';
 import { resolveMediaTimeline, type MediaTimelineContext } from '../media-timeline';
 import { inspectImageHeader } from '../security/image-metadata';
+import type { UploadAuthority } from '../services/upload-authority';
 import { finalizedMediaObjectKey } from './media-keys';
 
 const MEDIA_INGRESS_LEASE_MS = 20 * 60 * 1_000;
@@ -215,7 +216,7 @@ export async function receiveMediaUpload(
   repository: MediaRepository,
   media: MediaRecord,
   timelineContext: MediaTimelineContext,
-  uploaderSessionId: string,
+  authority: UploadAuthority,
   bytes: ArrayBuffer,
   contentType: string,
   now = new Date(),
@@ -252,7 +253,7 @@ export async function receiveMediaUpload(
   const claimed = await repository.claimReservationIngress({
     mediaId: media.id,
     eventId: media.eventId,
-    uploaderSessionId,
+    authority,
     sourceObjectKey: media.objectKey,
     mimeType: media.mimeType,
     byteSize: bytes.byteLength,
@@ -263,10 +264,17 @@ export async function receiveMediaUpload(
     claimedAt,
     leaseExpiresAt: new Date(now.getTime() + MEDIA_INGRESS_LEASE_MS).toISOString(),
   });
-  if (!claimed) {
+  if (!claimed.ok) {
     const current = await repository.getById(media.id);
     if (current?.uploadState === 'stored'
       && current.objectKey === finalizedMediaObjectKey(media.eventId, media.id)) return current;
+    if (claimed.reason === 'forbidden') {
+      throw new ApiError(
+        'RESOURCE_FORBIDDEN',
+        'This upload belongs to a different guest or event.',
+        403,
+      );
+    }
     throw new ApiError(
       'UPLOAD_FINALIZE_CONFLICT',
       'This upload is already being secured. Wait a moment and try again.',
@@ -314,8 +322,10 @@ export async function receiveMediaUpload(
     storedAt: committedAt,
   });
   try {
-    if (await repository.commitReservationIngress({
+    const committed = await repository.commitReservationIngress({
       mediaId: media.id,
+      eventId: media.eventId,
+      authority,
       claimToken,
       finalObjectKey,
       byteSize: bytes.byteLength,
@@ -325,7 +335,17 @@ export async function receiveMediaUpload(
       committedAt,
       capturedAt: timeline.capturedAt,
       timelineAt: timeline.timelineAt,
-    })) return (await repository.getById(media.id))!;
+    });
+    if (committed.ok) return (await repository.getById(media.id))!;
+    const current = await repository.getById(media.id);
+    if (current?.uploadState === 'stored' && current.objectKey === finalObjectKey) return current;
+    if (committed.reason === 'forbidden') {
+      throw new ApiError(
+        'RESOURCE_FORBIDDEN',
+        'This upload belongs to a different guest or event.',
+        403,
+      );
+    }
   } catch (error) {
     const current = await repository.getById(media.id);
     if (current?.uploadState === 'stored' && current.objectKey === finalObjectKey) return current;

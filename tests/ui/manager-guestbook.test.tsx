@@ -59,8 +59,11 @@ const event: EventView = {
   storedMediaCount: 0,
   reservedBytes: 0,
   storedBytes: 0, recoverableMediaCount: 0, recoverableBytes: 0,
+  hostUploadAvailability: { enabled: true, reason: null },
   guestAccessExpiresAt: '2026-10-19T00:00:00Z',
   managementAccessExpiresAt: '2026-12-18T00:00:00Z',
+  managerLinkRevision: 0,
+  managerLinkRotationAvailability: { enabled: true, reason: null },
   purgeAfter: '2027-01-17T00:00:00Z',
   createdAt: '2026-08-01T00:00:00Z',
   deletedAt: null,
@@ -107,6 +110,70 @@ afterEach(() => {
 });
 
 describe('Manager Guestbook', () => {
+  it.each([0, 1, 7])(
+    'uses Needs review as the default view with %i pending items',
+    async (needsReviewCount) => {
+      const summary = { ...emptySummary, needsReviewCount };
+      const requested: URL[] = [];
+      vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'https://candidary.test');
+        requested.push(url);
+        return success({ items: [], nextCursor: null, summary });
+      }));
+
+      render(<ManagerGuestbookPanel
+        eventId="event-a"
+        eventTimezone="America/Chicago"
+        summary={summary}
+        onSummaryRefresh={vi.fn(async () => undefined)}
+        onOpenSettings={vi.fn()}
+        settingsBlocked={false}
+      />);
+
+      await waitFor(() => expect(requested).toHaveLength(1));
+      expect(requested[0]?.searchParams.get('view')).toBe('needs-review');
+      expect(screen.getByRole('button', { name: /Needs review/i }))
+        .toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByRole('button', { name: /Shared/i }))
+        .toHaveAttribute('aria-pressed', 'false');
+    },
+  );
+
+  it('keeps the current default view across count refreshes and preserves an explicit view', async () => {
+    const requested: URL[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      requested.push(url);
+      return success({
+        items: [],
+        nextCursor: null,
+        summary: { ...emptySummary, needsReviewCount: 1 },
+      });
+    }));
+    const props = (summary: GuestbookSummary) => <ManagerGuestbookPanel
+      eventId="event-a"
+      eventTimezone="America/Chicago"
+      summary={summary}
+      onSummaryRefresh={vi.fn(async () => undefined)}
+      onOpenSettings={vi.fn()}
+      settingsBlocked={false}
+    />;
+    const rendered = render(props({ ...emptySummary, needsReviewCount: 1 }));
+
+    await waitFor(() => expect(requested).toHaveLength(1));
+    rendered.rerender(props(emptySummary));
+    expect(screen.getByRole('button', { name: /Needs review/i }))
+      .toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.setup().click(screen.getByRole('button', { name: /Shared/i }));
+    await waitFor(() => expect(requested.at(-1)?.searchParams.get('view')).toBe('shared'));
+    rendered.rerender(props({ ...emptySummary, needsReviewCount: 9 }));
+    expect(screen.getByRole('button', { name: /Shared/i }))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /Needs review/i }))
+      .toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('loads only the summary initially and badges only entries that need review', async () => {
     const fetchMock = managerFetch();
     vi.stubGlobal('fetch', fetchMock);
@@ -477,6 +544,7 @@ describe('Manager Guestbook', () => {
 
     const actions = (name: string) => within(screen.getByRole('listitem', { name: new RegExp(name, 'i') }))
       .getAllByRole('button').map((button) => button.textContent);
+    await user.click(screen.getByRole('button', { name: /Shared/i }));
     await screen.findByRole('listitem', { name: /Approved guest note/i });
     expect(actions('Approved guest note')).toEqual(['Keep private', 'Delete']);
     expect(actions('Published photo caption')).toEqual(['Hide photo & caption']);
@@ -596,6 +664,7 @@ describe('Manager Guestbook', () => {
     }));
     const user = userEvent.setup();
     render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, galleryVisible: false, hiddenCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={onOpenSettings} settingsBlocked={false} />);
+    await user.click(screen.getByRole('button', { name: /Shared/i }));
     expect(await screen.findByText('Photo captions with a saved Published state are not currently visible to event guests while the Guest gallery is off.')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Open settings' }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);

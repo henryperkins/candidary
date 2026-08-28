@@ -56,6 +56,17 @@ export interface RegistrationRequestScope {
 
 export interface StartedRegistration {
   registrationToken: ReturnType<typeof createSecretToken>;
+  resumeExpiresAt: string;
+}
+
+export interface ResentRegistration {
+  registrationToken: SecretToken;
+  resumeExpiresAt: string;
+}
+
+export interface PendingRegistrationStatus {
+  pending: boolean;
+  expiresAt: string | null;
 }
 
 export class HostAuthService {
@@ -160,6 +171,7 @@ export class HostAuthService {
     const registrationToken = createSecretToken();
     const code = sixDigitCode();
     const timestamp = now.toISOString();
+    const resumeExpiresAt = new Date(now.getTime() + CODE_TTL_SECONDS * 1000).toISOString();
     await this.accounts.replacePendingRegistration({
       id: registrationToken.id,
       email,
@@ -170,14 +182,37 @@ export class HostAuthService {
       bindEventId: input.bindEventId,
       creatorSessionId: input.bindEventId ? requestScope.creatorSessionId : null,
       attempts: 0,
-      expiresAt: new Date(now.getTime() + CODE_TTL_SECONDS * 1000).toISOString(),
+      expiresAt: resumeExpiresAt,
       consumedAt: null,
       activationNonce: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     });
     await this.sendRegistrationCode(email, code);
-    return { registrationToken };
+    return { registrationToken, resumeExpiresAt };
+  }
+
+  async pendingRegistrationStatus(
+    rawToken: string | undefined,
+    now = new Date(),
+  ): Promise<PendingRegistrationStatus> {
+    if (!rawToken) return { pending: false, expiresAt: null };
+    let parsed: ReturnType<HostAuthService['parseRegistrationToken']>;
+    try {
+      parsed = this.parseRegistrationToken(rawToken);
+    } catch {
+      return { pending: false, expiresAt: null };
+    }
+    const pending = await this.accounts.getPendingRegistration(parsed.id);
+    const expiresAt = pending ? Date.parse(pending.expiresAt) : Number.NaN;
+    if (!pending || pending.consumedAt || !Number.isFinite(expiresAt) || expiresAt <= now.getTime()) {
+      return { pending: false, expiresAt: null };
+    }
+    const browserDigest = await digestSecret(parsed.secret, this.env.LOGIN_HMAC_KEY);
+    if (!constantTimeEqual(browserDigest, pending.browserSecretDigest)) {
+      return { pending: false, expiresAt: null };
+    }
+    return { pending: true, expiresAt: pending.expiresAt };
   }
 
   async completeRegistration(
@@ -216,7 +251,7 @@ export class HostAuthService {
     rawToken: string | undefined,
     requestScope: Pick<RegistrationRequestScope, 'ipAddress'>,
     now = new Date(),
-  ): Promise<SecretToken> {
+  ): Promise<ResentRegistration> {
     const parsed = this.parseRegistrationToken(rawToken);
     const pending = await this.accounts.getPendingRegistration(parsed.id);
     if (!pending || pending.consumedAt || Date.parse(pending.expiresAt) <= now.getTime()) {
@@ -236,19 +271,22 @@ export class HostAuthService {
       now,
     });
     const code = sixDigitCode();
-    const replaced = await this.accounts.replaceRegistrationCode({
-      id: pending.id,
-      browserSecretDigest: pending.browserSecretDigest,
-      codeDigest: await digestSecret(code, this.env.LOGIN_HMAC_KEY),
-      expiresAt: new Date(now.getTime() + CODE_TTL_SECONDS * 1000).toISOString(),
-      now: now.toISOString(),
-    });
-    if (!replaced) throw this.invalidRegistrationCode();
+    const resumeExpiresAt = new Date(now.getTime() + CODE_TTL_SECONDS * 1000).toISOString();
     const outcome = await this.sendRegistrationCode(pending.email, code);
     if (!outcome.delivered) {
       throw new ApiError('LOGIN_EMAIL_UNDELIVERABLE', 'That code could not be sent. Try again shortly.', 502);
     }
-    return parsed.token;
+    const replaced = await this.accounts.replaceRegistrationCode({
+      id: pending.id,
+      browserSecretDigest: pending.browserSecretDigest,
+      expectedCodeDigest: pending.codeDigest,
+      expectedExpiresAt: pending.expiresAt,
+      codeDigest: await digestSecret(code, this.env.LOGIN_HMAC_KEY),
+      expiresAt: resumeExpiresAt,
+      now: now.toISOString(),
+    });
+    if (!replaced) throw this.invalidRegistrationCode();
+    return { registrationToken: parsed.token, resumeExpiresAt };
   }
 
   async authenticate(email: string, password: string): Promise<HostAccountRecord> {

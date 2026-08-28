@@ -137,6 +137,15 @@ describe('galleryPhotoTitle', () => {
 describe('formatMomentHeading', () => {
   const zone = 'America/Chicago';
 
+  it('collapses a multi-photo same-minute range', () => {
+    expect(formatMomentHeading({
+      key: 'a',
+      photos: [photo('a', '2026-08-15T22:42:05.000Z'), photo('b', '2026-08-15T22:42:50.000Z')],
+      startAt: '2026-08-15T22:42:05.000Z',
+      endAt: '2026-08-15T22:42:50.000Z',
+    }, zone)).toBe('Saturday, August 15 · 5:42 PM');
+  });
+
   it('formats a same-day range with one shared meridiem', () => {
     expect(formatMomentHeading({
       key: 'a',

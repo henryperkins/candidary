@@ -27,6 +27,46 @@ export async function measureFold(page: Page, locator: Locator) {
   return { fold, top, bottom, visible: Math.min(bottom, fold) - Math.max(top, 0) };
 }
 
+export async function measureFoldBelowObstructions(
+  target: Locator,
+  obstructions: readonly Locator[],
+  viewportHeight: number,
+) {
+  const [targetBox, ...obstructionBoxes] = await Promise.all([
+    target.boundingBox(),
+    ...obstructions.map((locator) => locator.boundingBox()),
+  ]);
+  if (!targetBox || obstructionBoxes.some((box) => box === null)) {
+    throw new Error('Fold measurement requires every target and obstruction to be visible.');
+  }
+  const effectiveVisibleTop = Math.max(
+    0,
+    ...obstructionBoxes.map((box) => box!.y + box!.height),
+  );
+  const top = targetBox.y;
+  const bottom = top + targetBox.height;
+  return {
+    top,
+    bottom,
+    effectiveVisibleTop,
+    visibleHeight: Math.max(
+      0,
+      Math.min(bottom, viewportHeight) - Math.max(top, effectiveVisibleTop),
+    ),
+  };
+}
+
+export async function boxesIntersect(first: Locator, second: Locator): Promise<boolean> {
+  const [firstBox, secondBox] = await Promise.all([first.boundingBox(), second.boundingBox()]);
+  if (!firstBox || !secondBox) {
+    throw new Error('Intersection measurement requires both elements to be visible.');
+  }
+  return firstBox.x < secondBox.x + secondBox.width
+    && secondBox.x < firstBox.x + firstBox.width
+    && firstBox.y < secondBox.y + secondBox.height
+    && secondBox.y < firstBox.y + firstBox.height;
+}
+
 // The free space between two boxes: the horizontal gap when they share a row, otherwise the vertical
 // gap left by wrapping. A collision reads as 0 or less either way.
 export async function measureSeparation(first: Locator, second: Locator) {

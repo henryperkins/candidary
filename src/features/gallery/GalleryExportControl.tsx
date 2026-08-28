@@ -1,5 +1,11 @@
 import { Download } from 'lucide-react';
-import { useState } from 'react';
+import {
+  forwardRef,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
@@ -29,12 +35,18 @@ interface GalleryExportControlProps {
   job?: CompleteExportInput;
   activeJob?: ExportView;
   download?: ExportDownloadView;
+  resourceStatus: 'idle' | 'loading' | 'ready' | 'failed';
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
   onRetry(job: ExportView): Promise<void>;
   /** Retained while call sites move to Manager's one live owner; controls render no live nodes. */
   live?: boolean;
   onAnnouncement?(message: string): void;
+}
+
+export interface GalleryExportControlHandle {
+  focusIntendedAction(): void;
+  cancelIntendedAction(): void;
 }
 
 /**
@@ -49,19 +61,34 @@ const DESKTOP_ADVISORY_BYTES = 2 * 1024 ** 3;
  * action; afterwards the ready-state download and retry controls remain part
  * of that same logical job rather than a second entry point.
  */
-export function GalleryExportControl({
+export const GalleryExportControl = forwardRef<
+  GalleryExportControlHandle,
+  GalleryExportControlProps
+>(function GalleryExportControl({
   eventTimezone,
   currentSource,
   now = Date.now(),
   job,
   activeJob,
   download,
+  resourceStatus,
   onPrepare,
   onDownload,
   onRetry,
   onAnnouncement,
-}: GalleryExportControlProps) {
+}, ref) {
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
+  const [focusRequestEpoch, setFocusRequestEpoch] = useState(0);
+  const focusRequested = useRef(false);
+  const region = useRef<HTMLElement>(null);
+  const initialPrepare = useRef<HTMLButtonElement>(null);
+  const getDownloadLinks = useRef<HTMLButtonElement>(null);
+  const manifestDownload = useRef<HTMLAnchorElement>(null);
+  const firstPartDownload = useRef<HTMLAnchorElement>(null);
+  const printableDownload = useRef<HTMLAnchorElement>(null);
+  const privateDownload = useRef<HTMLAnchorElement>(null);
+  const retryPrepared = useRef<HTMLButtonElement>(null);
+  const prepareCurrent = useRef<HTMLButtonElement>(null);
   const normalizedJob = job ? normalizeCompleteExport(job) : undefined;
   const waitMessage = exportWaitMessage(activeJob, normalizedJob?.id);
   const currentSourceEmpty = hasTrustedEmptySource(currentSource);
@@ -79,13 +106,77 @@ export function GalleryExportControl({
   const prepareReason = waitMessage
     ?? (currentSourceEmpty ? 'Deliver a photo before preparing the current collection.' : null);
 
-  return <div className="gallery-export">
+  useImperativeHandle(ref, () => ({
+    focusIntendedAction() {
+      focusRequested.current = true;
+      setFocusRequestEpoch((current) => current + 1);
+    },
+    cancelIntendedAction() {
+      focusRequested.current = false;
+    },
+  }), []);
+
+  useLayoutEffect(() => {
+    if (!focusRequested.current) return;
+    // Continue the task the host already started. Resolved artifacts outrank
+    // recovery/current-snapshot actions; otherwise resume the existing job
+    // before offering a new snapshot. Explicit refs keep later DOM additions
+    // from silently changing this order.
+    let enabledAction: HTMLElement | null = null;
+    if (resourceStatus === 'ready') {
+      if (!normalizedJob) {
+        enabledAction = initialPrepare.current?.disabled ? null : initialPrepare.current;
+      } else {
+        if (download) {
+          enabledAction = manifestDownload.current
+            ?? firstPartDownload.current
+            ?? printableDownload.current
+            ?? privateDownload.current;
+        }
+        if (!enabledAction && normalizedJob.state === 'ready') {
+          enabledAction = getDownloadLinks.current?.disabled ? null : getDownloadLinks.current;
+        }
+        if (!enabledAction && (normalizedJob.state === 'failed' || normalizedJob.state === 'expired')) {
+          enabledAction = retryPrepared.current?.disabled ? null : retryPrepared.current;
+        }
+        if (!enabledAction && isTerminalExport(normalizedJob)) {
+          enabledAction = prepareCurrent.current?.disabled ? null : prepareCurrent.current;
+        }
+      }
+    }
+    if (enabledAction) {
+      enabledAction.focus();
+      focusRequested.current = false;
+      return;
+    }
+    region.current?.focus();
+  }, [
+    currentSourceEmpty,
+    download,
+    focusRequestEpoch,
+    normalizedJob?.state,
+    pendingAction,
+    resourceStatus,
+    waitMessage,
+  ]);
+
+  return <section
+    className="gallery-export"
+    role="region"
+    aria-label="Complete export"
+    tabIndex={-1}
+    ref={region}
+  >
+    <details className="gallery-export__details">
+      <summary>What the complete download includes</summary>
+      <p className="gallery-export__copy">
+        Every delivered photo, the photo manifest, and the printable and private guestbook files. Search and Album picks do not change this.
+      </p>
+    </details>
     {!normalizedJob
       ? <>
-          <p className="gallery-export__copy">
-            Every delivered photo, the photo manifest, and the printable and private guestbook files. Search and Album picks do not change this.
-          </p>
           <button
+            ref={initialPrepare}
             type="button"
             className="button button--primary"
             disabled={prepareDisabled}
@@ -105,6 +196,7 @@ export function GalleryExportControl({
           />
           {normalizedJob.state === 'ready' && !download && (
             <button
+              ref={getDownloadLinks}
               type="button"
               className="button button--secondary"
               disabled={pendingAction !== null}
@@ -123,19 +215,20 @@ export function GalleryExportControl({
               This download is {formatBytes(normalizedJob.totalBytes)}. It is easier to finish on a
               computer than on a phone.
             </p>}
-            {download.manifest && <a href={download.manifest.url}>Photo manifest</a>}
-            {download.parts.map((part) => (
-              <a href={part.url} key={part.partNumber}>
+            {download.manifest && <a ref={manifestDownload} href={download.manifest.url}>Photo manifest</a>}
+            {download.parts.map((part, index) => (
+              <a ref={index === 0 ? firstPartDownload : undefined} href={part.url} key={part.partNumber}>
                 Photo part {part.partNumber} of {download.parts.length}
                 <small>{part.mediaCount.toLocaleString()} photos · {formatBytes(part.sourceBytes)}</small>
               </a>
             ))}
-            {download.printableGuestbook && <a href={download.printableGuestbook.url}>Printable guestbook</a>}
-            {download.privateGuestbook && <a href={download.privateGuestbook.url}>Private entry archive <small>Contains entries guests cannot see</small></a>}
+            {download.printableGuestbook && <a ref={printableDownload} href={download.printableGuestbook.url}>Printable guestbook</a>}
+            {download.privateGuestbook && <a ref={privateDownload} href={download.privateGuestbook.url}>Private entry archive <small>Contains entries guests cannot see</small></a>}
           </div>}
           {(normalizedJob.state === 'failed' || normalizedJob.state === 'expired')
             && normalizedJob.errorCode !== 'EXPORT_SOURCE_REMOVED'
             ? <button
+                ref={retryPrepared}
                 type="button"
                 className="button button--secondary"
                 disabled={pendingAction !== null || waitMessage !== null}
@@ -146,6 +239,7 @@ export function GalleryExportControl({
             : null}
           {isTerminalExport(normalizedJob)
             ? <button
+                ref={prepareCurrent}
                 type="button"
                 className="button button--secondary"
                 disabled={prepareDisabled}
@@ -158,5 +252,5 @@ export function GalleryExportControl({
             ? <p className="gallery-export__copy">{prepareReason}</p>
             : null}
         </div>}
-  </div>;
-}
+  </section>;
+});

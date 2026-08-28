@@ -11,7 +11,8 @@ import type {
   EventCoverPresetId,
 } from '../../../shared/event-cover';
 import type { EventView } from '../../../shared/contracts';
-import { api, apiBinary, apiBytes, apiEnvelope, ClientApiError } from '../../app/api';
+import type { ApiErrorBody } from '../../../shared/errors';
+import { api, apiBytes, apiEnvelope, attachCredentials, ClientApiError } from '../../app/api';
 
 /** The safe draft projection returned by every draft route. */
 export interface CoverDraftView {
@@ -195,7 +196,9 @@ export type CreateCoverDraftOptions = {
 );
 
 /** Reserves or replays one draft without accepting an object key from the client. */
-export async function createCoverDraft(options: CreateCoverDraftOptions): Promise<CoverDraftReservation> {
+export async function createCoverDraft(
+  options: CreateCoverDraftOptions & { signal?: AbortSignal },
+): Promise<CoverDraftReservation> {
   const draftIntentId = persistedId(draftIntentStorageKey(options.eventId, options.intentKey));
   let request: EventCoverDraftCreateRequestV1;
   if (options.source.kind === 'new-upload') {
@@ -222,6 +225,7 @@ export async function createCoverDraft(options: CreateCoverDraftOptions): Promis
   }>(`${coverBase(options.eventId)}/drafts`, {
     method: 'POST',
     body: JSON.stringify(request),
+    signal: options.signal,
   });
   return {
     draft: result.draft,
@@ -235,33 +239,99 @@ export async function transferCoverDraft(options: {
   eventId: string;
   draft: CoverDraftView;
   file: File;
+  signal: AbortSignal;
+  onProgress(sentBytes: number, totalBytes: number): void;
 }): Promise<CoverDraftView> {
   if (options.draft.state !== 'reserved') {
     throw new CoverDraftPrimitiveError('Only a reserved cover draft can receive source bytes.');
   }
-  const result = await apiBinary<{ draft: CoverDraftView }>(
-    `${draftPath(options.eventId, options.draft.id)}/raw`,
-    {
-      method: 'PUT',
-      headers: {
-        'content-type': options.file.type,
-        'if-match': `"${options.draft.revision}"`,
-      },
-      body: options.file,
-    },
-  );
-  return result.draft;
+  if (options.signal.aborted) {
+    throw new DOMException('Cover upload was cancelled.', 'AbortError');
+  }
+
+  return new Promise<CoverDraftView>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    let settled = false;
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      options.signal.removeEventListener('abort', abort);
+      finish();
+    };
+    const abort = () => request.abort();
+    options.signal.addEventListener('abort', abort, { once: true });
+
+    const path = `${draftPath(options.eventId, options.draft.id)}/raw`;
+    request.open('PUT', path);
+    const target = new URL(path, window.location.href);
+    if (target.origin === window.location.origin) {
+      request.withCredentials = true;
+      attachCredentials(new Headers(), 'PUT').forEach((value, name) => {
+        request.setRequestHeader(name, value);
+      });
+    }
+    request.setRequestHeader('content-type', options.file.type);
+    request.setRequestHeader('if-match', `"${options.draft.revision}"`);
+    request.upload.addEventListener('progress', (event) => {
+      if (settled || options.signal.aborted) return;
+      options.onProgress(
+        Math.min(Math.max(0, event.loaded), options.file.size),
+        options.file.size,
+      );
+    });
+    request.addEventListener('load', () => settle(() => {
+      if (options.signal.aborted) {
+        reject(new DOMException('Cover upload was cancelled.', 'AbortError'));
+        return;
+      }
+      const payload = (() => {
+        try {
+          return JSON.parse(request.responseText) as {
+            data?: { draft?: CoverDraftView };
+          } & Partial<ApiErrorBody>;
+        } catch {
+          return null;
+        }
+      })();
+      if (request.status >= 200 && request.status < 300 && payload?.data?.draft) {
+        options.onProgress(options.file.size, options.file.size);
+        resolve(payload.data.draft);
+        return;
+      }
+      if (payload?.code && payload.message) {
+        reject(new ClientApiError(
+          payload.code,
+          payload.message,
+          payload.fieldErrors,
+          payload.details,
+          request.status,
+          payload.requestId,
+        ));
+        return;
+      }
+      reject(new Error('The transfer was interrupted. Try this photo again.'));
+    }));
+    request.addEventListener('error', () => settle(() => {
+      reject(new Error('Reception dropped out. Try this photo again.'));
+    }));
+    request.addEventListener('abort', () => settle(() => {
+      reject(new DOMException('Cover upload was cancelled.', 'AbortError'));
+    }));
+    request.send(options.file);
+  });
 }
 
 export async function inspectCoverDraft(
   eventId: string,
   draft: CoverDraftView,
+  signal?: AbortSignal,
 ): Promise<CoverDraftView> {
   if (draft.state !== 'transferred') {
     throw new CoverDraftPrimitiveError('Only a transferred cover draft can be inspected.');
   }
   return (await api<{ draft: CoverDraftView }>(`${draftPath(eventId, draft.id)}/inspect`, {
     method: 'POST',
+    signal,
   })).draft;
 }
 
@@ -443,22 +513,30 @@ export async function publishCoverUpload(
 ): Promise<CoverOperationAnswer> {
   const { eventId, file, expectedRevision } = options;
   validateCoverFile(file);
+  const controller = new AbortController();
 
   options.onProgress?.('reserving');
   const reservation = await createCoverDraft({
     eventId,
     intentKey: fileIntentKey(file),
     source: { kind: 'new-upload', file },
+    signal: controller.signal,
   });
   let draft = reservation.draft;
 
   if (draft.state === 'reserved') {
     options.onProgress?.('transferring');
-    draft = await transferCoverDraft({ eventId, draft, file });
+    draft = await transferCoverDraft({
+      eventId,
+      draft,
+      file,
+      signal: controller.signal,
+      onProgress: () => undefined,
+    });
   }
   if (draft.state === 'transferred') {
     options.onProgress?.('inspecting');
-    draft = await inspectCoverDraft(eventId, draft);
+    draft = await inspectCoverDraft(eventId, draft, controller.signal);
   }
   if (draft.state === 'inspected') {
     options.onProgress?.('composing');

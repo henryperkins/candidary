@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  ALBUM_MAX_ENTRIES,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
   MAX_EVENT_BYTES,
@@ -825,6 +826,7 @@ describe('where a retained photo may and may not appear', () => {
       mediaId: retained.id,
       restoreUntil: trashed.restoreUntil,
       state: 'recoverable',
+      timelineAt: retained.timelineAt,
     });
     expect((after.entries as any[]).filter((entry) => entry.kind === 'photo')
       .map((entry) => entry.photo.id)).toEqual([kept.id]);
@@ -1136,10 +1138,61 @@ describe('scheduled recovery cleanup', () => {
     return media;
   }
 
-  it('permanently deletes an expired retained photo and gives back its capacity', async () => {
+  it('cleanup removes the retained slot and frees album capacity exactly once', async () => {
     const access = await eventAccess();
-    const media = await expiredPhoto(access, 'sweep-expired');
+    const media = await uploadPending(access, 'sweep-expired', null);
+    await testEnv.DB.prepare('UPDATE media SET favorited_at = ? WHERE id = ?')
+      .bind(TRASHED_AT, media.id).run();
+    const sessionId = await testEnv.DB.prepare(`
+      SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1
+    `).bind(access.event.id).first<string>('id');
+    if (!sessionId) throw new Error('Expected the event guest session.');
+    await testEnv.DB.prepare(`
+      WITH RECURSIVE seq(i) AS (
+        SELECT 1
+        UNION ALL
+        SELECT i + 1 FROM seq WHERE i < ?1
+      )
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, object_bucket_generation,
+        original_filename, mime_type, declared_byte_size, byte_size, width, height,
+        guest_name, caption, upload_state, publication_status, idempotency_key,
+        reservation_expires_at, created_at, stored_at, captured_at, timeline_at,
+        favorited_at, deleted_at, album_pick_version
+      )
+      SELECT
+        printf('cleanup-cap-%04d', i), ?2, ?3,
+        'events/' || ?2 || '/media/final/cleanup-cap-' || printf('%04d', i),
+        'canonical', 'cleanup-cap-' || i || '.jpg', 'image/jpeg', 1, 1, 1, 1,
+        'Avery', NULL, 'stored', 'unpublished', 'cleanup-cap-' || i,
+        ?4, ?4, ?4, ?4, ?4, ?4, NULL, 1
+      FROM seq
+    `).bind(
+      ALBUM_MAX_ENTRIES - 1,
+      access.event.id,
+      sessionId,
+      TRASHED_AT,
+    ).run();
+    await testEnv.DB.prepare(`
+      INSERT INTO event_albums (
+        event_id, entries, saved_at, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, 0, ?, ?)
+    `).bind(
+      access.event.id,
+      JSON.stringify([{ kind: 'photo', mediaId: media.id }]),
+      TRASHED_AT,
+      TRASHED_AT,
+      TRASHED_AT,
+    ).run();
+    await new MediaRepository(testEnv.DB).trashStored(access.event.id, media.id, TRASHED_AT);
     expect(await counters(access.event.id)).toMatchObject({ recoverableCount: 1 });
+    const retainedAlbum = (await body(await managerGet(access, '/album'))).data.album;
+    expect(retainedAlbum).toMatchObject({
+      photoCount: ALBUM_MAX_ENTRIES - 1,
+      retainedCount: 1,
+      sectionCount: 0,
+    });
+    expect(retainedAlbum.entries).toHaveLength(ALBUM_MAX_ENTRIES);
 
     const summary = await cleanupExpiredRecoverableMedia(testEnv, SWEEP_AT);
 
@@ -1154,6 +1207,36 @@ describe('scheduled recovery cleanup', () => {
       storedCount: 0, storedBytes: 0, recoverableCount: 0, recoverableBytes: 0,
     });
     expect((await trashedIds(access)).ids).toEqual([]);
+    const cleanedAlbum = (await body(await managerGet(access, '/album'))).data.album;
+    expect(cleanedAlbum).toMatchObject({
+      revision: retainedAlbum.revision + 1,
+      photoCount: ALBUM_MAX_ENTRIES - 1,
+      retainedCount: 0,
+      sectionCount: 0,
+    });
+    expect(cleanedAlbum.entries).toHaveLength(ALBUM_MAX_ENTRIES - 1);
+
+    const admitted = await uploadPending(access, 'cleanup-cap-admitted', null);
+    expect((await managerPost(
+      access,
+      '/album/picks',
+      JSON.stringify({ mediaIds: [admitted.id], picked: true }),
+    )).status).toBe(200);
+    expect((await body(await managerGet(access, '/album'))).data.album.entries)
+      .toHaveLength(ALBUM_MAX_ENTRIES);
+
+    expect(await cleanupExpiredRecoverableMedia(testEnv, SWEEP_AT))
+      .toEqual({ terminalized: 0, held: 0 });
+    expect((await body(await managerGet(access, '/album'))).data.album.revision)
+      .toBe(cleanedAlbum.revision);
+    const refused = await uploadPending(access, 'cleanup-cap-refused', null);
+    const repick = await managerPost(
+      access,
+      '/album/picks',
+      JSON.stringify({ mediaIds: [refused.id], picked: true }),
+    );
+    expect(repick.status).toBe(409);
+    expect((await body(repick)).code).toBe('ALBUM_FULL');
     // The recovery capacity is what this pass returns. Physical retirement of a
     // freshly delivered original is inventoried against its own promotion row and
     // belongs to the tombstone janitor, so no key is claimed here.

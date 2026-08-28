@@ -107,7 +107,9 @@ export function formatMomentHeading(moment: GalleryMoment, timeZone: string): st
   const startTime = time.format(new Date(moment.startAt));
   const endTime = time.format(new Date(moment.endAt));
   if (moment.photos.length === 1) return `${startDate} · ${startTime}`;
-  if (startDate === endDate) return `${startDate} · ${timeRange(startTime, endTime)}`;
+  if (startDate === endDate) {
+    return `${startDate} · ${startTime === endTime ? startTime : timeRange(startTime, endTime)}`;
+  }
   return `${startDate}, ${startTime}–${endDate}, ${endTime}`;
 }
 

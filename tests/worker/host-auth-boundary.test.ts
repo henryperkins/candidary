@@ -154,6 +154,23 @@ describe('native host-auth request boundary', () => {
     expect(boundary.keys).toHaveLength(2);
     expect(boundary.keys[0]).toBe(boundary.keys[1]);
   });
+
+  it('keeps register/pending read-only, email-blind, and outside mutation rate limits', async () => {
+    const boundary = deniedAtBoundary();
+    const response = await createApp().request(
+      '/api/host/register/pending?email=host%40example.com',
+      {},
+      boundary.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: { pending: false, expiresAt: null },
+      requestId: expect.any(String),
+    });
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(boundary.keys).toEqual([]);
+  });
 });
 
 it('derives the boundary key from CF-Connecting-IP alone', async () => {

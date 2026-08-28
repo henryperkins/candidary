@@ -9,6 +9,7 @@ import {
   stubGuestRoutes,
 } from './fixtures/routes';
 import { measureDocument } from './helpers/geometry';
+import { makeMedia } from './fixtures/ui-data';
 
 // The event route is the only clock in this suite. Every transition below is
 // driven by a *relative* delay the stub hands out with a phase, so a page that
@@ -37,6 +38,7 @@ const BEFORE_START: Partial<GuestEventView> = {
   // This event never adopted RSVP, so the surface offers no household affordance
   // and issues no household request: the event route is the only traffic.
   rsvpAccess: 'unavailable',
+  guestReadSurfaces: { available: false, reason: 'before-photo-open' },
   rsvpDeadlineAt: null,
   rsvpDeadlineDate: null,
 };
@@ -54,6 +56,7 @@ const PHOTOS_PRIMARY: Partial<GuestEventView> = {
   rsvpState: 'closed',
   rsvpAccess: 'unavailable',
   galleryVisible: false,
+  guestReadSurfaces: { available: true, reason: null },
   lifecycleRecheckAfterMs: null,
 };
 
@@ -62,6 +65,7 @@ const WAITING: Partial<GuestEventView> = {
   phase: 'waiting',
   rsvpState: 'closed',
   rsvpAccess: 'unavailable',
+  guestReadSurfaces: { available: true, reason: null },
   lifecycleRecheckAfterMs: null,
 };
 
@@ -158,6 +162,46 @@ async function expectContained(page: Page, label: string) {
   expect(documentSize.scrollWidth, `${label} document width`)
     .toBeLessThanOrEqual(documentSize.clientWidth + 1);
 }
+
+test('fullscreen keeps its shell and makes no Gallery request before guest read surfaces open', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const galleryRequests: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/gallery')) galleryRequests.push(request.url());
+  });
+  await stubGuestRoutes(page, { event: { ...BEFORE_START, galleryVisible: true } });
+
+  await page.goto(`${EVENT_URL}/fullscreen`);
+
+  await expect(page.getByRole('heading', { name: 'Shared gallery · Maya & Theo' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Close full-screen gallery' })).toBeVisible();
+  await expect(page.getByText(
+    'Shared photos and Guestbook become available when photo sharing opens.',
+  )).toBeVisible();
+  await expect(page.getByText('No shared photos yet.')).toHaveCount(0);
+  expect(galleryRequests).toEqual([]);
+});
+
+test('fullscreen renders the available Gallery in main-page order without duplicating panels', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const gallery = makeMedia(2);
+  await stubGuestRoutes(page, {
+    event: { ...PHOTOS_PRIMARY, galleryVisible: true },
+    gallery,
+  });
+
+  await page.goto(EVENT_URL);
+  await page.getByText(/Shared gallery/).click();
+  const mainOrder = await page.locator('.photo-grid figcaption span').allTextContents();
+
+  await page.goto(`${EVENT_URL}/fullscreen`);
+  const fullscreenOrder = await page.locator('.fullscreen__grid figcaption').allTextContents();
+  expect(fullscreenOrder).toEqual(mainOrder);
+  await expect(page.locator('details.guestbook')).toHaveCount(0);
+  await expect(page.getByText(/My deliveries/)).toHaveCount(0);
+});
 
 for (const { width, height } of PHONES) {
   test.describe(`guest lifecycle at ${width} by ${height}`, () => {
@@ -275,12 +319,15 @@ for (const { width, height } of PHONES) {
       await expectContained(page, `before-start at ${width}`);
     });
 
-    test('the waiting surface says only that delivery is paused and is axe-clean', async ({ page }) => {
+    test('the waiting surface pauses only new guest uploads and keeps read surfaces', async ({ page }) => {
       await stubGuestRoutes(page, { event: WAITING, household: respondedHousehold() });
       await page.goto(EVENT_URL);
 
-      await expect(page.getByRole('heading', { name: 'Photo delivery is paused', level: 1 })).toBeVisible();
-      await expect(page.getByText('The host has paused photo delivery for now. Please try again later.')).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'New guest uploads are paused', level: 1 })).toBeVisible();
+      await expect(page.getByText(/The host has paused new guest uploads for now/)).toBeVisible();
+      await expect(page.getByText(/Shared gallery/)).toBeVisible();
+      await expect(page.getByText(/My deliveries/)).toBeVisible();
+      await expect(page.getByText(/Guestbook/)).toBeVisible();
       await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
       // RSVP has left the guest experience entirely at this point.
       await expect(page.getByRole('heading', { name: 'Your RSVP' })).toHaveCount(0);

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GUEST_MESSAGE_PAGE_SIZE, MAX_EVENT_GUEST_NOTES } from '../../shared/constants';
+import { EVENT_START_MIGRATION_SENTINEL } from '../../shared/rsvp';
 import { createApp } from '../../worker/app';
 import { encodeGuestbookCursor } from '../../worker/http/guestbook-cursor';
 import {
@@ -16,6 +17,107 @@ import {
 
 beforeEach(resetDatabase);
 afterEach(() => vi.useRealTimers());
+
+describe('guest read surfaces', () => {
+  const unavailableMessage = 'Shared photos and Guestbook become available when photo sharing opens.';
+
+  it('refuses direct Guestbook reads and writes before the shared boundary', async () => {
+    const rows = [
+      { name: 'Guestbook scheduled unpaused', uploadsEnabled: 1, legacyRsvp: false },
+      { name: 'Guestbook scheduled paused', uploadsEnabled: 0, legacyRsvp: false },
+      { name: 'Guestbook legacy RSVP', uploadsEnabled: 0, legacyRsvp: true },
+    ];
+
+    for (const [index, row] of rows.entries()) {
+      const access = await eventAccess(row.name, false);
+      await testEnv.DB.prepare(`
+        UPDATE events
+        SET uploads_enabled = ?, photos_open_from = NULL, event_start_at = ?,
+            rsvp_enabled = ?, rsvp_deadline_at = ?, rsvp_roster_version = ?
+        WHERE id = ?
+      `).bind(
+        row.uploadsEnabled,
+        row.legacyRsvp ? EVENT_START_MIGRATION_SENTINEL : '2099-09-19T21:00:00.000Z',
+        row.legacyRsvp ? 1 : 0,
+        row.legacyRsvp ? '2099-09-19T20:30:00.000Z' : access.event.rsvpDeadlineAt,
+        row.legacyRsvp ? 1 : 0,
+        access.event.id,
+      ).run();
+
+      const responses = [
+        await createApp().request(`/api/event/${access.event.slug}/messages?contract=2`, {
+          headers: { cookie: access.guest.cookie },
+        }, testEnv),
+        await createApp().request(`/api/event/${access.event.slug}/messages`, {
+          method: 'POST',
+          headers: {
+            ...writeHeaders(access.guest),
+            'CF-Connecting-IP': `203.0.113.${80 + index}`,
+          },
+          body: JSON.stringify({
+            idempotencyKey: `read-gate-${index}`, guestName: 'Avery', body: 'Too early.',
+          }),
+        }, testEnv),
+      ];
+
+      for (const response of responses) {
+        const body = await response.json<any>();
+        expect(response.status, row.name).toBe(409);
+        expect(body, row.name).toMatchObject({
+          code: 'EVENT_PHASE_CONFLICT',
+          message: unavailableMessage,
+        });
+        expect(body, `${row.name} leaks no Guestbook envelope`).not.toHaveProperty('data');
+      }
+    }
+  });
+
+  it.each([
+    ['scheduled post-start paused', {
+      eventStartAt: '2020-01-01T00:00:00.000Z', uploadsEnabled: 0, rsvpEnabled: 0,
+    }],
+    ['legacy waiting', {
+      eventStartAt: EVENT_START_MIGRATION_SENTINEL, uploadsEnabled: 0, rsvpEnabled: 0,
+    }],
+    ['legacy photos-primary', {
+      eventStartAt: EVENT_START_MIGRATION_SENTINEL, uploadsEnabled: 1, rsvpEnabled: 0,
+    }],
+  ] as const)('keeps Guestbook reads and new notes available during %s', async (label, state) => {
+    const access = await eventAccess(`Guestbook available ${label}`);
+    await testEnv.DB.prepare(`
+      UPDATE events
+      SET event_start_at = ?, uploads_enabled = ?, rsvp_enabled = ?, photos_open_from = NULL
+      WHERE id = ?
+    `).bind(
+      state.eventStartAt,
+      state.uploadsEnabled,
+      state.rsvpEnabled,
+      access.event.id,
+    ).run();
+
+    const read = await createApp().request(`/api/event/${access.event.slug}/messages?contract=2`, {
+      headers: { cookie: access.guest.cookie },
+    }, testEnv);
+    expect(read.status).toBe(200);
+
+    const write = await createApp().request(`/api/event/${access.event.slug}/messages`, {
+      method: 'POST',
+      headers: {
+        ...writeHeaders(access.guest),
+        'CF-Connecting-IP': '203.0.113.90',
+      },
+      body: JSON.stringify({
+        idempotencyKey: `available-${label.replaceAll(' ', '-')}`,
+        guestName: 'Avery',
+        body: 'Still here while new uploads are paused.',
+      }),
+    }, testEnv);
+    expect(write.status).toBe(201);
+    expect((await write.json<any>()).data.item).toMatchObject({
+      body: 'Still here while new uploads are paused.',
+    });
+  });
+});
 
 describe('guest notes and captions', () => {
   it('refuses at the event-and-trusted-IP edge boundary after auth but before body parsing', async () => {
@@ -164,7 +266,7 @@ describe('guest notes and captions', () => {
     ).first('count')).toBe(120);
   });
 
-  it('allows reads and exact replays after photo intake closes but refuses genuinely new notes', async () => {
+  it('allows reads, exact replays, and new notes while post-start guest uploads are paused', async () => {
     const access = await eventAccess();
     const path = `/api/event/${access.event.slug}/messages`;
     const send = (key: string, body: string) => createApp().request(path, {
@@ -178,24 +280,27 @@ describe('guest notes and captions', () => {
 
     expect((await send('phase-replay', 'Created while open.')).status).toBe(201);
     await testEnv.DB.prepare(`
-      UPDATE events SET uploads_enabled = 0, photos_open_from = NULL WHERE id = ?
+      UPDATE events
+      SET uploads_enabled = 0, photos_open_from = NULL,
+          event_start_at = '2020-01-01T00:00:00.000Z'
+      WHERE id = ?
     `).bind(access.event.id).run();
 
     expect((await send('phase-replay', 'Created while open.')).status).toBe(200);
-    const changed = await send('phase-replay', 'Changed after closing.');
+    const changed = await send('phase-replay', 'Changed after pausing.');
     expect(changed.status).toBe(409);
     expect((await changed.json<any>()).code).toBe('MESSAGE_SUBMISSION_CONFLICT');
-    const refused = await send('phase-new', 'A genuinely new note.');
-    expect(refused.status).toBe(409);
-    expect((await refused.json<any>()).code).toBe('EVENT_PHASE_CONFLICT');
+    const createdWhilePaused = await send('phase-new', 'A genuinely new note.');
+    expect(createdWhilePaused.status).toBe(201);
 
     const read = await createApp().request(`${path}?contract=2`, {
       headers: { cookie: access.guest.cookie },
     }, testEnv);
     expect(read.status).toBe(200);
-    expect((await read.json<any>()).data.ownUnshared).toEqual([
+    expect((await read.json<any>()).data.ownUnshared).toEqual(expect.arrayContaining([
       expect.objectContaining({ body: 'Created while open.' }),
-    ]);
+      expect.objectContaining({ body: 'A genuinely new note.' }),
+    ]));
   });
 
   it('keeps the phase predicate inside the authoritative D1 creation batch', async () => {
@@ -228,7 +333,7 @@ describe('guest notes and captions', () => {
         'CF-Connecting-IP': '203.0.113.53',
       },
       body: JSON.stringify({
-        idempotencyKey: 'phase-race', guestName: null, body: 'The pause wins.',
+        idempotencyKey: 'phase-race', guestName: null, body: 'The schedule wins.',
       }),
     }, env);
 
@@ -242,6 +347,90 @@ describe('guest notes and captions', () => {
       SELECT COUNT(*) AS count FROM guest_message_rate_events WHERE event_id = ?
     `).bind(access.event.id).first('count')).toBe(0);
   });
+
+  it.each(['message', 'purge receipt'] as const)(
+    'authoritative read-surface race refuses an exact %s replay before DB classification',
+    async (replayKind) => {
+      const access = await eventAccess(`Guestbook ${replayKind} race`);
+      const path = `/api/event/${access.event.slug}/messages`;
+      const payload = {
+        idempotencyKey: `phase-${replayKind.replace(' ', '-')}`,
+        guestName: 'Avery',
+        body: 'The current schedule owns this replay.',
+      };
+      const send = (env: typeof testEnv) => createApp().request(path, {
+        method: 'POST',
+        headers: {
+          ...writeHeaders(access.guest),
+          'CF-Connecting-IP': '203.0.113.91',
+        },
+        body: JSON.stringify(payload),
+      }, env);
+
+      const created = await send(testEnv);
+      expect(created.status).toBe(201);
+      const item = (await created.json<any>()).data.item;
+      if (replayKind === 'purge receipt') {
+        const mutate = (body: unknown) => createApp().request(
+          `/api/manage/events/${access.event.id}/messages/${item.id}`,
+          { method: 'PATCH', headers: writeHeaders(access.manager), body: JSON.stringify(body) },
+          testEnv,
+        );
+        expect((await mutate({ action: 'delete', expectedState: 'pending' })).status).toBe(200);
+        expect((await mutate({ action: 'purge', expectedState: 'deleted' })).status).toBe(200);
+      }
+
+      const counts = () => testEnv.DB.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM guest_messages WHERE event_id = ?) AS messages,
+          (SELECT COUNT(*) FROM guest_message_rate_events WHERE event_id = ?) AS rate_events,
+          (SELECT COUNT(*) FROM guest_message_purge_receipts WHERE event_id = ?) AS purge_receipts
+      `).bind(access.event.id, access.event.id, access.event.id).first();
+      const before = await counts();
+
+      let scheduleMoved = false;
+      let scheduleStatus: number | null = null;
+      const db = new Proxy(testEnv.DB, {
+        get(target, property) {
+          if (property === 'batch') {
+            return async (statements: D1PreparedStatement[]) => {
+              if (!scheduleMoved) {
+                scheduleMoved = true;
+                const scheduled = await createApp().request(
+                  `/api/manage/events/${access.event.id}/photo-intake`,
+                  {
+                    method: 'POST',
+                    headers: writeHeaders(access.manager),
+                    body: JSON.stringify({ action: 'return_to_schedule' }),
+                  },
+                  testEnv,
+                );
+                scheduleStatus = scheduled.status;
+              }
+              return target.batch(statements);
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const env = Object.create(testEnv) as typeof testEnv;
+      Object.defineProperty(env, 'DB', { value: db });
+
+      const replayed = await send(env);
+      const body = await replayed.json<any>();
+
+      expect(scheduleMoved).toBe(true);
+      expect(scheduleStatus).toBe(200);
+      expect(replayed.status).toBe(409);
+      expect(body).toMatchObject({
+        code: 'EVENT_PHASE_CONFLICT',
+        message: 'Shared photos and Guestbook become available when photo sharing opens.',
+      });
+      expect(body).not.toHaveProperty('data');
+      expect(await counts()).toEqual(before);
+    },
+  );
 
   it('counts soft-deleted rows toward the 1,000-note retained event cap', async () => {
     const access = await eventAccess();

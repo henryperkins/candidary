@@ -323,9 +323,50 @@ SELECT p.cid, p.name, p.type, p."notnull", p.dflt_value, p.pk,
     WHERE type = 'table' AND name = 'export_protocol_admission'
   ) AS m
   CROSS JOIN export_protocol_admission AS admission
-ORDER BY p.cid;`;
+ORDER BY p.cid;
+SELECT 'event_sessions' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk, '' AS checks
+  FROM pragma_table_info('event_sessions') AS p
+  WHERE p.name = 'manager_upload_account_id'
+UNION ALL
+SELECT 'events' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk,
+       CASE p.name
+         WHEN 'album_pick_generation' THEN
+           (instr(m.sql, 'album_pick_generation >= 0') > 0) || ''
+         WHEN 'manager_link_revision' THEN
+           (instr(m.sql, 'manager_link_revision >= 0') > 0) || ''
+         ELSE ''
+       END AS checks
+  FROM pragma_table_info('events') AS p
+  CROSS JOIN sqlite_master AS m
+  WHERE m.type = 'table' AND m.name = 'events'
+    AND p.name IN ('album_pick_generation', 'manager_link_revision')
+UNION ALL
+SELECT 'media' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk,
+       (instr(m.sql, 'album_pick_version IS NULL OR album_pick_version = 1') > 0) || '' AS checks
+  FROM pragma_table_info('media') AS p
+  CROSS JOIN sqlite_master AS m
+  WHERE m.type = 'table' AND m.name = 'media'
+    AND p.name = 'album_pick_version'
+ORDER BY tbl, cid;
+SELECT 'event_sessions' AS tbl, f."table" AS parent,
+       f."from" AS col, f."to" AS parent_col, f.on_delete AS on_delete
+  FROM pragma_foreign_key_list('event_sessions') AS f
+  WHERE f."from" = 'manager_upload_account_id';
+SELECT i.name, i."unique" AS uniq, i.partial AS partial, x.sql AS sql
+  FROM pragma_index_list('event_access_tokens') AS i
+  JOIN sqlite_master AS x ON x.type = 'index' AND x.name = i.name
+  WHERE i.name = 'event_access_tokens_one_live_manager'
+UNION ALL
+SELECT i.name, i."unique" AS uniq, i.partial AS partial, x.sql AS sql
+  FROM pragma_index_list('event_sessions') AS i
+  JOIN sqlite_master AS x ON x.type = 'index' AND x.name = i.name
+  WHERE i.name = 'event_sessions_manager_upload_actor'
+ORDER BY name;`;
 
-const INVARIANT_STATEMENT_COUNT = 27;
+const INVARIANT_STATEMENT_COUNT = 30;
 
 /**
  * Pinned, not derived.
@@ -342,15 +383,17 @@ const INVARIANT_STATEMENT_COUNT = 27;
  * recoverable and turns an accepted export's frozen entries into a source hold.
  * Twenty with `0020_export_progress.sql`, which adds durable progress and an
  * attempt-owned execution ledger without reinterpreting existing jobs.
+ * Twenty-one with `0021_manager_upload_and_album_era.sql`, which adds the
+ * account upload actor and database-owned Album-era generation.
  * Count and terminal schema assertions move together here.
  */
-const EXPECTED_MIGRATION_COUNT = 20;
+const EXPECTED_MIGRATION_COUNT = 21;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
  * existing invariant bodies, all fifteen 0015 bodies, the twelve 0019 recovery
- * and source-hold bodies, and the nine 0020 execution/progress/admission bodies
- * cannot drift behind a name-only schema check.
+ * and source-hold bodies, the nine 0020 execution/progress/admission bodies,
+ * and the eight 0021 actor/Album bodies cannot drift behind a name-only check.
  *
  * Two of these names are older than their bodies: 0019 replaces
  * `media_object_write_tombstone_guard_update` and `media_stored_legacy_guard_update`
@@ -367,6 +410,9 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   event_cover_render_set_manifest_update: '90ce5414d984e4adeeefa901a20d2e169ff0a5f80f943d922bc0e95081ab4815',
   event_cover_source_pointer_insert: 'a9fbab82a3e6ad5e3f98cae72d0c5cddddaf10a1e94d823bc0d3090fb91d7991',
   event_cover_source_pointer_update: '047746e2f68a3b5560756f3d750cc45aa78688349f922bcab86102775dea99fd',
+  event_hosts_revoke_manager_upload_actor: '20b22dfbccc7c6c0c855f8acaf52432c0fc06a70c97efbcd3fd442bdbe3e3cea',
+  event_sessions_manager_upload_actor_insert: 'b53da7fb6734359b954bc62d7c82fb1da46526c51a528eff9f82c1ce3a3f3db3',
+  event_sessions_manager_upload_actor_update: '6c6407acf6e08f6e17e87fb2c78ba9d4749d41f491d528d0de101aaf8740f6ee',
   events_media_capacity_guard_insert: '74a027aa4d29f775158cdbc4df807381af20836259ac5b9711e8f1f827469f4a',
   events_media_capacity_guard_update: '2567b5a50e1878ca9089234914d774f2e38d2460c22aeb7c1aa313bb8a48f9fe',
   events_rsvp_deadline_insert: 'b96be8b8983ad7ed6d354e1bb3da6959cca61c89c09d83d796d22649d079b110',
@@ -388,6 +434,11 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   export_source_hold_tombstone_suppress: '5ab86ae27655c8763e897ad894f91c1516c035c955f306d5e3979ca0d52a3880',
   legacy_media_scan_quarantine_permanent: '0b5ca1981e323706e28954b7197abe32276afcff737edae1484087f1058cb7aa',
   legacy_media_scan_state_permanent: '1665fa34a1ed318164fc0e7e29c2b50aa5550837b4a0249ee173b289ecc2a8b3',
+  media_album_pick_generation_delete: '94e89b975815988f619b6fa433cf96c3d5239454e2703932c71a7031f6728c50',
+  media_album_pick_generation_update: 'e3b8fc4739bb20b2301ff25011dbd7ac5fffaa37e9da2ed60a1d1a776cef4d11',
+  media_album_pick_pair_guard: '3b5f330cba957d70996fab01ec7c5a2a036d187d763b272cbc5c47537398ba99',
+  media_album_pick_version_on_legacy_pick: '56a71f0e73e766ef0849252f57602d6bd138560e73550e9b2f92fde17aaf02f9',
+  media_album_pick_version_on_legacy_unpick: '6828c1b9287e68d1571dafd500f3793dadb5d322b174d791d78d53b0b8dfd6e4',
   media_object_promotion_inventory_insert: 'ec75363b45f7be245506e400dca3329e06abe7f388334a6c13b01d64d237579e',
   media_object_promotion_inventory_update: '3523593400afa87a2ba6ac0432deee1686d944cfd4b2aa6a35fba2e5cbb69ea6',
   media_object_promotion_reservation_capability_guard: 'f7473c9ffeee90d78349f46bf91bc20e70da52bc7bb49f41f176ba0ce1f3848a',
@@ -762,6 +813,27 @@ const EXPECTED_EXPORT_PROTOCOL_ADMISSION_COLUMNS = [
 const EXPECTED_EXPORT_PROTOCOL_ADMISSION_SQL_SHA256 =
   '679de6b5cbbccf1ca778796696d6c0aa7256cee74d9f7fdec34f6a81bf2e2882';
 
+const EXPECTED_MANAGER_UPLOAD_ALBUM_ERA_COLUMNS = [
+  'event_sessions.10 manager_upload_account_id TEXT notnull=0 default=NULL pk=0 checks=',
+  'events.32 album_pick_generation INTEGER notnull=1 default=0 pk=0 checks=1',
+  'events.33 manager_link_revision INTEGER notnull=1 default=0 pk=0 checks=1',
+  'media.27 album_pick_version INTEGER notnull=0 default=NULL pk=0 checks=1',
+];
+
+const EXPECTED_MANAGER_UPLOAD_ALBUM_ERA_FOREIGN_KEYS = [
+  'event_sessions.manager_upload_account_id -> host_accounts.id NO ACTION',
+];
+
+const EXPECTED_MANAGER_UPLOAD_ALBUM_ERA_INDEX_SQL: Record<string, string> = {
+  event_access_tokens_one_live_manager:
+    "CREATE UNIQUE INDEX event_access_tokens_one_live_manager"
+    + " ON event_access_tokens(event_id) WHERE role = 'manager' AND revoked_at IS NULL",
+  event_sessions_manager_upload_actor:
+    'CREATE UNIQUE INDEX event_sessions_manager_upload_actor'
+    + ' ON event_sessions(event_id, manager_upload_account_id)'
+    + ' WHERE manager_upload_account_id IS NOT NULL AND revoked_at IS NULL',
+};
+
 const EXPECTED_MEDIA_OBJECT_PROMOTIONS_SQL = `
 CREATE TABLE media_object_promotions (
   media_id TEXT PRIMARY KEY REFERENCES media(id) ON DELETE RESTRICT,
@@ -861,6 +933,9 @@ const EXPECTED_COLUMN_NAMES = {
     // 0019. Recently deleted holds capacity, so its counters live beside the
     // delivered ones rather than being derived from a scan.
     'recoverable_media_count', 'recoverable_bytes',
+    // 0021. Album eligibility and Manager-link rotation each own an event-local
+    // monotonic revision; neither exposes credential identity.
+    'album_pick_generation', 'manager_link_revision',
   ],
   rsvpRosterBatchReceipts: [
     'event_id', 'idempotency_key', 'request_digest', 'receipt_json', 'created_at',
@@ -912,6 +987,8 @@ const EXPECTED_TERMINAL_COLUMNS: Record<keyof typeof EXPECTED_COLUMN_NAMES, Expe
     },
     { name: 'recoverable_media_count', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
     { name: 'recoverable_bytes', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+    { name: 'album_pick_generation', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+    { name: 'manager_link_revision', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
   ],
   rsvpRosterBatchReceipts: [
     { name: 'event_id', type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 },
@@ -1551,6 +1628,70 @@ function assertExportProtocolAdmission(values: unknown[]): void {
   }
 }
 
+function assertManagerUploadAlbumEraColumns(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => {
+      const row = exactRecord(
+        value,
+        ['tbl', 'cid', 'col', 'type', 'notnull', 'dflt_value', 'pk', 'checks'],
+        `Manager upload and Album-era column ${index + 1}`,
+      );
+      if (typeof row.tbl !== 'string' || typeof row.col !== 'string'
+        || typeof row.type !== 'string' || typeof row.checks !== 'string'
+        || !Number.isSafeInteger(row.cid) || (row.cid as number) < 0
+        || (row.notnull !== 0 && row.notnull !== 1)
+        || (row.dflt_value !== null && typeof row.dflt_value !== 'string')
+        || !Number.isSafeInteger(row.pk) || (row.pk as number) < 0) {
+        throw new TypeError(
+          `Manager upload and Album-era column ${index + 1} contains an invalid value.`,
+        );
+      }
+      return `${row.tbl}.${row.cid} ${row.col} ${row.type} notnull=${row.notnull}`
+        + ` default=${row.dflt_value ?? 'NULL'} pk=${row.pk} checks=${row.checks}`;
+    }),
+    EXPECTED_MANAGER_UPLOAD_ALBUM_ERA_COLUMNS,
+    'Manager upload and Album-era column definitions',
+  );
+}
+
+function assertManagerUploadAlbumEraForeignKeys(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => {
+      const row = textField(
+        value,
+        ['tbl', 'parent', 'col', 'parent_col', 'on_delete'],
+        `Manager upload foreign key ${index + 1}`,
+      );
+      return `${row.tbl}.${row.col} -> ${row.parent}.${row.parent_col} ${row.on_delete}`;
+    }),
+    EXPECTED_MANAGER_UPLOAD_ALBUM_ERA_FOREIGN_KEYS,
+    'Manager upload foreign keys',
+  );
+}
+
+function assertManagerUploadAlbumEraIndexes(values: unknown[]): void {
+  const rows = values.map((value, index) => {
+    const row = exactRecord(
+      value,
+      ['name', 'uniq', 'partial', 'sql'],
+      `Manager upload index ${index + 1}`,
+    );
+    if (typeof row.name !== 'string' || typeof row.sql !== 'string'
+      || row.uniq !== 1 || row.partial !== 1) {
+      throw new TypeError(`Manager upload index ${index + 1} is invalid.`);
+    }
+    return row as { name: string; sql: string };
+  });
+  const expectedNames = Object.keys(EXPECTED_MANAGER_UPLOAD_ALBUM_ERA_INDEX_SQL);
+  assertExactList(rows.map((row) => row.name), expectedNames, 'Manager upload index set');
+  for (const row of rows) {
+    const normalized = row.sql.replace(/\s+/gu, ' ').trim();
+    if (normalized !== EXPECTED_MANAGER_UPLOAD_ALBUM_ERA_INDEX_SQL[row.name]) {
+      throw new Error(`${row.name} Manager upload index SQL has drifted.`);
+    }
+  }
+}
+
 function assertTriggers(values: unknown[]): void {
   const rows = values.map((value, index) => textField(value, ['name', 'sql'], `Trigger ${index + 1}`));
   assertExactList(rows.map((row) => row.name!), Object.keys(EXPECTED_TRIGGER_SQL_SHA256), 'Trigger set');
@@ -1619,6 +1760,9 @@ export function parseWranglerInvariantOutput(
   assertRecoveryIndexes(results[24]!);
   assertExportProgressColumns(results[25]!);
   assertExportProtocolAdmission(results[26]!);
+  assertManagerUploadAlbumEraColumns(results[27]!);
+  assertManagerUploadAlbumEraForeignKeys(results[28]!);
+  assertManagerUploadAlbumEraIndexes(results[29]!);
 
   // `terminalSchema` deliberately keeps its three keys. `exactRecord` rejects
   // unknown fields, the literal recurs in four test files, and

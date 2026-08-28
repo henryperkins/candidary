@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { parseManagementLink, replaceManagementLocation } from '../../src/app/management-link';
-import { adoptTargetFor, hostRegisterHref, hostSignInHref, safeReturnTo } from '../../src/app/recovery';
+import {
+  adoptTargetFor,
+  hostRegisterHref,
+  hostSignInHref,
+  registrationConfirmationDestination,
+  safeReturnTo,
+} from '../../src/app/recovery';
 import {
   KNOWN_APPLICATION_ORIGINS,
   PREVIEW_APPLICATION_ROOT_ORIGIN,
@@ -119,6 +125,48 @@ describe('management link recovery', () => {
 });
 
 describe('host recovery paths', () => {
+  it.each([
+    [
+      'a canonical bound-event destination',
+      true,
+      `/manage/event/${EVENT}?section=gallery&mode=album`,
+      EVENT,
+      `/manage/event/${EVENT}?section=gallery&mode=album`,
+    ],
+    [
+      'a legacy but canonicalizable bound-event destination',
+      true,
+      `/manage/event/${EVENT}?section=gallery&mode=shared`,
+      EVENT,
+      `/manage/event/${EVENT}?section=gallery&mode=guest-gallery`,
+    ],
+    [
+      'an unbound event',
+      false,
+      `/manage/event/${EVENT}?section=gallery&mode=album`,
+      EVENT,
+      '/host/events',
+    ],
+    [
+      'a return without a validated adoption match',
+      true,
+      `/manage/event/${EVENT}?section=gallery&mode=album`,
+      null,
+      '/host/events',
+    ],
+    ['an unsafe return', true, 'https://evil.example/manager', null, '/host/events'],
+    ['a non-Manager local return', true, '/host/events', null, '/host/events'],
+    ['a missing return', true, null, null, '/host/events'],
+  ] as const)('resolves registration confirmation for %s', (
+    _case,
+    boundEvent,
+    returnTo,
+    validatedAdopt,
+    expected,
+  ) => {
+    expect(registrationConfirmationDestination({ boundEvent, returnTo, validatedAdopt })).toBe(expected);
+  });
+
   it('accepts only the two local destinations a recovery can end at', () => {
     expect(safeReturnTo('/host/events')).toBe('/host/events');
     expect(safeReturnTo(`/manage/event/${EVENT}`)).toBe(`/manage/event/${EVENT}`);
