@@ -25,8 +25,9 @@ export type GuestbookRowAction =
   | 'publish'
   | 'hide';
 
-export function initialGuestbookView(summary: GuestbookSummary | null): GuestbookManagerView {
-  return summary && summary.needsReviewCount > 0 ? 'needs-review' : 'shared';
+export function initialGuestbookView(_summary: GuestbookSummary | null): GuestbookManagerView {
+  void _summary;
+  return 'needs-review';
 }
 
 export function guestbookItemKey(item: ManagerGuestbookItem): string {

@@ -33,7 +33,10 @@ const EVENT: EventView = {
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   reservedMediaCount: 0, storedMediaCount: 2, reservedBytes: 0, storedBytes: 2_048,
   recoverableMediaCount: 0, recoverableBytes: 0,
+  hostUploadAvailability: { enabled: true, reason: null },
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
+  managerLinkRevision: 0,
+  managerLinkRotationAvailability: { enabled: true, reason: null },
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',
   eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
@@ -210,7 +213,7 @@ describe('manager access recovery destinations', () => {
 });
 
 describe('moving a photo to Recently deleted', () => {
-  it('sends no request until the confirmation is explicitly activated', async () => {
+  it('safety ladder consequential: sends no request until the confirmation is explicitly activated', async () => {
     const user = userEvent.setup();
     const { calls, fetchMock } = managerFetch();
     await openManager(fetchMock);

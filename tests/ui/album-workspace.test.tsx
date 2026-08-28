@@ -119,8 +119,10 @@ const event: EventView = {
   storedBytes: 1024,
   recoverableMediaCount: 0,
   recoverableBytes: 0,
+  hostUploadAvailability: { enabled: true, reason: null },
   guestAccessExpiresAt: '2026-10-19T00:00:00Z',
   managementAccessExpiresAt: '2026-12-18T00:00:00Z',
+  managerLinkRevision: 0,
   purgeAfter: '2027-01-17T00:00:00Z',
   createdAt: '2026-08-01T00:00:00Z',
   deletedAt: null,
@@ -162,10 +164,19 @@ interface AlbumState {
   revision: number;
   saved: boolean;
   entries: AlbumEntryView[];
+  pickGeneration?: number;
+  reconciliation?: AlbumView['reconciliation'];
   title?: string;
   description?: string;
   coverMediaId?: string | null;
 }
+
+type AlbumStartRequest = {
+  start: 'from-picks' | 'empty';
+  expectedReconciliation: Exclude<AlbumView['reconciliation'], null>['kind'];
+  expectedPickGeneration: number;
+  expectedRevision: number;
+};
 
 /**
  * The media a slot holds, whether the photograph is still visible or retained.
@@ -193,8 +204,9 @@ function retainedSlot(
   mediaId: string,
   restoreUntil: string,
   state: AlbumRetainedSlotView['state'] = 'recoverable',
+  timelineAt = '2026-08-15T22:42:00.000Z',
 ): AlbumRetainedSlotView {
-  return { mediaId, restoreUntil, state };
+  return { mediaId, restoreUntil, state, timelineAt };
 }
 
 interface Harness {
@@ -230,7 +242,14 @@ interface Harness {
   pickGates: Array<Promise<void> | undefined>;
   pickErrors: Array<string | undefined>;
   startWrites: string[];
+  startRequests: AlbumStartRequest[];
   startGates: Array<Promise<void> | undefined>;
+  startFailures: Array<{
+    message: string;
+    code?: string;
+    status?: number;
+    album?: AlbumState;
+  } | undefined>;
   startResults: Array<{
     started: boolean;
     album?: AlbumState;
@@ -296,7 +315,9 @@ function harness(overrides: Partial<Harness> = {}) {
     pickGates: overrides.pickGates ?? [],
     pickErrors: overrides.pickErrors ?? [],
     startWrites: [],
+    startRequests: [],
     startGates: overrides.startGates ?? [],
+    startFailures: overrides.startFailures ?? [],
     startResults: overrides.startResults ?? [],
     share: overrides.share ?? null,
     shareWrites: [],
@@ -343,6 +364,14 @@ function harness(overrides: Partial<Harness> = {}) {
     const coverRetained = coverMediaId ? state.trashed[coverMediaId] ?? null : null;
     const firstPhoto = entries.find((entry) => entry.kind === 'photo');
     const firstVisibleId = firstPhoto?.kind === 'photo' ? firstPhoto.photo.id : null;
+    const reconciliation = state.album.reconciliation !== undefined
+      ? state.album.reconciliation
+      : state.album.saved || entries.filter((entry) => entry.kind !== 'section').length === 0
+        ? null
+        : {
+            kind: 'historical' as const,
+            historicalPickCount: entries.filter((entry) => entry.kind !== 'section').length,
+          };
     return {
       revision: state.album.revision,
       saved: state.album.saved,
@@ -360,6 +389,8 @@ function harness(overrides: Partial<Harness> = {}) {
       totalBytes: entries.reduce((sum, entry) => (
         entry.kind === 'photo' ? sum + (state.bytesById[entry.photo.id] ?? 64) : sum
       ), 0),
+      pickGeneration: state.album.pickGeneration ?? 0,
+      reconciliation,
     };
   }
 
@@ -499,7 +530,17 @@ function harness(overrides: Partial<Harness> = {}) {
     if (url.pathname.endsWith('/album/start') && method === 'POST') {
       const write = state.startWrites.length;
       state.startWrites.push(body.start);
+      state.startRequests.push(body as AlbumStartRequest);
       await state.startGates[write];
+      const configuredFailure = state.startFailures[write];
+      if (configuredFailure) {
+        if (configuredFailure.album) state.album = configuredFailure.album;
+        return failure(
+          configuredFailure.message,
+          configuredFailure.status ?? 409,
+          configuredFailure.code ?? 'REVISION_CONFLICT',
+        );
+      }
       const configured = state.startResults[write];
       if (configured) {
         if (configured.album) state.album = configured.album;
@@ -514,7 +555,12 @@ function harness(overrides: Partial<Harness> = {}) {
         cleared = state.galleryRows.filter((item) => item.isFavorite).map((item) => item.id);
         for (const item of state.galleryRows) item.isFavorite = false;
       }
-      state.album = { ...state.album, saved: true };
+      state.album = {
+        ...state.album,
+        revision: state.album.revision + 1,
+        saved: true,
+        reconciliation: null,
+      };
       const resolved = resolvedAlbum();
       state.audienceSummary = {
         ...state.audienceSummary,
@@ -839,16 +885,38 @@ async function openAlbum(user = userEvent.setup()) {
   return user;
 }
 
+function RunningUndoHarness({ eventId, settle }: {
+  eventId: string;
+  settle: Promise<void>;
+}) {
+  const { present, run } = useManagerUndo();
+  const started = useRef(false);
+  useLayoutEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    if (present({
+      eventId,
+      message: 'An earlier Manager change is being undone.',
+      durationMs: UNDO_WINDOW_MS,
+      input: 'pointer',
+      run: () => settle,
+    }, { fallback: null })) run();
+  }, [eventId, present, run, settle]);
+  return null;
+}
+
 /**
- * The album editor on its own, with the two props only the Manager can answer: the
- * event's zone, and where Recently deleted lives. Album stores neither — a deadline
- * read in the browser's zone is a different day for half the world, and the
- * destination belongs to whoever owns the navigation.
+ * The album editor on its own, with the props only the Manager can answer: the event
+ * name, its zone, and where Recently deleted lives. Album stores none of those local
+ * navigation facts — a deadline read in the browser's zone is a different day for
+ * half the world, and the destination belongs to whoever owns the navigation.
  */
 function renderAlbum(fetchMock: ReturnType<typeof vi.fn>, overrides: {
   eventId?: string;
+  eventName?: string;
   eventTimezone?: string;
   onOpenRecentlyDeleted?: (mediaId: string) => void;
+  runningUndo?: Promise<void>;
 } = {}) {
   vi.stubGlobal('fetch', fetchMock);
   const onAnnouncement = vi.fn();
@@ -858,9 +926,14 @@ function renderAlbum(fetchMock: ReturnType<typeof vi.fn>, overrides: {
   const albumRef = createRef<ManagerAlbumHandle>();
   const eventId = overrides.eventId ?? 'event-a';
   render(<ManagerUndoProvider eventId={eventId}>
+    {overrides.runningUndo && <RunningUndoHarness
+      eventId={eventId}
+      settle={overrides.runningUndo}
+    />}
     <ManagerAlbum
       ref={albumRef}
       eventId={eventId}
+      eventName={overrides.eventName ?? event.name}
       active
       eventTimezone={overrides.eventTimezone}
       onGoToLibrary={onGoToLibrary}
@@ -1205,10 +1278,12 @@ describe('gallery modes', () => {
       },
     });
     renderWorkspace(fetchMock);
+    const user = userEvent.setup();
     const consequence = 'Album link live—later saved membership, metadata, sections, and order changes affect what people with the Album link see when they request it.';
 
+    await user.click(screen.getByText('About this Gallery view'));
     expect(await screen.findByText(consequence)).toBeVisible();
-    await userEvent.setup().click(within(screen.getByRole('group', { name: 'Gallery mode' }))
+    await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/u }));
 
     expect(screen.getByText(consequence)).toBeVisible();
@@ -1306,21 +1381,23 @@ describe('gallery modes', () => {
   it('offers Library, Album and Guest gallery, and names each audience boundary', async () => {
     const { fetchMock } = harness();
     renderWorkspace(fetchMock);
+    const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Gallery' });
 
     const modes = screen.getByRole('group', { name: 'Gallery mode' });
     expect(within(modes).getAllByRole('button')).toHaveLength(3);
     expect(within(modes).getByRole('button', { name: 'Guest gallery' })).toBeVisible();
     expect(within(modes).queryByRole('button', { name: 'Shared' })).not.toBeInTheDocument();
+    await user.click(screen.getByText('About this Gallery view'));
     expect(screen.getByText('Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.')).toBeVisible();
 
-    await userEvent.setup().click(within(modes).getByRole('button', { name: /^Album/ }));
+    await user.click(within(modes).getByRole('button', { name: /^Album/ }));
     expect(await screen.findByText('One Album per event. Its order and sections are yours; the delivered photos stay exactly where they are.')).toBeVisible();
   });
 
-  it('stacks the three-mode switch throughout the narrow layout range', () => {
+  it('stacks the three-mode switch at the narrowest layout', () => {
     const styles = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
-    expect(styles).toMatch(/@media \(max-width: 760px\) \{\s*\.gallery-mode-switch--three \{ grid-template-columns: 1fr; \}/u);
+    expect(styles).toMatch(/@media \(max-width: 360px\) \{(?:(?!@media)[\s\S])*?\.gallery-mode-switch--three \{ grid-template-columns: 1fr; \}\s*\}/u);
   });
 
   it('clears Guest-gallery selection only after controlled Library adoption', async () => {
@@ -1393,7 +1470,7 @@ describe('gallery modes', () => {
     expect(document.querySelector('.gallery-shared [role="status"]')).toBeNull();
   });
 
-  it('keeps publication and Album membership independent and announces reversible single results', async () => {
+  it('safety ladder reversible: publishes and hides immediately with precise inverse feedback', async () => {
     const controlled = harness({
       galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { caption: 'First dance' })],
     });
@@ -1402,6 +1479,7 @@ describe('gallery modes', () => {
     const modes = await screen.findByRole('group', { name: 'Gallery mode' });
 
     await user.click(within(modes).getByRole('button', { name: 'Guest gallery' }));
+    await user.click(screen.getByText('About this Gallery view'));
     expect(screen.getByText('Published photos are visible to event guests.')).toBeVisible();
     expect(screen.getByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.')).toBeVisible();
     const unpublishedActions = screen.getByRole('button', { name: 'Publish p1.jpg' }).parentElement!;
@@ -1410,7 +1488,13 @@ describe('gallery modes', () => {
     expect(screen.getByRole('button', { name: 'Publish p1.jpg' })).toHaveClass('button--approve');
     expect(screen.getByRole('button', { name: 'Hide p1.jpg' })).toHaveClass('button--secondary');
 
+    expect(controlled.state.publicationWrites).toEqual([]);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Publish p1.jpg' }));
+    await waitFor(() => expect(controlled.state.publicationWrites).toEqual([
+      { ids: ['p1'], action: 'publish' },
+    ]));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await waitFor(() => expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
       .toHaveTextContent('First dance is Published in the Guest gallery for event guests. Hide it to reverse this.'));
     expect(controlled.state.galleryRows[0]).toMatchObject({ publicationStatus: 'published', isFavorite: false });
@@ -1430,6 +1514,11 @@ describe('gallery modes', () => {
     const hide = await screen.findByRole('button', { name: 'Hide p1.jpg' });
     expect(hide).toHaveClass('button--primary');
     await user.click(hide);
+    await waitFor(() => expect(controlled.state.publicationWrites).toEqual([
+      { ids: ['p1'], action: 'publish' },
+      { ids: ['p1'], action: 'hide' },
+    ]));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await waitFor(() => expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
       .toHaveTextContent('First dance is Hidden from event guests in the Guest gallery. Publish it to reverse this.'));
     expect(controlled.state.galleryRows[0]).toMatchObject({ publicationStatus: 'hidden', isFavorite: true });
@@ -2035,7 +2124,7 @@ describe('audience summary invalidation boundaries', () => {
 });
 
 describe('selecting photos into the album', () => {
-  it('uses literal Pick and Remove from Album actions with canonical bulk results', async () => {
+  it('safety ladder reversible: uses literal Pick and Remove from Album actions with canonical bulk results', async () => {
     const { state, fetchMock } = harness();
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
@@ -2057,8 +2146,11 @@ describe('selecting photos into the album', () => {
     const galleryStatus = document.querySelector<HTMLElement>('[data-gallery-live-host] [role="status"]');
     expect(galleryStatus).toHaveTextContent('First dance selected. 1 selected.');
 
+    expect(state.pickWrites).toEqual([]);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await user.click(within(tray).getByRole('button', { name: 'Pick for Album (1)' }));
     await waitFor(() => expect(state.pickWrites).toEqual([{ mediaIds: ['p1'], picked: true }]));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Album' })).not.toBeInTheDocument());
     expect(galleryStatus).toHaveTextContent(
       '1 photo picked for Album.',
@@ -2212,10 +2304,62 @@ describe('selecting photos into the album', () => {
 });
 
 describe('the album', () => {
+  it('uses the event name as the first-run Album title and keeps a cleared title invalid and unsaved', async () => {
+    const controlled = harness({
+      album: {
+        revision: 0,
+        saved: false,
+        entries: [],
+        title: event.name,
+      },
+    });
+    renderWorkspace(controlled.fetchMock);
+    await openAlbum();
+    const title = await screen.findByLabelText('Album title');
+
+    expect(title).toHaveValue(event.name);
+    expect(title).toHaveAttribute('placeholder', event.name);
+
+    vi.useFakeTimers();
+    fireEvent.change(title, { target: { value: '' } });
+    fireEvent.blur(title);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(title).toHaveValue('');
+    expect(title).toHaveAttribute('placeholder', event.name);
+    expect(title).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByText('Give this album a title.')).toBeVisible();
+    expect(controlled.state.metadataWrites).toEqual([]);
+  });
+
+  it('keeps an existing customized Album title while retaining the event-name placeholder', async () => {
+    const controlled = harness({
+      album: {
+        revision: 4,
+        saved: true,
+        entries: [],
+        title: 'The evening',
+      },
+    });
+    renderWorkspace(controlled.fetchMock);
+    await openAlbum();
+
+    const title = await screen.findByLabelText('Album title');
+    expect(title).toHaveValue('The evening');
+    expect(title).toHaveAttribute('placeholder', event.name);
+    expect(controlled.state.metadataWrites).toEqual([]);
+  });
+
   it('uses only Album-pick terminology in the exact one-time reconciliation state', async () => {
     const { fetchMock } = harness({
       galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
-      album: { revision: 0, saved: false, entries: [] },
+      album: {
+        revision: 4,
+        saved: false,
+        entries: [],
+        pickGeneration: 12,
+        reconciliation: { kind: 'historical', historicalPickCount: 1 },
+      },
     });
     renderWorkspace(fetchMock);
     await openAlbum();
@@ -2223,16 +2367,326 @@ describe('the album', () => {
     expect(await screen.findByText('Not started yet')).toBeVisible();
     expect(screen.getByText('Earlier Album picks')).toBeVisible();
     expect(screen.getByRole('heading', {
-      name: '1 photo was picked before this Album existed.',
+      name: '1 existing pick from before this update.',
     })).toBeVisible();
-    expect(screen.getByText(/These Album picks carry forward/)).toBeVisible();
+    expect(screen.getByText(/This choice applies to every Album pick that exists now/)).toBeVisible();
     expect(screen.getByText('Starting empty clears those Album picks. It never deletes a delivered photo.')).toBeVisible();
-    expect(document.querySelector('.album-reconcile')).not.toHaveTextContent(/favorites?|favorited|hearts?/iu);
+    expect(document.querySelector('.album-reconcile'))
+      .not.toHaveTextContent(/before Albums|favorites?|favorited|hearts?/iu);
     expect(screen.getByRole('button', { name: 'Start the Album from it' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Start empty' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: 'Preview album' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Create Album link' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Download album photos' })).not.toBeInTheDocument();
+  });
+
+  it('reconciliation auto-starts one StrictMode observation once and adopts the advanced revision', async () => {
+    const start = deferred();
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const controlled = harness({
+      galleryRows: [p1],
+      album: {
+        revision: 7,
+        saved: false,
+        entries: [],
+        pickGeneration: 41,
+        reconciliation: { kind: 'initialize' },
+      },
+      startGates: [start.promise],
+    });
+    renderWorkspace(controlled.fetchMock, {}, { strictMode: true });
+    await openAlbum();
+
+    expect(await screen.findByRole('status', { name: 'Starting the Album from current picks…' }))
+      .toBeVisible();
+    await waitFor(() => expect(controlled.state.startRequests).toEqual([{
+      start: 'from-picks',
+      expectedReconciliation: 'initialize',
+      expectedPickGeneration: 41,
+      expectedRevision: 7,
+    }]));
+    expect(screen.queryByText('Earlier Album picks')).not.toBeInTheDocument();
+
+    start.resolve();
+    const description = await screen.findByLabelText('Description');
+    vi.useFakeTimers();
+    fireEvent.change(description, { target: { value: 'Saved after automatic start.' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(controlled.state.startWrites).toEqual(['from-picks']);
+    expect(controlled.state.orderRevisions).toEqual([8]);
+  });
+
+  it('reconciliation waits for running Manager Undo before its single auto-start', async () => {
+    const undo = deferred();
+    const controlled = harness({
+      galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
+      album: {
+        revision: 13,
+        saved: false,
+        entries: [],
+        pickGeneration: 29,
+        reconciliation: { kind: 'initialize' },
+      },
+    });
+    renderAlbum(controlled.fetchMock, { runningUndo: undo.promise });
+
+    expect(await screen.findByRole('button', { name: 'Undoing…' })).toBeDisabled();
+    expect(await screen.findByRole('status', { name: 'Starting the Album from current picks…' }))
+      .toBeVisible();
+    expect(controlled.state.startRequests).toEqual([]);
+
+    undo.resolve();
+
+    await waitFor(() => expect(controlled.state.startRequests).toEqual([{
+      start: 'from-picks',
+      expectedReconciliation: 'initialize',
+      expectedPickGeneration: 29,
+      expectedRevision: 13,
+    }]));
+  });
+
+  it.each([
+    ['from-picks', 'Start the Album from it'],
+    ['empty', 'Start empty'],
+  ] as const)('reconciliation manual %s sends the complete observed expectation triple', async (
+    start,
+    buttonName,
+  ) => {
+    const controlled = harness({
+      galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
+      album: {
+        revision: 5,
+        saved: false,
+        entries: [],
+        pickGeneration: 23,
+        reconciliation: { kind: 'historical', historicalPickCount: 1 },
+      },
+    });
+    renderWorkspace(controlled.fetchMock);
+    const user = await openAlbum();
+
+    await user.click(await screen.findByRole('button', { name: buttonName }));
+
+    expect(controlled.state.startRequests).toEqual([{
+      start,
+      expectedReconciliation: 'historical',
+      expectedPickGeneration: 23,
+      expectedRevision: 5,
+    }]);
+  });
+
+  it('reconciliation obeys an over-capacity projection with zero historical picks', async () => {
+    const controlled = harness({
+      galleryRows: [],
+      album: {
+        revision: 9,
+        saved: false,
+        entries: [],
+        pickGeneration: 37,
+        reconciliation: {
+          kind: 'over-capacity',
+          pickCount: 501,
+          historicalPickCount: 0,
+        },
+      },
+    });
+    renderWorkspace(controlled.fetchMock);
+    const user = await openAlbum();
+
+    const fromPicks = await screen.findByRole('button', { name: 'Start the Album from them' });
+    const reason = 'Start from picks is unavailable because 501 picks exceed the 500-entry Album limit.';
+    expect(fromPicks).toBeEnabled();
+    expect(fromPicks).toHaveAttribute('aria-disabled', 'true');
+    expect(fromPicks).toHaveAccessibleDescription(reason);
+    expect(screen.getByText(reason)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Start empty' })).toBeEnabled();
+
+    await user.click(fromPicks);
+    expect(controlled.state.startRequests).toEqual([]);
+    await user.click(screen.getByRole('button', { name: 'Start empty' }));
+    expect(controlled.state.startRequests).toEqual([{
+      start: 'empty',
+      expectedReconciliation: 'over-capacity',
+      expectedPickGeneration: 37,
+      expectedRevision: 9,
+    }]);
+  });
+
+  it('reconciliation null with zero picks renders the ordinary empty Album', async () => {
+    const controlled = harness({
+      galleryRows: [],
+      album: {
+        revision: 3,
+        saved: false,
+        entries: [],
+        pickGeneration: 18,
+        reconciliation: null,
+      },
+    });
+    renderWorkspace(controlled.fetchMock);
+    await openAlbum();
+
+    expect(await screen.findByRole('heading', { name: 'The Album is empty.' })).toBeVisible();
+    expect(screen.queryByText('Earlier Album picks')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status', { name: 'Starting the Album from current picks…' }))
+      .not.toBeInTheDocument();
+    expect(controlled.state.startRequests).toEqual([]);
+  });
+
+  it('reconciliation conflict reloads canonical state once without silently retrying auto-start', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const controlled = harness({
+      galleryRows: [p1],
+      album: {
+        revision: 7,
+        saved: false,
+        entries: [],
+        pickGeneration: 41,
+        reconciliation: { kind: 'initialize' },
+      },
+      startFailures: [{
+        message: 'The Album changed before it could be started.',
+        code: 'REVISION_CONFLICT',
+        album: {
+          revision: 8,
+          saved: true,
+          entries: [{ kind: 'photo', photo: p1 }],
+          pickGeneration: 42,
+          reconciliation: null,
+        },
+      }],
+    });
+    renderWorkspace(controlled.fetchMock);
+    await openAlbum();
+
+    expect(await screen.findByText('The Album changed before it could be started.')).toBeVisible();
+    expect(await screen.findByLabelText('Album title')).toBeVisible();
+    expect(controlled.state.albumReads).toBe(2);
+    expect(controlled.state.startRequests).toHaveLength(1);
+    expect(controlled.state.startWrites).toEqual(['from-picks']);
+  });
+
+  it('reconciliation exposes explicit retry after conflict reload remains initialize', async () => {
+    const controlled = harness({
+      galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
+      album: {
+        revision: 7,
+        saved: false,
+        entries: [],
+        pickGeneration: 41,
+        reconciliation: { kind: 'initialize' },
+      },
+      startFailures: [{
+        message: 'The Album changed before it could be started.',
+        code: 'REVISION_CONFLICT',
+        album: {
+          revision: 8,
+          saved: false,
+          entries: [],
+          pickGeneration: 42,
+          reconciliation: { kind: 'initialize' },
+        },
+      }],
+    });
+    renderAlbum(controlled.fetchMock);
+
+    expect(await screen.findByText('The Album changed before it could be started.')).toBeVisible();
+    await waitFor(() => expect(controlled.state.albumReads).toBe(2));
+    await act(async () => { await Promise.resolve(); });
+    expect(controlled.state.startRequests).toEqual([{
+      start: 'from-picks',
+      expectedReconciliation: 'initialize',
+      expectedPickGeneration: 41,
+      expectedRevision: 7,
+    }]);
+
+    await userEvent.setup().click(screen.getByRole('button', {
+      name: 'Try starting from current picks',
+    }));
+
+    expect(controlled.state.startRequests).toEqual([
+      {
+        start: 'from-picks',
+        expectedReconciliation: 'initialize',
+        expectedPickGeneration: 41,
+        expectedRevision: 7,
+      },
+      {
+        start: 'from-picks',
+        expectedReconciliation: 'initialize',
+        expectedPickGeneration: 42,
+        expectedRevision: 8,
+      },
+    ]);
+  });
+
+  it('reconciliation drops a late auto-start response from a retired event generation', async () => {
+    const start = deferred();
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const first = harness({
+      galleryRows: [p1],
+      album: {
+        revision: 2,
+        saved: false,
+        entries: [],
+        pickGeneration: 4,
+        reconciliation: { kind: 'initialize' },
+      },
+      startGates: [start.promise],
+    });
+    const second = harness({
+      galleryRows: [],
+      album: {
+        revision: 11,
+        saved: true,
+        entries: [],
+        title: 'Second event Album',
+        pickGeneration: 0,
+        reconciliation: null,
+      },
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => (
+      String(input).includes('/events/event-a/')
+        ? first.fetchMock(input, init)
+        : second.fetchMock(input, init)
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const onPicksChanged = vi.fn();
+    const onAudienceChanged = vi.fn();
+
+    function EventAlbum({ eventId }: { eventId: string }) {
+      return <ManagerUndoProvider key={eventId} eventId={eventId}>
+        <ManagerAlbum
+          key={eventId}
+          eventId={eventId}
+          eventName={eventId === 'event-a' ? event.name : 'Second event'}
+          active
+          onGoToLibrary={vi.fn()}
+          onPicksChanged={onPicksChanged}
+          invalidateGalleryAfterMutation={vi.fn()}
+          onAudienceChanged={onAudienceChanged}
+          exportSource={{ count: 0, freshness: 'fresh' }}
+          onPrepareExport={noop}
+          onDownloadExport={noop}
+          onRetryExport={noop}
+        />
+      </ManagerUndoProvider>;
+    }
+
+    const rendered = render(<EventAlbum eventId="event-a" />);
+    await waitFor(() => expect(first.state.startRequests).toHaveLength(1));
+    rendered.rerender(<EventAlbum eventId="event-b" />);
+    expect(await screen.findByDisplayValue('Second event Album')).toBeVisible();
+    onPicksChanged.mockClear();
+    onAudienceChanged.mockClear();
+
+    start.resolve();
+    await waitFor(() => expect(first.state.album.saved).toBe(true));
+
+    expect(onPicksChanged).not.toHaveBeenCalled();
+    expect(onAudienceChanged).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue('Second event Album')).toBeVisible();
   });
 
   it('debounces one complete metadata draft for 600ms and composes overlapping edits against the returned revision', async () => {
@@ -3128,6 +3582,42 @@ describe('the album', () => {
     expect(screen.getByText('Cover · p2.jpg')).toBeVisible();
   });
 
+  it('orders live and retained slots together during reconciliation-era Reset with truthful copy', async () => {
+    const first = photo('first', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const last = photo('last', '2026-08-15T23:18:00.000Z', { isFavorite: true });
+    const slot = retainedSlot(
+      'retained',
+      '2026-09-15T00:00:00.000Z',
+      'recoverable',
+      '2026-08-15T22:55:00.000Z',
+    );
+    const { fetchMock } = harness({
+      galleryRows: [last, first],
+      trashed: { retained: slot },
+      album: {
+        revision: 5,
+        saved: true,
+        entries: [
+          { kind: 'photo', photo: last },
+          { kind: 'section', id: 's1', heading: 'Reception' },
+          { kind: 'photo-retained', slot },
+          { kind: 'photo', photo: first },
+        ],
+      },
+    });
+    renderWorkspace(fetchMock);
+    const user = await openAlbum();
+
+    await user.click(await screen.findByRole('button', { name: 'Reset to timeline order' }));
+
+    expect(Array.from(document.querySelectorAll('.album-review-grid > li')).map((item) => (
+      item.getAttribute('data-entry-key')
+    ))).toEqual(['photo:first', 'photo:retained', 'photo:last']);
+    expect(screen.getAllByText('Album order reset to the timeline. Sections were removed.')
+      .some((node) => node.classList.contains('album-undo__message'))).toBe(true);
+    expect(document.querySelector('.album-undo__message')).not.toHaveTextContent(/moved to the end/iu);
+  });
+
   it('keeps a removed cover photo undoable with its original position and explicit cover', async () => {
     const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
     const p2 = photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true });
@@ -3810,7 +4300,7 @@ describe('the album', () => {
     expect(screen.queryByRole('link', { name: /guestbook/i })).not.toBeInTheDocument();
   });
 
-  it('asks once before adopting favorites that predate albums', async () => {
+  it('asks once before adopting historical picks', async () => {
     const { state, fetchMock } = harness({
       galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true })],
       album: { revision: 0, saved: false, entries: [] },
@@ -3821,10 +4311,10 @@ describe('the album', () => {
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
-    expect(await screen.findByRole('heading', { name: '1 photo was picked before this Album existed.' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: '1 existing pick from before this update.' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Start the Album from it' }));
     await waitFor(() => expect(state.startWrites).toEqual(['from-picks']));
-    await waitFor(() => expect(screen.queryByRole('heading', { name: '1 photo was picked before this Album existed.' })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('heading', { name: '1 existing pick from before this update.' })).not.toBeInTheDocument());
   });
 
   it('adopts a co-host reconciliation loser without false success or an invalid Undo', async () => {
@@ -4679,7 +5169,7 @@ describe('album review regressions', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument());
   });
 
-  it('offers Reset Undo only after the exact reset save, then keeps it running through restoration', async () => {
+  it('Album Reset contract: offers Undo only after the exact reset save, then keeps it running through restoration', async () => {
     const reset = deferred();
     const restoration = deferred();
     const p1 = photo('p1', '2026-08-15T23:00:00.000Z', { isFavorite: true });
@@ -4870,7 +5360,7 @@ describe('album review regressions', () => {
     }
   });
 
-  it('offers membership-only Undo after unpick succeeds and the order save fails', async () => {
+  it('safety ladder reversible: offers real membership Undo after unpick succeeds and the order save fails', async () => {
     const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
     const p2 = photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true });
     const controlled = harness({
@@ -4885,7 +5375,16 @@ describe('album review regressions', () => {
     const rendered = renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
 
+    expect(controlled.state.pickWrites).toEqual([]);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await waitFor(() => expect(controlled.state.pickWrites).toEqual([
+      { mediaIds: ['p1'], picked: false },
+    ]));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Undo' })).toBeVisible();
+    expect(document.querySelector('.album-undo__bar'))
+      .toHaveTextContent('1 photo removed from Album. The delivered photo remains.');
     await user.click(await screen.findByRole('button', { name: 'Undo' }));
 
     await waitFor(() => expect(controlled.state.pickWrites).toEqual([
@@ -5337,7 +5836,7 @@ describe('album review regressions', () => {
     expect(rendered.invalidateGalleryAfterMutation).toHaveBeenCalled();
   });
 
-  it('explains Reset breadth and derives its Undo duration from the shared window', async () => {
+  it('Album Reset contract: explains breadth before action and derives its Undo duration from the shared window', async () => {
     const controlled = harness({
       album: {
         revision: 2,
@@ -5746,7 +6245,7 @@ describe('recently deleted photos in the album', () => {
     renderAlbum(fetchMock, { eventTimezone: 'America/Chicago' });
     const user = userEvent.setup();
 
-    expect(await screen.findByText('1 photo was picked before this Album existed.')).toBeVisible();
+    expect(await screen.findByText('1 existing pick from before this update.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Start the Album from it' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Start empty' })).toBeEnabled();
     expect(screen.queryByText('Recently deleted photo')).not.toBeInTheDocument();
@@ -5754,7 +6253,7 @@ describe('recently deleted photos in the album', () => {
 
     expect(state.startWrites).toEqual(['from-picks']);
     expect(state.album.saved).toBe(true);
-    expect(screen.queryByText('1 photo was picked before this Album existed.')).not.toBeInTheDocument();
+    expect(screen.queryByText('1 existing pick from before this update.')).not.toBeInTheDocument();
     expect(await retainedMarker()).toBeInTheDocument();
     expect(screen.getByText('0 photos In Album, and 1 recently deleted photo still holding a place'))
       .toBeVisible();
@@ -5880,7 +6379,7 @@ describe('stopping the album link', () => {
     );
   });
 
-  it('asks before it sends anything, and says exactly what stopping costs', async () => {
+  it('safety ladder consequential: asks before it sends anything, and says exactly what stopping costs', async () => {
     const { state, fetchMock } = sharedAlbum();
     renderWorkspace(fetchMock);
     const user = await openAlbum();

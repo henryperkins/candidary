@@ -9,6 +9,7 @@ import type { EventView } from '../../shared/contracts';
 import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { createAppRouter } from '../../src/app/router';
+import { ManagerPhotoIntakePanel } from '../../src/components/ManagerPhotoIntakePanel';
 import type { LifecycleRecheckOutcome } from '../../src/features/guest/useLifecycleRecheck';
 import { useLifecycleRecheck } from '../../src/features/guest/useLifecycleRecheck';
 
@@ -30,7 +31,9 @@ const SCHEDULED: EventView = {
   },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
   reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
+  hostUploadAvailability: { enabled: true, reason: null },
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
+  managerLinkRevision: 0,
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',
   eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
@@ -90,7 +93,92 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('manager photo delivery', () => {
+describe('manager guest uploads', () => {
+  it('renders Guest uploads terminology in the Manager state chip for all four states', async () => {
+    const cases: Array<{ event: EventView; label: string }> = [
+      { event: SCHEDULED, label: 'Guest uploads scheduled' },
+      {
+        event: {
+          ...SCHEDULED,
+          photosOpen: true,
+          photoIntakeState: 'open-early',
+        },
+        label: 'Guest uploads open early',
+      },
+      { event: OPEN, label: 'Guest uploads open' },
+      {
+        event: {
+          ...OPEN,
+          uploadsEnabled: false,
+          photosOpen: false,
+          photoIntakeState: 'paused',
+        },
+        label: 'Guest uploads paused',
+      },
+    ];
+
+    for (const { event, label } of cases) {
+      vi.stubGlobal('fetch', managerFetch([event]));
+      const view = render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+      const heading = await screen.findByRole('heading', { level: 1, name: event.name });
+      const header = heading.closest('header');
+
+      expect(header).not.toBeNull();
+      expect(within(header!).getByText(label, { exact: true })).toBeVisible();
+      expect(header).not.toHaveTextContent(/photo delivery/iu);
+
+      view.unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('uses guest-upload copy in every state with exact Pause guest uploads and Resume guest uploads names', () => {
+    const cases = [
+      {
+        state: 'scheduled' as const,
+        status: 'Guest uploads open when the event starts.',
+        label: 'Open guest uploads now',
+      },
+      {
+        state: 'open-early' as const,
+        status: 'Guest uploads are open early.',
+        label: 'Return guest uploads to schedule',
+      },
+      {
+        state: 'open' as const,
+        status: 'Guest uploads are open.',
+        label: 'Pause guest uploads',
+      },
+      {
+        state: 'paused' as const,
+        status: 'New guest uploads are paused. Event access, Guestbook, the Guest gallery setting, and Manager uploads are unchanged.',
+        label: 'Resume guest uploads',
+      },
+    ];
+
+    for (const { state, status, label } of cases) {
+      const view = render(<ManagerPhotoIntakePanel
+        event={{
+          ...SCHEDULED,
+          uploadsEnabled: state !== 'paused',
+          photosOpen: state === 'open' || state === 'open-early',
+          photoIntakeState: state,
+          photoIntakeRecheckAfterMs: null,
+        }}
+        entryDisabled={false}
+        pending={false}
+        onAction={vi.fn()}
+      />);
+      const panel = screen.getByRole('region', { name: 'Guest uploads' });
+
+      expect(within(panel).getByRole('status')).toHaveTextContent(status);
+      expect(within(panel).getByRole('button', { name: label, exact: true })).toBeVisible();
+      expect(panel).not.toHaveTextContent(/photo delivery|reopen/iu);
+
+      view.unmount();
+    }
+  });
+
   it('rechecks a boundary-free page on every browser wake source without polling', async () => {
     vi.useFakeTimers();
     const onRecheck = vi.fn(async (): Promise<LifecycleRecheckOutcome> => 'unchanged');
@@ -134,7 +222,7 @@ describe('manager photo delivery', () => {
   /* The manager page is left open across the event's own start. Nothing here compares a
      clock: the server sent the delay with the view it resolved, and the refetch it arms is
      the only thing that moves the status and the action the host is offered. */
-  it('uses Photo delivery and Delivered photos as a scheduled event opens', async () => {
+  it('uses Guest uploads and Delivered photos as a scheduled event opens', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const fetchMock = managerFetch([SCHEDULED, OPEN]);
     vi.stubGlobal('fetch', fetchMock);
@@ -146,9 +234,9 @@ describe('manager photo delivery', () => {
     expect(intakeSection).not.toHaveTextContent('Private collection');
     await openSettings(user);
 
-    expect(screen.getByText('Photo delivery scheduled')).toBeVisible();
-    expect(screen.getByText('Photo delivery opens when the event starts.')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Open photo delivery now' })).toBeVisible();
+    expect(screen.getByText('Guest uploads scheduled')).toBeVisible();
+    expect(screen.getByText('Guest uploads open when the event starts.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Open guest uploads now' })).toBeVisible();
     expect(document.querySelector('.lifecycle')).toHaveTextContent('3 delivered photos');
     const capacity = screen.getByText('Event capacity').closest('section');
     expect(capacity).toHaveTextContent('Delivered photos');
@@ -159,10 +247,10 @@ describe('manager photo delivery', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     // The host touched nothing between these two states.
-    expect(screen.getByText('Photo delivery open')).toBeVisible();
-    expect(screen.getByText('Photo delivery is open.')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Pause photo delivery' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Open photo delivery now' })).not.toBeInTheDocument();
+    expect(screen.getByText('Guest uploads open')).toBeVisible();
+    expect(screen.getByText('Guest uploads are open.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Pause guest uploads' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Open guest uploads now' })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls
       .filter(([input]) => String(input).endsWith('/api/manage/events/event-a')))
       .toHaveLength(readsBeforeStart + 1);
@@ -187,7 +275,7 @@ describe('manager photo delivery', () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
 
-    expect(screen.getByRole('button', { name: 'Reopen photo delivery' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Resume guest uploads' })).toBeVisible();
     expect(eventReads()).toBe(2);
     await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
     expect(eventReads()).toBe(2);
@@ -214,13 +302,13 @@ describe('manager photo delivery', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    const action = screen.getByRole('button', { name: 'Open photo delivery now' });
+    const action = screen.getByRole('button', { name: 'Open guest uploads now' });
     fireEvent.click(action);
     fireEvent.click(action);
 
     expect(photoIntakeRequests).toBe(1);
     expect(action).toBeDisabled();
-    expect(screen.getByText('Saving photo delivery…')).toHaveAttribute('role', 'status');
+    expect(screen.getByText('Saving guest uploads…')).toHaveAttribute('role', 'status');
 
     finishPhotoIntake(await json({
       event: {
@@ -229,7 +317,7 @@ describe('manager photo delivery', () => {
         photoIntakeState: 'open-early',
       },
     }));
-    expect(await screen.findByRole('button', { name: 'Pause until the event starts' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Return guest uploads to schedule' })).toBeVisible();
   });
 
   it('keeps the anti-spin floor when wake responses only shorten the relative delay', async () => {
@@ -257,7 +345,7 @@ describe('manager photo delivery', () => {
     expect(fetchMock.mock.calls
       .filter(([input]) => String(input).endsWith('/api/manage/events/event-a')))
       .toHaveLength(2);
-    expect(screen.getByText('Photo delivery opens when the event starts.')).toBeVisible();
+    expect(screen.getByText('Guest uploads open when the event starts.')).toBeVisible();
   });
 
   it('installs a moved absolute start and its new timer while intake state is unchanged', async () => {
@@ -287,7 +375,7 @@ describe('manager photo delivery', () => {
     expect(await screen.findByText(/Event start: September 19, 2026 at 6:00 PM/u)).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
 
-    expect(screen.getByText('Photo delivery is open.')).toBeVisible();
+    expect(screen.getByText('Guest uploads are open.')).toBeVisible();
     expect(fetchMock.mock.calls
       .filter(([input]) => String(input).endsWith('/api/manage/events/event-a')))
       .toHaveLength(3);
@@ -372,7 +460,7 @@ describe('manager photo delivery', () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
-    expect(screen.getByText('Photo delivery is open.')).toBeVisible();
+    expect(screen.getByText('Guest uploads are open.')).toBeVisible();
     expect(eventReads).toBe(3);
   });
 
@@ -398,7 +486,7 @@ describe('manager photo delivery', () => {
       await Promise.resolve();
     });
     expect(eventReads()).toBe(2);
-    expect(screen.getByText('Photo delivery opens when the event starts.')).toBeVisible();
+    expect(screen.getByText('Guest uploads open when the event starts.')).toBeVisible();
 
     // The unchanged wake establishes the 30-second floor, but that floor is
     // for repeat wakes/retries. It must not suppress the timer that was already
@@ -406,8 +494,8 @@ describe('manager photo delivery', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
 
     expect(eventReads()).toBe(3);
-    expect(screen.getByText('Photo delivery is open.')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Pause photo delivery' })).toBeVisible();
+    expect(screen.getByText('Guest uploads are open.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Pause guest uploads' })).toBeVisible();
   });
 
   it('retires a pending boundary when the in-flight wake already installs the changed state', async () => {
@@ -449,7 +537,7 @@ describe('manager photo delivery', () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByText('Photo delivery is open.')).toBeVisible();
+    expect(screen.getByText('Guest uploads are open.')).toBeVisible();
     expect(eventReads).toBe(2);
   });
 });

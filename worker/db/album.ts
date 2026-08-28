@@ -2,6 +2,7 @@ import type {
   AlbumEntryInput,
   AlbumEntryView,
   AlbumMetadataInput,
+  AlbumReconciliation,
   AlbumRetainedSlotView,
   AlbumView,
   ManagerGalleryMediaView,
@@ -12,16 +13,45 @@ import { managerGalleryMediaView } from './media';
 import type { MediaRow } from './media';
 
 interface AlbumRow {
-  event_id: string;
   entries: string;
   saved_at: string | null;
   revision: number;
   title: string;
   description: string;
   cover_media_id: string | null;
-  created_at: string;
-  updated_at: string;
+  album_pick_generation: number;
 }
+
+interface AlbumProjectionStateRow extends AlbumRow {
+  pick_count: number;
+  historical_pick_count: number;
+}
+
+interface AlbumProjectionMediaRow {
+  media_id: string;
+  media_original_filename: string;
+  media_guest_name: string;
+  media_caption: string | null;
+  media_publication_status: MediaRow['publication_status'];
+  media_upload_state: MediaRow['upload_state'];
+  media_preview_object_key: string | null;
+  media_width: number | null;
+  media_height: number | null;
+  media_created_at: string;
+  media_stored_at: string | null;
+  media_captured_at: string | null;
+  media_timeline_at: string;
+  media_favorited_at: string;
+  media_declared_byte_size: number;
+  media_byte_size: number | null;
+  media_trashed_at: string | null;
+  media_restore_until: string | null;
+}
+
+type AlbumProjectionRow = AlbumProjectionStateRow & (
+  | { media_id: null }
+  | AlbumProjectionMediaRow
+);
 
 /**
  * The stored order. Parsed defensively rather than trusted: the column is a JSON
@@ -75,6 +105,12 @@ export interface StoredAlbum extends AlbumMetadataInput {
   revision: number;
 }
 
+interface AlbumStartExpectations {
+  expectedReconciliation: 'initialize' | 'historical' | 'over-capacity';
+  expectedPickGeneration: number;
+  expectedRevision: number;
+}
+
 function parseMetadata(row: AlbumRow): AlbumMetadataInput {
   const title = typeof row.title === 'string' && row.title.trim().length > 0
     ? row.title.trim()
@@ -126,6 +162,10 @@ export function resolveAlbum(
   stored: StoredAlbum,
   picked: readonly AlbumPick[],
   totalBytes = 0,
+  projection: {
+    pickGeneration: number;
+    reconciliation: AlbumReconciliation;
+  } = { pickGeneration: 0, reconciliation: null },
 ): AlbumView {
   const byId = new Map(picked.map((pick) => [pickId(pick), pick]));
   const placed = new Set<string>();
@@ -151,6 +191,8 @@ export function resolveAlbum(
   return {
     revision: stored.revision,
     saved: stored.savedAt !== null,
+    pickGeneration: projection.pickGeneration,
+    reconciliation: projection.reconciliation,
     title: stored.title,
     description: stored.description,
     coverMediaId,
@@ -178,104 +220,175 @@ export const ALBUM_SLOT_OWNER_SQL = `(
 )`;
 
 /**
- * The picked set, in album-tail order. Deliberately not the gallery's `order` toggle:
- * that is a reading preference for the Library, and letting it reach the album would
- * silently reverse a host's arrangement every time they flipped it.
+ * One coherent Album observation: stored state, event generation, complete
+ * picked-cohort facts, and the bounded rows used to render the editor. A single
+ * SQLite statement is the snapshot boundary; splitting these reads can combine
+ * a new generation with an old cohort under a concurrent pick transition.
  *
- * Retained picks come back in the same stream, ordered by the same instant, so a
- * trashed photo in the middle of an unmaterialized tail keeps its neighbors.
+ * The complete materialized cohort includes active and retained-trash picks.
+ * Only its rendered tail is limited; counts remain exact above the Album cap.
  */
 export function albumPickQuery(): string {
   return `
+    WITH
+      picked AS MATERIALIZED (
+        SELECT
+          id, original_filename, guest_name, caption, publication_status,
+          upload_state, preview_object_key, width, height, created_at, stored_at,
+          captured_at, timeline_at, favorited_at, declared_byte_size, byte_size,
+          trashed_at, restore_until, album_pick_version
+        FROM media
+        WHERE event_id = ?1
+          AND upload_state = 'stored'
+          AND favorited_at IS NOT NULL
+          AND ${ALBUM_SLOT_OWNER_SQL}
+      ),
+      pick_facts AS MATERIALIZED (
+        SELECT
+          COUNT(*) AS pick_count,
+          COALESCE(SUM(CASE WHEN album_pick_version IS NULL THEN 1 ELSE 0 END), 0)
+            AS historical_pick_count
+        FROM picked
+      ),
+      rendered_picks AS MATERIALIZED (
+        SELECT *
+        FROM picked
+        ORDER BY timeline_at ASC, id ASC
+        LIMIT ?2
+      )
     SELECT
-      id, original_filename, guest_name, caption, publication_status,
-      upload_state, preview_object_key, width, height, created_at, stored_at,
-      captured_at, timeline_at, favorited_at, declared_byte_size, byte_size,
-      trashed_at, restore_until
-    FROM media
-    WHERE event_id = ?
-      AND upload_state = 'stored'
-      AND favorited_at IS NOT NULL
-      AND ${ALBUM_SLOT_OWNER_SQL}
-    ORDER BY timeline_at ASC, id ASC
-    LIMIT ?
+      COALESCE(album.entries, '[]') AS entries,
+      album.saved_at,
+      COALESCE(album.revision, 0) AS revision,
+      CASE
+        WHEN album.event_id IS NULL
+          OR (album.saved_at IS NULL AND album.title = 'Album')
+          THEN events.name
+        ELSE album.title
+      END AS title,
+      COALESCE(album.description, '') AS description,
+      album.cover_media_id,
+      events.album_pick_generation,
+      pick_facts.pick_count,
+      pick_facts.historical_pick_count,
+      rendered_picks.id AS media_id,
+      rendered_picks.original_filename AS media_original_filename,
+      rendered_picks.guest_name AS media_guest_name,
+      rendered_picks.caption AS media_caption,
+      rendered_picks.publication_status AS media_publication_status,
+      rendered_picks.upload_state AS media_upload_state,
+      rendered_picks.preview_object_key AS media_preview_object_key,
+      rendered_picks.width AS media_width,
+      rendered_picks.height AS media_height,
+      rendered_picks.created_at AS media_created_at,
+      rendered_picks.stored_at AS media_stored_at,
+      rendered_picks.captured_at AS media_captured_at,
+      rendered_picks.timeline_at AS media_timeline_at,
+      rendered_picks.favorited_at AS media_favorited_at,
+      rendered_picks.declared_byte_size AS media_declared_byte_size,
+      rendered_picks.byte_size AS media_byte_size,
+      rendered_picks.trashed_at AS media_trashed_at,
+      rendered_picks.restore_until AS media_restore_until
+    FROM events
+    LEFT JOIN event_albums AS album ON album.event_id = events.id
+    CROSS JOIN pick_facts
+    LEFT JOIN rendered_picks ON 1 = 1
+    WHERE events.id = ?1
+    ORDER BY rendered_picks.timeline_at ASC, rendered_picks.id ASC
   `;
 }
 
 export class AlbumRepository {
   constructor(private readonly db: D1Database) {}
 
-  private async storedAlbum(eventId: string): Promise<StoredAlbum> {
-    const row = await this.db
-      .prepare('SELECT * FROM event_albums WHERE event_id = ?')
-      .bind(eventId)
-      .first<AlbumRow>();
-    if (!row) return { ...EMPTY_ALBUM };
-    return {
-      entries: parseEntries(row.entries),
-      savedAt: row.saved_at,
-      revision: row.revision,
-      ...parseMetadata(row),
-    };
-  }
-
-  private async picks(eventId: string, now: string): Promise<{
-    picks: AlbumPick[];
-    totalBytes: number;
-  }> {
-    // One over the cap: reading it is how an album that filled up before the cap
-    // existed still renders, rather than silently truncating to exactly the limit.
+  async get(eventId: string, now = new Date().toISOString()): Promise<AlbumView> {
     const result = await this.db
       .prepare(albumPickQuery())
       .bind(eventId, ALBUM_MAX_ENTRIES + 1)
-      .all<MediaRow>();
-    const picks = result.results.map<AlbumPick>((row) => {
-      if (row.trashed_at !== null && row.restore_until !== null) {
-        return {
+      .all<AlbumProjectionRow>();
+    const state = result.results[0];
+    if (!state) {
+      return resolveAlbum(
+        { ...EMPTY_ALBUM },
+        [],
+        0,
+        { pickGeneration: 0, reconciliation: null },
+      );
+    }
+    const stored: StoredAlbum = {
+      entries: parseEntries(state.entries),
+      savedAt: state.saved_at,
+      revision: state.revision,
+      ...parseMetadata(state),
+    };
+    const picks = result.results.flatMap<AlbumPick>((row) => {
+      if (row.media_id === null) return [];
+      if (row.media_trashed_at !== null && row.media_restore_until !== null) {
+        return [{
           kind: 'retained',
           slot: {
-            mediaId: row.id,
-            restoreUntil: row.restore_until,
+            mediaId: row.media_id,
+            restoreUntil: row.media_restore_until,
+            timelineAt: row.media_timeline_at,
             // Past the deadline the slot survives, but only because an accepted
             // export still holds the bytes. It is not an offer of recovery.
-            state: row.restore_until > now ? 'recoverable' : 'expired-cleanup-pending',
+            state: row.media_restore_until > now ? 'recoverable' : 'expired-cleanup-pending',
           },
-        };
+        }];
       }
-      return {
+      return [{
         kind: 'photo',
         photo: managerGalleryMediaView({
-          id: row.id,
-          originalFilename: row.original_filename,
-          guestName: row.guest_name,
-          caption: row.caption,
-          publicationStatus: row.publication_status,
-          uploadState: row.upload_state,
-          width: row.width,
-          height: row.height,
-          createdAt: row.created_at,
-          storedAt: row.stored_at,
-          capturedAt: row.captured_at,
-          timelineAt: row.timeline_at,
-          favoritedAt: row.favorited_at,
+          id: row.media_id,
+          originalFilename: row.media_original_filename,
+          guestName: row.media_guest_name,
+          caption: row.media_caption,
+          publicationStatus: row.media_publication_status,
+          uploadState: row.media_upload_state,
+          width: row.media_width,
+          height: row.media_height,
+          createdAt: row.media_created_at,
+          storedAt: row.media_stored_at,
+          capturedAt: row.media_captured_at,
+          timelineAt: row.media_timeline_at,
+          favoritedAt: row.media_favorited_at,
         }),
-      };
+      }];
     });
     // Retained photos are not exportable, so they are not part of what an album
     // export would weigh. They still hold their slot; they no longer count bytes.
     const totalBytes = result.results.reduce(
-      (sum, row) => (row.trashed_at !== null ? sum : sum + (row.byte_size ?? row.declared_byte_size)),
+      (sum, row) => (row.media_id === null || row.media_trashed_at !== null
+        ? sum
+        : sum + (row.media_byte_size ?? row.media_declared_byte_size)),
       0,
     );
-    return { picks, totalBytes };
+    const reconciliation = this.reconciliation(
+      stored,
+      state.pick_count,
+      state.historical_pick_count,
+    );
+    return resolveAlbum(
+      stored,
+      picks,
+      totalBytes,
+      { pickGeneration: state.album_pick_generation, reconciliation },
+    );
   }
 
-  async get(eventId: string, now = new Date().toISOString()): Promise<AlbumView> {
-    const [stored, picked] = await Promise.all([
-      this.storedAlbum(eventId),
-      this.picks(eventId, now),
-    ]);
-    return resolveAlbum(stored, picked.picks, picked.totalBytes);
+  private reconciliation(
+    stored: StoredAlbum,
+    pickCount: number,
+    historicalPickCount: number,
+  ): AlbumReconciliation {
+    if (stored.savedAt !== null || pickCount === 0) return null;
+    if (pickCount > ALBUM_MAX_ENTRIES) {
+      return { kind: 'over-capacity', pickCount, historicalPickCount };
+    }
+    if (historicalPickCount > 0) {
+      return { kind: 'historical', historicalPickCount };
+    }
+    return { kind: 'initialize' };
   }
 
   /** How many photos are visibly picked right now. Retained slots are excluded: this is what a host sees. */
@@ -417,6 +530,11 @@ export class AlbumRepository {
       : this.db.prepare(`
           UPDATE event_albums
           SET entries = ?,
+              title = CASE
+                WHEN saved_at IS NULL AND title = 'Album'
+                  THEN (SELECT name FROM events WHERE id = event_albums.event_id)
+                ELSE title
+              END,
               saved_at = COALESCE(saved_at, ?),
               revision = revision + 1,
               updated_at = ?
@@ -440,9 +558,13 @@ export class AlbumRepository {
         );
     const batch = await this.db.batch([
       this.db.prepare(`
-        INSERT OR IGNORE INTO event_albums (event_id, entries, saved_at, revision, created_at, updated_at)
-        VALUES (?, '[]', NULL, 0, ?, ?)
-      `).bind(eventId, now, now),
+        INSERT OR IGNORE INTO event_albums (
+          event_id, entries, saved_at, revision, title, created_at, updated_at
+        )
+        SELECT id, '[]', NULL, 0, name, ?, ?
+        FROM events
+        WHERE id = ?
+      `).bind(now, now, eventId),
       update,
       this.db.prepare(`
         SELECT
@@ -515,16 +637,203 @@ export class AlbumRepository {
    * added after reconciliation. Starting from picks freezes their current timeline
    * order so future picks append even when their capture time is earlier.
    */
+  private async startWithExpectations(
+    eventId: string,
+    choice: 'from-picks' | 'empty',
+    expectations: AlbumStartExpectations,
+    now: string,
+  ): Promise<{ album: AlbumView; started: boolean; cleared: string[] }> {
+    const entries = choice === 'from-picks'
+      ? `(
+          SELECT COALESCE(
+            json_group_array(json_object('kind', 'photo', 'mediaId', ordered.id)),
+            '[]'
+          )
+          FROM (
+            SELECT id FROM picked ORDER BY timeline_at ASC, id ASC
+          ) AS ordered
+        )`
+      : "'[]'";
+    const capacityGuard = choice === 'from-picks' ? 'AND pick_count <= ?6' : '';
+    const cas = this.db.prepare(`
+      WITH
+        picked AS MATERIALIZED (
+          SELECT id, timeline_at, album_pick_version
+          FROM media
+          WHERE event_id = ?1
+            AND upload_state = 'stored'
+            AND favorited_at IS NOT NULL
+            AND ${ALBUM_SLOT_OWNER_SQL}
+        ),
+        pick_facts AS MATERIALIZED (
+          SELECT
+            COUNT(*) AS pick_count,
+            COALESCE(SUM(CASE WHEN album_pick_version IS NULL THEN 1 ELSE 0 END), 0)
+              AS historical_pick_count
+          FROM picked
+        ),
+        candidate AS MATERIALIZED (
+          SELECT
+            events.id AS event_id,
+            ${entries} AS entries,
+            events.name AS title,
+            events.album_pick_generation,
+            COALESCE(event_albums.revision, 0) AS revision,
+            event_albums.saved_at,
+            pick_facts.pick_count,
+            CASE
+              WHEN pick_facts.pick_count > ?6 THEN 'over-capacity'
+              WHEN pick_facts.historical_pick_count > 0 THEN 'historical'
+              WHEN pick_facts.pick_count > 0 THEN 'initialize'
+              ELSE NULL
+            END AS reconciliation
+          FROM events
+          CROSS JOIN pick_facts
+          LEFT JOIN event_albums ON event_albums.event_id = events.id
+          WHERE events.id = ?1
+        )
+      INSERT INTO event_albums (
+        event_id, entries, title, saved_at, revision, created_at, updated_at
+      )
+      SELECT event_id, entries, title, ?2, revision + 1, ?2, ?2
+      FROM candidate
+      WHERE album_pick_generation = ?3
+        AND revision = ?4
+        AND saved_at IS NULL
+        AND reconciliation = ?5
+        ${capacityGuard}
+      ON CONFLICT(event_id) DO UPDATE SET
+        entries = excluded.entries,
+        title = CASE
+          WHEN event_albums.saved_at IS NULL AND event_albums.title = 'Album'
+            THEN excluded.title
+          ELSE event_albums.title
+        END,
+        saved_at = excluded.saved_at,
+        revision = event_albums.revision + 1,
+        updated_at = excluded.updated_at
+      WHERE event_albums.saved_at IS NULL
+        AND event_albums.revision = ?4
+    `).bind(
+      eventId,
+      now,
+      expectations.expectedPickGeneration,
+      expectations.expectedRevision,
+      expectations.expectedReconciliation,
+      ALBUM_MAX_ENTRIES,
+    );
+
+    const statements = [cas];
+    let clearedResultIndex: number | null = null;
+    if (choice === 'empty') {
+      clearedResultIndex = statements.length;
+      // This is deliberately the final mutation. `changes()` is the immediately
+      // preceding Album-row CAS, so a lost expectation race cannot clear picks.
+      statements.push(this.db.prepare(`
+        UPDATE media
+        SET favorited_at = NULL, album_pick_version = NULL
+        WHERE event_id = ?
+          AND upload_state = 'stored'
+          AND favorited_at IS NOT NULL
+          AND ${ALBUM_SLOT_OWNER_SQL}
+          AND changes() = 1
+        RETURNING id
+      `).bind(eventId));
+    }
+
+    const diagnosticResultIndex = statements.length;
+    statements.push(this.db.prepare(`
+      WITH
+        picked AS MATERIALIZED (
+          SELECT album_pick_version
+          FROM media
+          WHERE event_id = ?1
+            AND upload_state = 'stored'
+            AND favorited_at IS NOT NULL
+            AND ${ALBUM_SLOT_OWNER_SQL}
+        ),
+        pick_facts AS MATERIALIZED (
+          SELECT
+            COUNT(*) AS pick_count,
+            COALESCE(SUM(CASE WHEN album_pick_version IS NULL THEN 1 ELSE 0 END), 0)
+              AS historical_pick_count
+          FROM picked
+        )
+      SELECT
+        event_albums.saved_at,
+        COALESCE(event_albums.revision, 0) AS revision,
+        events.album_pick_generation,
+        pick_facts.pick_count,
+        CASE
+          WHEN pick_facts.pick_count > ?2 THEN 'over-capacity'
+          WHEN pick_facts.historical_pick_count > 0 THEN 'historical'
+          WHEN pick_facts.pick_count > 0 THEN 'initialize'
+          ELSE NULL
+        END AS reconciliation
+      FROM events
+      CROSS JOIN pick_facts
+      LEFT JOIN event_albums ON event_albums.event_id = events.id
+      WHERE events.id = ?1
+    `).bind(eventId, ALBUM_MAX_ENTRIES));
+
+    const results = await this.db.batch(statements);
+    const started = results[0]?.meta.changes === 1;
+    const diagnostic = results[diagnosticResultIndex]?.results[0] as {
+      saved_at: string | null;
+      revision: number;
+      album_pick_generation: number;
+      pick_count: number;
+      reconciliation: AlbumStartExpectations['expectedReconciliation'] | null;
+    } | undefined;
+    if (!started) {
+      const matchingOverCapacity = choice === 'from-picks'
+        && diagnostic?.saved_at === null
+        && diagnostic.revision === expectations.expectedRevision
+        && diagnostic.album_pick_generation === expectations.expectedPickGeneration
+        && diagnostic.reconciliation === expectations.expectedReconciliation
+        && diagnostic.pick_count > ALBUM_MAX_ENTRIES;
+      if (matchingOverCapacity) {
+        throw new ApiError(
+          'ALBUM_FULL',
+          `An album holds up to ${ALBUM_MAX_ENTRIES} photos. Remove picks in Library before starting this album.`,
+          409,
+        );
+      }
+      throw new ApiError(
+        'REVISION_CONFLICT',
+        'This album changed while you were arranging it. Reopen Album to see the current order.',
+        409,
+      );
+    }
+
+    const cleared = clearedResultIndex === null
+      ? []
+      : ((results[clearedResultIndex]?.results as Array<{ id: string }> | undefined) ?? [])
+        .map((row) => row.id);
+    return { album: await this.get(eventId), started, cleared };
+  }
+
   async start(
     eventId: string,
     choice: 'from-picks' | 'empty',
+    expectations: AlbumStartExpectations | null,
     now: string,
   ): Promise<{ album: AlbumView; started: boolean; cleared: string[] }> {
+    if (expectations !== null) {
+      return this.startWithExpectations(eventId, choice, expectations, now);
+    }
+
+    // One-release compatibility path: preserve today's manual, unguarded,
+    // revision-stable behavior exactly. New clients never enter this branch.
     const statements = [
       this.db.prepare(`
-        INSERT OR IGNORE INTO event_albums (event_id, entries, saved_at, revision, created_at, updated_at)
-        VALUES (?, '[]', NULL, 0, ?, ?)
-      `).bind(eventId, now, now),
+        INSERT OR IGNORE INTO event_albums (
+          event_id, entries, saved_at, revision, title, created_at, updated_at
+        )
+        SELECT id, '[]', NULL, 0, name, ?, ?
+        FROM events
+        WHERE id = ?
+      `).bind(now, now, eventId),
     ];
     let clearedResultIndex: number | null = null;
     let startedResultIndex: number;
@@ -547,6 +856,11 @@ export class AlbumRepository {
                 ORDER BY media.timeline_at ASC, media.id ASC
               ) AS picked
             ),
+            title = CASE
+              WHEN title = 'Album'
+                THEN (SELECT name FROM events WHERE id = event_albums.event_id)
+              ELSE title
+            END,
             saved_at = ?2,
             updated_at = ?2
         WHERE event_id = ?1 AND saved_at IS NULL
@@ -574,7 +888,14 @@ export class AlbumRepository {
       startedResultIndex = statements.length;
       statements.push(this.db.prepare(`
         UPDATE event_albums
-        SET entries = '[]', saved_at = ?2, updated_at = ?2
+        SET entries = '[]',
+            title = CASE
+              WHEN title = 'Album'
+                THEN (SELECT name FROM events WHERE id = event_albums.event_id)
+              ELSE title
+            END,
+            saved_at = ?2,
+            updated_at = ?2
         WHERE event_id = ?1 AND saved_at IS NULL
       `).bind(eventId, now));
     }

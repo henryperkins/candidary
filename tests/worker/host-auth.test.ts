@@ -182,19 +182,89 @@ beforeEach(async () => {
 });
 
 describe('registration', () => {
-  it('creates no account, owner, or host session before mailbox proof', async () => {
+  it('returns the exact resumeExpiresAt while creating no account before mailbox proof', async () => {
     const access = await eventAccess();
     const response = await register(
       'host@example.com',
       { bindEventId: access.event.id },
       { cookie: access.manager.cookie },
     );
+    const pending = registrationCookiesFrom(response);
+    const expiresAt = await env.DB.prepare(`
+      SELECT expires_at FROM host_registration_challenges WHERE id = ?
+    `).bind(pending.token.split('.')[0]!).first<string>('expires_at');
 
     expect(response.status).toBe(202);
-    expect(await response.json<any>()).toMatchObject({ data: { registrationPending: true } });
+    expect(await response.json<any>()).toMatchObject({
+      data: { registrationPending: true, resumeExpiresAt: expiresAt },
+    });
     expect(response.headers.getSetCookie().join(', ')).toContain('candidary_registration=');
     for (const table of ['host_accounts', 'event_hosts', 'host_sessions']) {
       expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first('count')).toBe(0);
+    }
+  });
+
+  it('answers register/pending only from the browser registration cookie and never an email', async () => {
+    const started = await register('host@example.com');
+    const pending = registrationCookiesFrom(started);
+    const expiresAt = await env.DB.prepare(`
+      SELECT expires_at FROM host_registration_challenges WHERE id = ?
+    `).bind(pending.token.split('.')[0]!).first<string>('expires_at');
+
+    const valid = await createApp().request(
+      '/api/host/register/pending?email=someone-else%40example.com',
+      { headers: { cookie: pending.cookie } },
+      testEnv,
+    );
+    const anotherBrowser = await createApp().request(
+      '/api/host/register/pending?email=host%40example.com',
+      {},
+      testEnv,
+    );
+
+    expect(valid.status).toBe(200);
+    expect(await valid.json<any>()).toEqual({
+      data: { pending: true, expiresAt },
+      requestId: expect.any(String),
+    });
+    expect(valid.headers.get('cache-control')).toBe('private, no-store');
+    expect(await anotherBrowser.json<any>()).toEqual({
+      data: { pending: false, expiresAt: null },
+      requestId: expect.any(String),
+    });
+    expect(anotherBrowser.headers.get('cache-control')).toBe('private, no-store');
+  });
+
+  it('returns register/pending false for stale, expired, completed, or missing cookies', async () => {
+    const expiredStart = await register('expired@example.com');
+    const expired = registrationCookiesFrom(expiredStart);
+    await env.DB.prepare(`
+      UPDATE host_registration_challenges SET expires_at = ? WHERE id = ?
+    `).bind('2000-01-01T00:00:00.000Z', expired.token.split('.')[0]!).run();
+
+    const completedStart = await register('completed@example.com');
+    const completed = registrationCookiesFrom(completedStart);
+    expect((await completeRegistration(completedStart, 'completed@example.com')).status).toBe(200);
+
+    const probes = await Promise.all([
+      createApp().request('/api/host/register/pending', {}, testEnv),
+      createApp().request('/api/host/register/pending', {
+        headers: { cookie: `candidary_registration=${expired.token.split('.')[0]}.wrong-secret` },
+      }, testEnv),
+      createApp().request('/api/host/register/pending', {
+        headers: { cookie: expired.cookie },
+      }, testEnv),
+      createApp().request('/api/host/register/pending', {
+        headers: { cookie: completed.cookie },
+      }, testEnv),
+    ]);
+
+    for (const probe of probes) {
+      expect(probe.status).toBe(200);
+      expect(await probe.json<any>()).toMatchObject({
+        data: { pending: false, expiresAt: null },
+      });
+      expect(probe.headers.get('cache-control')).toBe('private, no-store');
     }
   });
 
@@ -243,7 +313,15 @@ describe('registration', () => {
 
     expect(newAddress.status).toBe(202);
     expect(existingAddress.status).toBe(202);
-    expect(existingBody.data).toEqual(newBody.data);
+    expect(Object.keys(existingBody.data).sort()).toEqual([
+      'registrationPending',
+      'resumeExpiresAt',
+    ]);
+    expect(Object.keys(existingBody.data).sort()).toEqual(Object.keys(newBody.data).sort());
+    expect(existingBody.data.registrationPending).toBe(true);
+    expect(newBody.data.registrationPending).toBe(true);
+    expect(existingBody.data.resumeExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
+    expect(newBody.data.resumeExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
     expect(cookieWithoutValue(existingAddress)).toEqual(cookieWithoutValue(newAddress));
     expect(cookieWithoutValue(existingAddress)).toEqual([
       'candidary_registration=<opaque>; Max-Age=900; Path=/; HttpOnly; Secure; SameSite=Lax',
@@ -277,7 +355,7 @@ describe('registration', () => {
     expect(cookieIds).toContain(live.results[0]!.id);
   });
 
-  it('resends through the pending cookie and replaces the usable code', async () => {
+  it('resends through the pending cookie with the exact resumeExpiresAt and replaces the usable code', async () => {
     const started = await register('host@example.com');
     const pending = registrationCookiesFrom(started);
     const oldCode = await forceRegistrationCode('host@example.com', '111111');
@@ -287,7 +365,12 @@ describe('registration', () => {
       'CF-Connecting-IP': '203.0.113.10',
     });
     expect(resent.status).toBe(202);
-    expect(await resent.json<any>()).toMatchObject({ data: { registrationPending: true } });
+    const expiresAt = await env.DB.prepare(`
+      SELECT expires_at FROM host_registration_challenges WHERE id = ?
+    `).bind(pending.token.split('.')[0]!).first<string>('expires_at');
+    expect(await resent.json<any>()).toMatchObject({
+      data: { registrationPending: true, resumeExpiresAt: expiresAt },
+    });
     expect(resent.headers.getSetCookie()).toContain(
       `candidary_registration=${pending.token}; Max-Age=900; Path=/; HttpOnly; Secure; SameSite=Lax`,
     );
@@ -302,8 +385,12 @@ describe('registration', () => {
     expect((await oldCompletion.json<any>()).code).toBe('LOGIN_CODE_INVALID');
   });
 
-  it('does not renew the pending cookie when the resend email is undeliverable', async () => {
+  it('does not extend resumeExpiresAt or replace the challenge when resend is undeliverable', async () => {
     const pending = registrationCookiesFrom(await register('host@example.com'));
+    const before = await env.DB.prepare(`
+      SELECT code_digest, expires_at, attempts, updated_at
+      FROM host_registration_challenges WHERE id = ?
+    `).bind(pending.token.split('.')[0]!).first();
     vi.spyOn(EmailService.prototype, 'send')
       .mockResolvedValueOnce({ delivered: false, code: 'provider_rejected' });
 
@@ -317,6 +404,80 @@ describe('registration', () => {
     expect(resent.headers.getSetCookie()).not.toContain(
       expect.stringContaining('candidary_registration='),
     );
+    expect(await env.DB.prepare(`
+      SELECT code_digest, expires_at, attempts, updated_at
+      FROM host_registration_challenges WHERE id = ?
+    `).bind(pending.token.split('.')[0]!).first()).toEqual(before);
+  });
+
+  it('lets only one concurrently delivered resend replace the shared pending snapshot', async () => {
+    const pending = registrationCookiesFrom(await register('host@example.com'));
+    const challengeId = pending.token.split('.')[0]!;
+    const before = await env.DB.prepare(`
+      SELECT code_digest, expires_at, attempts, updated_at
+      FROM host_registration_challenges WHERE id = ?
+    `).bind(challengeId).first();
+
+    const deliveredCodes: string[] = [];
+    let bothDeliveriesReached!: () => void;
+    const bothDeliveries = new Promise<void>((resolve) => { bothDeliveriesReached = resolve; });
+    let releaseDeliveries!: () => void;
+    const deliveriesReleased = new Promise<void>((resolve) => { releaseDeliveries = resolve; });
+    vi.spyOn(EmailService.prototype, 'send').mockImplementation(async (message) => {
+      deliveredCodes.push(message.subject.slice(0, 6));
+      if (deliveredCodes.length === 2) bothDeliveriesReached();
+      await deliveriesReleased;
+      return { delivered: true };
+    });
+
+    const requests = [
+      post('/api/host/register/resend', {}, {
+        cookie: pending.cookie,
+        'CF-Connecting-IP': '203.0.113.15',
+      }),
+      post('/api/host/register/resend', {}, {
+        cookie: pending.cookie,
+        'CF-Connecting-IP': '203.0.113.16',
+      }),
+    ];
+    await bothDeliveries;
+
+    // Both requests reached delivery from the same cookie-bound row, and neither
+    // may mutate it until its email has actually been accepted by the provider.
+    expect(deliveredCodes).toHaveLength(2);
+    expect(await env.DB.prepare(`
+      SELECT code_digest, expires_at, attempts, updated_at
+      FROM host_registration_challenges WHERE id = ?
+    `).bind(challengeId).first()).toEqual(before);
+
+    releaseDeliveries();
+    const responses = await Promise.all(requests);
+    const accepted = responses.filter((response) => response.status === 202);
+    const rejected = responses.filter((response) => response.status === 400);
+    expect(accepted).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    const committed = await env.DB.prepare(`
+      SELECT code_digest, expires_at
+      FROM host_registration_challenges WHERE id = ?
+    `).bind(challengeId).first<{ code_digest: string; expires_at: string }>();
+    expect(committed).not.toBeNull();
+    expect(await accepted[0]!.json<any>()).toMatchObject({
+      data: {
+        registrationPending: true,
+        resumeExpiresAt: committed!.expires_at,
+      },
+    });
+    expect(await rejected[0]!.json<any>()).toMatchObject({ code: 'LOGIN_CODE_INVALID' });
+
+    const deliveredDigests = await Promise.all(deliveredCodes.map((code) =>
+      digestSecret(code, testEnv.LOGIN_HMAC_KEY)));
+    const committedCode = deliveredCodes[deliveredDigests.indexOf(committed!.code_digest)];
+    expect(committedCode).toMatch(/^\d{6}$/u);
+    const completed = await post('/api/host/register/complete', { code: committedCode }, {
+      cookie: pending.cookie,
+    });
+    expect(completed.status).toBe(200);
   });
 
   it('does not bind an existing account when resend supersedes its loaded code snapshot', async () => {
@@ -973,6 +1134,40 @@ describe('password reset', () => {
 });
 
 describe('managing an event through an account', () => {
+  it('returns exactly the eventTimezone allowlist for each host event', async () => {
+    const access = await eventAccess('Timezone Wedding');
+    const host = await registeredHost(
+      'host@example.com',
+      { bindEventId: access.event.id },
+      { cookie: access.manager.cookie },
+    );
+
+    const response = await createApp().request('/api/host/session', {
+      headers: { cookie: host.cookie },
+    }, testEnv);
+    const body = await response.json<any>();
+
+    expect(response.status).toBe(200);
+    expect(Object.keys(body.data.events[0]).sort()).toEqual([
+      'eventDate',
+      'eventTimezone',
+      'id',
+      'managementAccessExpiresAt',
+      'name',
+      'slug',
+      'storedMediaCount',
+    ]);
+    expect(body.data.events[0]).toEqual({
+      id: access.event.id,
+      name: 'Timezone Wedding',
+      slug: access.event.slug,
+      eventDate: access.event.eventDate,
+      eventTimezone: 'America/Chicago',
+      storedMediaCount: access.event.storedMediaCount,
+      managementAccessExpiresAt: access.event.managementAccessExpiresAt,
+    });
+  });
+
   it('reaches every host surface without the management link', async () => {
     const access = await eventAccess();
     const host = await registeredHost(

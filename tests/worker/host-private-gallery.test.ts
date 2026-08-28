@@ -7,6 +7,7 @@ import { AlbumRepository } from '../../worker/db/album';
 import { EventsRepository } from '../../worker/db/events';
 import { MediaRepository } from '../../worker/db/media';
 import type { AppEnv } from '../../worker/env';
+import type { UploadAuthority } from '../../worker/services/upload-authority';
 import { finalizeStoredMedia, receiveMediaUpload } from '../../worker/storage/media';
 import { png } from './helpers';
 import { buildExifTiff, jpegWithExif } from './jpeg-exif';
@@ -25,6 +26,10 @@ const SENTINEL = '1970-01-01T00:00:00.000Z';
 // test are the only thing that can refuse.
 const TRASHED_AT = '2026-09-20T00:00:00.000Z';
 const RESTORED_AT = '2026-09-20T01:00:00.000Z';
+
+function guestAuthority(sessionId: string): UploadAuthority {
+  return { kind: 'guest', actorSessionId: sessionId, eventSessionId: sessionId };
+}
 
 async function seedEvent(id = 'event-a', slug = 'maya-theo') {
   const events = new EventsRepository(env.DB);
@@ -92,6 +97,7 @@ async function reserveMedia(
     id,
     eventId: 'event-a',
     uploaderSessionId: sessionId,
+    authority: guestAuthority(sessionId),
     objectKey: `events/event-a/media/${id}`,
     originalFilename: `${id}.${mimeType === 'image/jpeg' ? 'jpg' : 'png'}`,
     mimeType,
@@ -242,7 +248,7 @@ describe('host private gallery storage timeline', () => {
         repository,
         reserved,
         TIMELINE_CONTEXT,
-        sessionId,
+        guestAuthority(sessionId),
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
         'image/jpeg',
         new Date(STORED_AT),

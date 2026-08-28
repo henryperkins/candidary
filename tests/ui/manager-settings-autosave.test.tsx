@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn(() => Promise.resolve('data:image/png;base64,x')) } }));
 
+import type { EventView } from '../../shared/contracts';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { createAppRouter } from '../../src/app/router';
@@ -29,8 +30,16 @@ const MANAGED_EVENT = {
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
   },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
+  reservedMediaCount: 0,
   storedMediaCount: 3, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
-  guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
+  reservedBytes: 0,
+  hostUploadAvailability: { enabled: true, reason: null },
+  guestAccessExpiresAt: '2026-10-19T00:00:00Z',
+  managementAccessExpiresAt: '2026-10-19T00:00:00Z',
+  managerLinkRevision: null,
+  managerLinkRotationAvailability: { enabled: false, reason: 'account-required' },
+  purgeAfter: '2026-12-19T00:00:00Z',
+  createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',
   eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
   photosOpen: true, photoIntakeState: 'open', photoIntakeRecheckAfterMs: null,
@@ -38,7 +47,7 @@ const MANAGED_EVENT = {
   rsvpDeadlineAt: '2026-09-05T04:59:59.999Z', rsvpDeadlineDate: '2026-09-04',
   rsvpRosterVersion: 7,
   theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
-};
+} satisfies EventView;
 
 interface MediaPage { media: unknown[]; nextCursor: string | null }
 
@@ -126,13 +135,13 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    expect(screen.getByText('Photo delivery opens when the event starts.')).toBeVisible();
+    expect(screen.getByText('Guest uploads open when the event starts.')).toBeVisible();
     fireEvent.change(screen.getByLabelText('Event start time'), { target: { value: '18:00' } });
 
     await waitFor(() => expect(eventReads).toBe(2));
     expect(screen.getByRole('heading', { name: 'Confirmed schedule' })).toBeVisible();
-    expect(screen.getByText('Photo delivery is open.')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Pause photo delivery' })).toBeVisible();
+    expect(screen.getByText('Guest uploads are open.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Pause guest uploads' })).toBeVisible();
   });
 
   it('keeps the working manager surface when schedule reconciliation cannot read', async () => {
@@ -167,7 +176,7 @@ describe('manager settings autosave guards', () => {
 
     await waitFor(() => expect(eventReads).toBe(2));
     expect(screen.getByText('Event settings saved')).toBeInTheDocument();
-    expect(screen.getByText('Photo delivery opens when the event starts.')).toBeVisible();
+    expect(screen.getByText('Guest uploads open when the event starts.')).toBeVisible();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -212,14 +221,14 @@ describe('manager settings autosave guards', () => {
 
     fireEvent.change(screen.getByLabelText('Event start time'), { target: { value: '18:00' } });
     await waitFor(() => expect(releaseSettings).not.toBeNull());
-    await user.click(screen.getByRole('button', { name: 'Open photo delivery now' }));
-    await screen.findByText('Photo delivery is open early.');
+    await user.click(screen.getByRole('button', { name: 'Open guest uploads now' }));
+    await screen.findByText('Guest uploads are open early.');
 
     releaseSettings!();
 
     await waitFor(() => expect(eventReads).toBe(2));
-    expect(screen.getByText('Photo delivery is open early.')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Pause until the event starts' })).toBeVisible();
+    expect(screen.getByText('Guest uploads are open early.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Return guest uploads to schedule' })).toBeVisible();
   });
 
   it('keeps schedule reconciliation newer when an older photo action response arrives last', async () => {
@@ -272,7 +281,7 @@ describe('manager settings autosave guards', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await openSettings(user);
 
-    await user.click(screen.getByRole('button', { name: 'Open photo delivery now' }));
+    await user.click(screen.getByRole('button', { name: 'Open guest uploads now' }));
     await waitFor(() => expect(releasePhoto).not.toBeNull());
     fireEvent.change(screen.getByLabelText('Event start time'), { target: { value: '16:00' } });
     await screen.findByRole('heading', { name: 'Schedule after action' });
@@ -283,9 +292,9 @@ describe('manager settings autosave guards', () => {
     releasePhoto!();
 
     await waitFor(() => expect(eventReads).toBe(2));
-    await waitFor(() => expect(screen.getByText('Photo delivery is open.')).toBeVisible());
+    await waitFor(() => expect(screen.getByText('Guest uploads are open.')).toBeVisible());
     expect(readStartedBeforePhotoSettled).toBe(false);
-    expect(screen.queryByText('Photo delivery is open early.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Guest uploads are open early.')).not.toBeInTheDocument();
   });
 
   it('keeps a guest draft through a combined internal-destination prompt until the host discards it', async () => {
@@ -861,18 +870,20 @@ describe('manager settings autosave guards', () => {
       name: `Disable printed event QR for ${MANAGED_EVENT.name}`,
     }));
 
-    await waitFor(() => expect(screen.getByText('Photo delivery paused')).toBeVisible());
+    await waitFor(() => expect(screen.getByText('Guest uploads paused')).toBeVisible());
     releaseSettings!();
     await waitFor(() => expect(screen.getByText('Event settings saved')).toBeInTheDocument());
 
-    expect(screen.getByText('Photo delivery paused')).toBeVisible();
+    expect(screen.getByText('Guest uploads paused')).toBeVisible();
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /settings/i }));
     // The stop is irreversible, so the panel explains it rather than offering a
     // reopen the server would refuse anyway.
-    expect(screen.getByText('Photo delivery is paused.')).toBeVisible();
-    expect(screen.getByText('The printed event QR was disabled, so photo delivery cannot be reopened.')).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Reopen photo delivery' })).not.toBeInTheDocument();
+    expect(screen.getByText(
+      'New guest uploads are paused. Event access, Guestbook, the Guest gallery setting, and Manager uploads are unchanged.',
+    )).toBeVisible();
+    expect(screen.getByText('The printed event QR was disabled, so guest uploads cannot resume.')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Resume guest uploads' })).not.toBeInTheDocument();
   });
 
   it('keeps a deferred cover response from restoring stale settings or theme', async () => {

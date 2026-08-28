@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom';
 
 import type { GuestEventView } from '../../shared/contracts';
 import { DEFAULT_EVENT_THEME_CONFIG, resolveEventTheme } from '../../shared/event-theme';
+import { GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE } from '../../shared/rsvp';
 import { api, mediaPreview } from '../app/api';
 import { eventThemeStyle } from '../app/event-theme-style';
 import { readGuestName, rememberGuestName } from '../app/guest-name-storage';
@@ -18,7 +19,9 @@ import type { LifecycleRecheckOutcome } from '../features/guest/useLifecycleRech
 import { useLifecycleRecheck } from '../features/guest/useLifecycleRecheck';
 import { Guestbook } from '../features/guestbook/Guestbook';
 import { GuestRsvpFlow } from '../features/rsvp/GuestRsvpFlow';
-import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
+import { GuestUploadFlow, type GuestUploadEvent } from '../features/uploads/GuestUploadFlow';
+import type { UploadTransport } from '../features/uploads/upload-queue';
+import { useGuestUploadSession } from '../features/uploads/use-guest-upload-session';
 
 /* `GuestEventView.theme` is required in the contract, but this value arrives over the network: during
    a deploy an older Worker can still answer without one, and the guest would meet a blank error page
@@ -37,6 +40,8 @@ function guestLifecycleKey(event: GuestEventView): string {
     event.phase,
     event.rsvpState,
     event.rsvpAccess,
+    event.guestReadSurfaces.available,
+    event.guestReadSurfaces.reason,
     event.eventStartAt,
     event.rsvpDeadlineAt,
     event.eventTimezone,
@@ -47,6 +52,42 @@ function guestLifecycleKey(event: GuestEventView): string {
     event.cover.available2xProfiles,
     event.cover.surfaceTreatment,
   ]);
+}
+
+export function GuestPhotoUpload({
+  event,
+  slug,
+  guestName,
+  onGuestNameChange,
+  onDelivered,
+  onLeaveGuestbook,
+  transport,
+}: {
+  event: GuestUploadEvent;
+  slug: string;
+  guestName: string;
+  onGuestNameChange(name: string): void;
+  onDelivered?(count: number): void;
+  onLeaveGuestbook(): void;
+  transport?: UploadTransport;
+}) {
+  const session = useGuestUploadSession({
+    slug,
+    guestName,
+    uploadsAvailable: event.uploadsEnabled,
+    transport,
+    onDelivered,
+  });
+  return <GuestUploadFlow
+    event={event}
+    slug={slug}
+    session={session}
+    uploadsAvailable={event.uploadsEnabled}
+    unavailableMessage="The host has paused new guest uploads for now."
+    guestName={guestName}
+    onGuestNameChange={onGuestNameChange}
+    onLeaveGuestbook={onLeaveGuestbook}
+  />;
 }
 
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
@@ -61,6 +102,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const [rsvpExpanded, setRsvpExpanded] = useState(false);
   const [rememberedGuestName, setRememberedGuestName] = useState(readGuestName);
   const [guestbookOpenRequest, setGuestbookOpenRequest] = useState(0);
+  const markUploadDelivered = useCallback(() => setTerminal(true), []);
   // Each load takes the next ticket and only the newest one may install its answer. A slug change, a
   // second Try again press, or an unmount all leave an older load holding a ticket nobody honours.
   const loadTicket = useRef(0);
@@ -85,7 +127,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
       const { event: eventView } = await api<{ event: GuestEventView; role: string }>(`/api/event/${slug}`);
       if (loadTicket.current !== ticket) return;
       setEvent(eventView);
-      if (fullscreen && eventView.galleryVisible) {
+      if (fullscreen && eventView.guestReadSurfaces.available && eventView.galleryVisible) {
         await loadGallery();
         if (loadTicket.current !== ticket) return;
         setLoaded((current) => ({ ...current, gallery: true }));
@@ -159,9 +201,13 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
         so it is announced rather than drawn — the bar's approved copy is unchanged. */}
     <h1 className="sr-only">Shared gallery · {event.name}</h1>
     <div className="fullscreen__bar"><Brand compact /><Link className="fullscreen__close" to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
-    {gallery.length
-      ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || SHARED_PHOTO_LABEL} /><figcaption>{item.caption || SHARED_PHOTO_LABEL}</figcaption></figure>)}</div>
-      : <p>No shared photos yet.</p>}
+    {!event.guestReadSurfaces.available
+      ? <p>{GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE}</p>
+      : !event.galleryVisible
+        ? <p>The host is keeping the gallery private.</p>
+        : gallery.length
+          ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || SHARED_PHOTO_LABEL} /><figcaption>{item.caption || SHARED_PHOTO_LABEL}</figcaption></figure>)}</div>
+          : <p>No shared photos yet.</p>}
   </main>;
 
   return <GuestEventRefreshProvider refreshEvent={recheckEvent}>
@@ -180,25 +226,23 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
         onGuestNameChange={updateRememberedGuestName}
       />}
 
-      {event.phase === 'photos-primary' && <GuestUploadFlow
+      {(event.phase === 'photos-primary' || (terminal && event.phase === 'waiting')) && <GuestPhotoUpload
         event={event}
         slug={slug}
         guestName={rememberedGuestName}
         onGuestNameChange={updateRememberedGuestName}
-        onDelivered={() => setTerminal(true)}
+        onDelivered={markUploadDelivered}
         onLeaveGuestbook={openGuestbookFromReceipt}
       />}
 
-      {event.phase === 'waiting' && <GuestWaiting event={event} />}
+      {event.phase === 'waiting' && !terminal && <GuestWaiting event={event} />}
 
-      {event.phase === 'photos-primary' && <section
-        className={`guest-secondary${terminal || event.phase !== 'photos-primary' ? ' guest-secondary--guestbook-only' : ''}`}
-        aria-labelledby={terminal
-          ? 'terminal-guestbook'
-          : event.phase === 'photos-primary' ? 'more-from-event' : undefined}
+      {event.guestReadSurfaces.available && <section
+        className={`guest-secondary${terminal ? ' guest-secondary--guestbook-only' : ''}`}
+        aria-labelledby={terminal ? 'terminal-more-from-event' : 'more-from-event'}
       >
-        {terminal && <h2 id="terminal-guestbook" className="sr-only">Guestbook</h2>}
-        {!terminal && event.phase === 'photos-primary' && <div className="guest-secondary__heading">
+        {terminal && <h2 id="terminal-more-from-event" className="sr-only">More from the event</h2>}
+        {!terminal && <div className="guest-secondary__heading">
           <p className="section-label">More from the event</p>
           <h2 id="more-from-event">Here when you want it.</h2>
           <p>Photos are delivered privately first. The shared gallery and Guestbook stay out of your way until you choose them.</p>
@@ -207,7 +251,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
         <Guestbook
           key={event.id}
           event={event}
-          contributionEnabled={event.phase === 'photos-primary'}
+          contributionEnabled
           guestName={rememberedGuestName}
           onGuestNameChange={updateRememberedGuestName}
           openRequest={guestbookOpenRequest}
@@ -235,21 +279,21 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
           </div>}
         </details>}
 
-        {!terminal && event.phase === 'photos-primary' && <details className="event-extra" onToggle={(toggle) => toggleExtra('gallery', toggle.currentTarget.open)}>
+        <details className="event-extra" onToggle={(toggle) => toggleExtra('gallery', toggle.currentTarget.open)}>
           <summary><span>Shared gallery <small>{event.galleryVisible ? loaded.gallery ? `${gallery.length} shared` : 'Available' : 'Not shared yet'}</small></span><ChevronDown aria-hidden="true" /></summary>
           {opened.gallery && <div className="event-extra__content">
             {event.galleryVisible && gallery.length > 0
               ? <><div className="secondary-actions"><Link className="text-link" to={`/event/${slug}/fullscreen`}><Expand aria-hidden="true" /> View full screen</Link></div><div className="photo-grid">{gallery.map((item) => <figure key={item.id}><img loading="lazy" src={mediaPreview(item.id)} alt={item.caption || SHARED_PHOTO_LABEL} /><figcaption><span>{item.caption || SHARED_PHOTO_LABEL}</span><small>by {item.guestName}</small></figcaption></figure>)}</div></>
               : <div className="empty-state"><ImagePlus aria-hidden="true" /><h3>{event.galleryVisible ? 'The shared gallery is still quiet.' : 'The host is keeping the gallery private.'}</h3><p>Your delivery still goes straight to the host.</p></div>}
           </div>}
-        </details>}
+        </details>
 
-        {!terminal && event.phase === 'photos-primary' && <details className="event-extra" onToggle={(toggle) => toggleExtra('contributions', toggle.currentTarget.open)}>
+        <details className="event-extra" onToggle={(toggle) => toggleExtra('contributions', toggle.currentTarget.open)}>
           <summary><span>My deliveries <small>{loaded.contributions ? `${contributions.filter(({ uploadState }) => uploadState === 'stored').length} received` : 'From this device'}</small></span><ChevronDown aria-hidden="true" /></summary>
           {opened.contributions && <div className="event-extra__content contributions contributions--compact">
             {contributions.length ? <ul>{contributions.map((item) => <li key={item.id}><img src={mediaPreview(item.id)} alt="" /><span>{item.originalFilename}</span><em className={`status status--${item.uploadState === 'stored' ? 'approved' : 'pending'}`}>{item.uploadState === 'stored' ? 'Delivered' : 'Not delivered'}</em></li>)}</ul> : <p>No earlier deliveries from this device.</p>}
           </div>}
-        </details>}
+        </details>
       </section>}
     </main>
     {!terminal && <footer><Brand compact /><p>Private moments, held together.</p></footer>}

@@ -188,6 +188,28 @@ describe('upload initiation', () => {
     expect((await env.DB.prepare('SELECT reserved_media_count FROM events WHERE id = ?').bind(access.event.id).first<any>()).reserved_media_count).toBe(1);
   });
 
+  it('scopes an idempotency key to the actor instead of re-entering another guest row', async () => {
+    const access = await guestAccess();
+    const other = cookiesFrom(await exchangeEventEntry(access.eventLink));
+    const payload = {
+      filename: 'actor-scoped.png', mimeType: 'image/png', byteSize: 64,
+      idempotencyKey: 'actor-scoped-key', guestName: 'Avery',
+    };
+    const first = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access), body: JSON.stringify(payload),
+    }, testEnv);
+    const second = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(other), body: JSON.stringify(payload),
+    }, testEnv);
+    const firstMedia = (await first.json<any>()).data.media;
+    const secondMedia = (await second.json<any>()).data.media;
+
+    expect([first.status, second.status]).toEqual([201, 201]);
+    expect(secondMedia.id).not.toBe(firstMedia.id);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media WHERE event_id = ?')
+      .bind(access.event.id).first<{ count: number }>())?.count).toBe(2);
+  });
+
   it('rejects unsupported and oversized files before reserving quota', async () => {
     const access = await guestAccess();
     const unsupported = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
@@ -214,6 +236,45 @@ describe('upload initiation', () => {
     expect(response.status).toBe(422);
     expect((await response.json<any>()).fieldErrors).toEqual({ guestName: 'Your name is required.' });
     expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media').first<{ count: number }>())?.count).toBe(0);
+  });
+
+  it('rejects an unknown outer upload field instead of silently discarding it', async () => {
+    const access = await guestAccess();
+    const response = await createApp().request(`/api/event/${access.event.slug}/uploads/batch`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({
+        guestName: 'Avery',
+        files: [{
+          filename: 'moment.png', mimeType: 'image/png', byteSize: 64,
+          idempotencyKey: 'strict-outer',
+        }],
+        managerOnly: true,
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media')
+      .first<{ count: number }>())?.count).toBe(0);
+  });
+
+  it('rejects an unknown nested upload-file field instead of silently discarding it', async () => {
+    const access = await guestAccess();
+    const response = await createApp().request(`/api/event/${access.event.slug}/uploads/batch`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({
+        guestName: 'Avery',
+        files: [{
+          filename: 'moment.png', mimeType: 'image/png', byteSize: 64,
+          idempotencyKey: 'strict-file', accountId: 'must-not-cross-the-wire',
+        }],
+      }),
+    }, testEnv);
+
+    expect(response.status).toBe(422);
+    expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media')
+      .first<{ count: number }>())?.count).toBe(0);
   });
 
   it.each([
@@ -280,6 +341,115 @@ describe('upload initiation', () => {
 });
 
 describe('upload finalization and private delivery', () => {
+  it('keeps the exact guest claim-conflict answer when pause lands after reservation', async () => {
+    const access = await guestAccess();
+    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access), body: JSON.stringify({
+        filename: 'pause-before-claim.png', mimeType: 'image/png', byteSize: 64,
+        idempotencyKey: 'pause-before-claim', guestName: 'Avery',
+      }),
+    }, testEnv);
+    const reserved = (await initiated.json<any>()).data.media;
+    await testEnv.DB.prepare('UPDATE events SET uploads_enabled = 0 WHERE id = ?')
+      .bind(access.event.id).run();
+
+    const response = await uploadContent(access, reserved, png(800, 600));
+
+    expect(response.status).toBe(409);
+    expect(await response.json<any>()).toMatchObject({
+      code: 'UPLOAD_FINALIZE_CONFLICT',
+      message: 'This upload is already being secured. Wait a moment and try again.',
+    });
+    expect(await new MediaRepository(testEnv.DB).getById(reserved.id))
+      .toMatchObject({ uploadState: 'reserved' });
+    expect(await new MediaRepository(testEnv.DB).getPromotion(reserved.id))
+      .toMatchObject({ state: 'pending' });
+  });
+
+  it('keeps the exact guest commit-conflict answer when pause lands after canonical PUT', async () => {
+    const access = await guestAccess();
+    const initiated = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access), body: JSON.stringify({
+        filename: 'pause-before-commit.png', mimeType: 'image/png', byteSize: 64,
+        idempotencyKey: 'pause-before-commit', guestName: 'Avery',
+      }),
+    }, testEnv);
+    const reserved = (await initiated.json<any>()).data.media;
+    const bucket = new Proxy(testEnv.CANONICAL_MEDIA_BUCKET, {
+      get(target, property) {
+        if (property === 'put') {
+          return async (...args: Parameters<R2Bucket['put']>) => {
+            const result = await target.put(...args);
+            await testEnv.DB.prepare('UPDATE events SET uploads_enabled = 0 WHERE id = ?')
+              .bind(access.event.id).run();
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const pausedEnv = { ...testEnv, CANONICAL_MEDIA_BUCKET: bucket } as AppEnv;
+    const bytes = png(800, 600);
+
+    const response = await createApp().request(
+      `/api/event/${access.event.slug}/uploads/${reserved.id}/content`,
+      {
+        method: 'PUT',
+        headers: {
+          ...writeHeaders(access), 'content-type': 'image/png', 'content-length': '64',
+        },
+        body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      },
+      pausedEnv,
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json<any>()).toMatchObject({
+      code: 'UPLOAD_FINALIZE_CONFLICT',
+      message: 'This upload changed while its bytes were being secured. Try again.',
+    });
+    expect(await new MediaRepository(testEnv.DB).getById(reserved.id))
+      .toMatchObject({ uploadState: 'reserved' });
+    expect(await new MediaRepository(testEnv.DB).getPromotion(reserved.id))
+      .toMatchObject({ state: 'copying', finalPointerCommitted: false });
+    expect(await new MediaRepository(testEnv.DB).getById(reserved.id))
+      .not.toMatchObject({ objectBucketGeneration: 'canonical' });
+    expect((await testEnv.DB.prepare(
+      'SELECT reserved_media_count, stored_media_count FROM events WHERE id = ?',
+    ).bind(access.event.id).first<Record<string, number>>()))
+      .toEqual({ reserved_media_count: 1, stored_media_count: 0 });
+  });
+
+  it('keeps the canceled guest replay on the existing conflict code and message', async () => {
+    const access = await guestAccess();
+    const payload = {
+      filename: 'canceled-guest.png', mimeType: 'image/png', byteSize: 64,
+      idempotencyKey: 'canceled-guest', guestName: 'Avery',
+    };
+    const first = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access), body: JSON.stringify(payload),
+    }, testEnv);
+    const reserved = (await first.json<any>()).data.media;
+    const canceled = await createApp().request(
+      `/api/event/${access.event.slug}/uploads/${reserved.id}`,
+      { method: 'DELETE', headers: writeHeaders(access), body: '{}' },
+      testEnv,
+    );
+    const replay = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access), body: JSON.stringify(payload),
+    }, testEnv);
+
+    expect(canceled.status).toBe(200);
+    expect(replay.status).toBe(409);
+    expect(await replay.json<any>()).toMatchObject({
+      code: 'UPLOAD_FINALIZE_CONFLICT',
+      message: 'This photo was removed. Choose it again.',
+    });
+    expect(await new MediaRepository(testEnv.DB).getById(reserved.id))
+      .toMatchObject({ uploadState: 'deleted' });
+  });
+
   it('reopens an expired batch reservation with the same media id and finalizes the retry', async () => {
     const access = await guestAccess();
     const payload = {

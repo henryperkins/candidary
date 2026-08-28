@@ -1,6 +1,6 @@
 # Host Gallery Pause Scope and First Run Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use test-driven development, preserve all existing Slice 1–4 work, and do not commit unless the user asks.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use strict focused RED, minimal implementation, focused GREEN, then a fresh implementer handoff and independent review for every task. Do not commit this task or checkpoint: all five Slice 5 plans receive exactly one final commit only after every task and final Slice review gate passes.
 
 **Goal:** Make Pause mean one thing on every guest surface, finish the safety ladder by naming its last rung after what it actually pauses, make an empty Intake say what is actually true, and close the deterministic-polish findings that make the Manager read like two products.
 
@@ -13,18 +13,21 @@
 ## Global constraints and preflight rulings
 
 - Work only in `/home/henry/candidary/.worktrees/gallery-roadmap-remediation` on branch `codex/gallery-roadmap-remediation`. Do not push, deploy, merge, migrate a remote database, mutate a pull request, or change secrets.
+- Preserve unrelated and untracked files plus all authored/custom content. Keep Slice 6 findings C-34, C-38, and C-62 out of scope.
+- Every task is independently testable and receives a fresh implementer handoff plus an independent task review. Record focused RED/GREEN evidence; resolve every P1/P2 before advancing.
+- Do not run repository-wide verification, full builds, full lint/typecheck, full E2E, `npm test`, or `ci:migrations`. Use only named test files/spec filters, changed-file lint where applicable, the matrix parser, and `git diff --check`.
+- Do not make task-level or checkpoint commits. The release owner creates exactly one final Slice 5 commit only after all five plans, focused gates, and final independent Slice review are complete.
 - **Depends on** `2026-08-27-host-gallery-account-lifecycle-and-rotation.md` for the safety ladder's nine asserted rungs and its typed and focused confirmation components. This checkpoint adds the tenth rung and closes C-16; it does not rebuild the ladder or restate the other nine contracts.
-- **Depends on** `2026-08-27-host-gallery-manager-upload-authority.md` for the server-side pause split, and on `2026-08-27-host-gallery-manager-upload-dialog.md` for two things: the Intake **Add photos** trigger that the true-empty secondary action reuses, and the same-origin credential-header helper that checkpoint extracts from `src/app/api.ts`, which Task 6's XHR raw upload reuses rather than re-deriving.
+- **Depends on** `2026-08-27-host-gallery-manager-upload-authority.md` for the server-side pause split, and on `2026-08-27-host-gallery-manager-upload-dialog.md` for two things: the Intake **Add photos** trigger that the true-empty secondary action reuses, and the same-origin credential-header helper that checkpoint extracts from `src/app/api.ts`, which Task 7's XHR raw upload reuses rather than re-deriving.
 - No migration, no new Worker route, and no new client route belong to this checkpoint.
-- **Formatter scope ruling.** C-61 and the slice spec name exactly four surfaces: Intake schedule, Manager header and retention, the upload flow, and Host Events. Convert those and no others. `src/features/gallery/gallery-timeline.ts` keeps its own tested moment formatter, and `src/components/EventAppearanceCanvas.tsx` and `src/components/GuestEventHero.tsx` render artwork and guest hero copy that Slice 5 does not own. Record this ruling in the checkpoint report; do not opportunistically convert them.
-- `src/components/HostAuthNav.tsx` currently formats an expiry with a hard-coded `timeZone: 'UTC'`. That is a defect this checkpoint fixes, not a convention to preserve.
+- **Formatter scope ruling.** C-61 names exactly four surfaces: Intake schedule, Manager header/retention, the upload flow, and Host Events. Convert those and no others. C-56 separately changes only the same-minute range logic in `src/features/gallery/gallery-timeline.ts`; it is not part of the C-61 audit. `src/components/EventAppearanceCanvas.tsx` and `src/components/GuestEventHero.tsx` remain out of scope. Record this ruling in the checkpoint report.
 - Equal upload-time endpoints already collapse inside `formatEventTimeRange`. Route the affected callers through it rather than adding a second equality check at a call site.
 - Paused copy names only new uploads. It may never imply the event or any other guest surface is offline.
 - The main guest page and the fullscreen route must use the **same** availability rules and the same projection. Do not add a fullscreen-specific rule.
 - **Fullscreen-scope ruling.** "Same projection" is about the Gallery, not about the page. The specification lists what an event guest retains while paused — the event shell and receipt, My deliveries, Guestbook, the Guest gallery when its own setting is on, and "fullscreen Gallery **through the same projection**" — and then says the two routes "use the same availability rules." It does not say the fullscreen route renders the main page's panels, and it never has: `/event/:slug/fullscreen` deliberately renders a screen-reader `h1`, a compact bar with the close control, and the gallery grid, and nothing else. That is the whole point of the route. Requiring Guestbook and My deliveries there would not close C-08; it would replace a deliberate design with a duplicated page, and the test asserting it would be asserting the wrong thing. Parity is asserted where it exists: **which photos the Gallery shows, and whether it is available at all**, must be identical on both routes for every cell of the matrix. The main route additionally keeps its secondary panels. Record this ruling in the checkpoint report.
 - Guest gallery availability remains an independent setting. Pause must not switch it, and Settings remains its sole owner.
-- Every behavior change follows RED → GREEN → REFACTOR.
-- Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-pause-scope-and-first-run/`, then take an independent spec and code review. Fix every P1/P2 before advancing.
+- Every behavior change follows RED → minimal GREEN → scoped refactor.
+- Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-pause-scope-and-first-run/`; the task review checkpoint records the fresh implementer and independent reviewer outcome without committing.
 
 ## Checkpoint boundary
 
@@ -37,32 +40,65 @@ C-16 arrives here by the account checkpoint's ladder-ownership ruling. That chec
 ### Task 1: Pause is guest uploads, on every guest surface
 
 **Files:**
+- Modify: `shared/contracts.ts`
 - Modify: `worker/routes/event.ts`
-- Modify: `shared/rsvp.ts` *(only if `resolveGuestEventPhase` conflates the two)*
+- Modify: `worker/http/event-view.ts`
+- Modify: `worker/routes/gallery.ts`
+- Modify: `worker/routes/messages.ts`
+- Modify: `shared/rsvp.ts`
 - Modify: `src/pages/EventPage.tsx`
 - Modify: `tests/worker/photo-intake-api.test.ts`
 - Modify: `tests/worker/core-journey.test.ts`
+- Modify: `tests/worker/messages-api.test.ts`
+- Modify: `tests/worker/event-theme-api.test.ts`
 - Modify: `tests/ui/app.test.tsx`
+- Modify: `tests/ui/guest-before-start.test.tsx`
+- Modify: `tests/ui/guest-rsvp-flow.test.tsx`
+- Modify: `tests/ui/guestbook.test.tsx`
+- Modify: `tests/ui/event-theme-rendering.test.tsx`
 - Modify: `tests/e2e/core-journey.spec.ts`
+- Modify: `tests/e2e/guest-lifecycle.spec.ts`
+- Modify: `tests/e2e/fixtures/routes.ts`
+- Modify: `tests/e2e/event-cover-studio.spec.ts`
 
 **Interfaces:**
-- No contract change. While guest uploads are paused, an authenticated event guest retains read access to the event shell and its existing delivery receipt, My deliveries, Guestbook content allowed by its own moderation state, the Guest gallery when its independent setting is on, and the fullscreen Gallery through the same projection.
-- The guest upload composer, and only the composer, is withheld.
+- `GuestEventView.phase` remains the primary RSVP/before-start/photo/waiting projection. Add a separate server-owned projection:
+
+```ts
+export type GuestReadSurfaces =
+  | { available: true; reason: null }
+  | { available: false; reason: 'before-photo-open' };
+
+export interface GuestPhaseView {
+  // existing phase/rsvp fields
+  guestReadSurfaces: GuestReadSurfaces;
+}
+```
+
+`resolveGuestEventPhase` computes both facts from one `now`. Scheduled events set `guestReadSurfaces.available` only once `resolveScheduledOpen(input) <= now`, regardless of `uploadsEnabled`; pause can withhold the composer but cannot expose read surfaces early. Legacy events preserve RSVP-first: `rsvp-primary` is unavailable, then `waiting`/`photos-primary` are available even when paused.
+
+Update the exact `GUEST_EVENT_VIEW_KEYS`, central typed E2E fixture, and every direct typed `GuestEventView` fixture listed in this task. The Manager-only `EventView` remains unchanged by this task.
+
+- `worker/routes/gallery.ts` applies `guestReadSurfaces` to both the Guest gallery handler and direct My Deliveries `GET /event/:slug/contributions`; Guestbook GET/POST in `worker/routes/messages.ts`, the main page, and fullscreen consume the same fact. A direct pre-boundary probe of Gallery, Guestbook, or My Deliveries returns `EVENT_PHASE_CONFLICT` with the exact shared message **Shared photos and Guestbook become available when photo sharing opens.** Guest gallery's independent setting still applies after the read-surface gate; My Deliveries has no separate visibility setting.
 
 - [ ] **Step 1: Write the failing guest-surface matrix**
 
-Build one table driven over `{ paused, guestGalleryOn, guestbookState }` and, for each cell, assert both routes against the scope the fullscreen-scope ruling fixes.
+Build the server/client lifecycle table over scheduled `{ pre-start, early-open, post-start } × { paused, unpaused }`, plus legacy `{ rsvp-primary, waiting, photos-primary }` rows. In every row assert both the primary `phase` and separate `guestReadSurfaces` object. Then cross available rows with `{ guestGalleryOn, guestbookState }` for rendering.
 
-*On the main guest page,* assert the full retained set: with `paused: true, guestGalleryOn: true` the Guest gallery, Guestbook, and My deliveries are all present, and **only** the composer is absent. Assert the absence of the composer specifically rather than the absence of an upload heading, so a panel that merely lost its title still fails.
+*On the main guest page,* assert scheduled pre-boundary rows expose none of the read surfaces even if unpaused; after the boundary, paused and unpaused rows expose Guestbook, My deliveries, and independently enabled Guest gallery while only the paused composer is absent. Legacy RSVP-first hides them, then waiting/photos retains them. Assert the composer and read surfaces separately.
 
-*On `/event/:slug/fullscreen`,* assert **Gallery projection parity** — the contract the specification actually states. For every cell: the route is reachable exactly when the Guest gallery is available on the main page and refuses exactly when it is not; the photo set it renders is identical to the main page's Guest gallery for that cell, item for item and in the same order; and pausing changes neither, because pause is not a gallery setting. Also assert what the route legitimately does not have: it renders no upload composer, and its close control still returns to the main page. Do **not** assert Guestbook or My deliveries there — they have never been on that route, and the ruling above explains why requiring them would be asserting a different product.
+*On direct read routes,* call `GET /event/:slug/contributions` as well as Gallery and Guestbook in scheduled pre-boundary paused/unpaused rows and legacy RSVP-first. Assert the same `EVENT_PHASE_CONFLICT` code and exact shared message and no contribution data. After the boundary, and in legacy waiting/photos, My Deliveries returns the existing allowlisted contribution response even while uploads are paused. This direct Worker row is mandatory; a UI-hidden panel is not server enforcement.
+
+Name the Worker matrix describe/test group `guest read surfaces`, including the direct contributions rows, so Step 2 executes every newly written server assertion before implementation.
+
+*On `/event/:slug/fullscreen`,* when read surfaces are unavailable, keep the fullscreen shell, hidden `h1`, and Close control, make **no** gallery request, and render the same shared `before-photo-open` reason. When available, request the gallery only if its independent setting permits it; available-and-empty alone renders **No shared photos yet**. Available results match the main page item-for-item and in order. Do not render Guestbook or My deliveries in fullscreen.
 
 Assert the paused copy string names new uploads and contains no phrasing that the event, gallery, or Guestbook is closed or offline.
 
 - [ ] **Step 2: Run and verify RED**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/photo-intake-api.test.ts -t 'paused guest surfaces'
+npx vitest run --config vitest.worker.config.ts tests/worker/photo-intake-api.test.ts tests/worker/core-journey.test.ts tests/worker/messages-api.test.ts tests/worker/event-theme-api.test.ts -t 'guest read surfaces'
 npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'fullscreen'
 ```
 
@@ -70,23 +106,20 @@ Expected: FAIL — pause currently removes the secondary panels on the main page
 
 - [ ] **Step 3: Implement**
 
-Make one projection serve both routes. If `resolveGuestEventPhase` conflates "photos open" with "surfaces available," separate the two there and keep `photosOpen` meaning exactly what `UploadService` already relies on. The fullscreen branch in `EventPage` reads gallery availability and the gallery list from that same projection instead of deciding for itself; its rendered structure is otherwise untouched.
+Implement `guestReadSurfaces` beside, not inside, the primary phase decision. Keep `photosOpen` and guest upload guards unchanged. Apply the same helper in the Gallery, My Deliveries `/event/:slug/contributions`, and Guestbook routes so direct calls cannot bypass the server projection. All three use the one shared conflict factory/code/message. `EventPage` renders secondary surfaces from `guestReadSurfaces`, renders the composer from primary upload state, and lets fullscreen keep its shell and reason without fetching unavailable Gallery data.
 
 **Do not add panels to the fullscreen route.** If a change to it grows past the availability check and the gallery list, the fullscreen-scope ruling has been misread.
 
 - [ ] **Step 4: Verify GREEN**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/photo-intake-api.test.ts tests/worker/core-journey.test.ts
-npx vitest run --config vitest.config.ts tests/ui/app.test.tsx
+npx vitest run --config vitest.worker.config.ts tests/worker/photo-intake-api.test.ts tests/worker/core-journey.test.ts tests/worker/messages-api.test.ts tests/worker/event-theme-api.test.ts
+npx vitest run --config vitest.config.ts tests/ui/app.test.tsx tests/ui/guest-before-start.test.tsx tests/ui/guest-rsvp-flow.test.tsx tests/ui/guestbook.test.tsx tests/ui/event-theme-rendering.test.tsx
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add worker/routes/event.ts shared/rsvp.ts src/pages/EventPage.tsx tests/worker/photo-intake-api.test.ts tests/worker/core-journey.test.ts tests/ui/app.test.tsx tests/e2e/core-journey.spec.ts
-git commit -m "fix: pause only guest uploads"
-```
+Record the lifecycle matrix, route enforcement, exact-key fixtures, main/fullscreen parity, no-request, and legacy evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
@@ -128,21 +161,16 @@ npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'safety ladder
 npx vitest run --config vitest.config.ts tests/ui/manager-photo-intake.test.tsx tests/ui/app.test.tsx
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add src/components/ManagerPhotoIntakePanel.tsx tests/ui/manager-photo-intake.test.tsx tests/ui/app.test.tsx tests/e2e/accessibility.spec.ts
-git commit -m "fix: name the pause control after its scope"
-```
+Record exact copy, reversible rung, request timing, and responsive control evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
 ### Task 3: True empty versus no results
 
 **Files:**
-- Modify: `src/features/gallery/ManagerPrivateGallery.tsx`
 - Modify: `src/pages/ManagerPage.tsx`
-- Modify: `tests/ui/host-private-gallery.test.tsx`
 - Modify: `tests/ui/app.test.tsx`
 
 **Interfaces:**
@@ -152,51 +180,85 @@ git commit -m "fix: name the pause control after its scope"
 
   Its primary action opens the existing Share and print surface. Host upload is the **secondary** action and invokes the same control path as the toolbar's **Add photos**.
 - A filtered empty result keeps **No matching photos** and its **Clear filters** action.
+- C-50 is fixed only in `ManagerPage.renderMediaGrid`. True empty means `media.length === 0`, `status === 'all'`, and no `guestFilter`; any contributor or publication filter produces filtered empty. `ManagerPrivateGallery`/Library behavior is unchanged.
 
 - [ ] **Step 1: Write the failing empty-state tests**
 
 - zero media and no filter → **No photos yet**, the QR, the promise, a primary Share action, and a secondary host-upload action;
-- zero results with a contributor filter, a publication filter, or a search term → **No matching photos** with **Clear filters**;
+- zero results with a contributor filter or publication filter → **No matching photos** with **Clear filters** that clears the active filter and reloads Intake;
 - the secondary action opens the same dialog the toolbar opens, and returns focus to whichever control invoked it;
 - **Recently deleted** with nothing in it keeps its own existing empty state and is unaffected.
 
 - [ ] **Step 2: Run and verify RED**
 
 ```bash
-npx vitest run --config vitest.config.ts tests/ui/host-private-gallery.test.tsx -t 'No photos yet'
+npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'Intake true empty'
 ```
 
 - [ ] **Step 3: Implement and verify GREEN**
 
 ```bash
-npx vitest run --config vitest.config.ts tests/ui/host-private-gallery.test.tsx tests/ui/app.test.tsx
+npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'Intake (true empty|filtered empty)'
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Task review checkpoint**
 
-```bash
-git add src/features/gallery/ManagerPrivateGallery.tsx src/pages/ManagerPage.tsx tests/ui/host-private-gallery.test.tsx tests/ui/app.test.tsx
-git commit -m "fix: split true-empty intake from no results"
-```
+Record `ManagerPage.renderMediaGrid` true/filtered empty and shared Add-photos path evidence, plus confirmation that Library files are unchanged. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
-### Task 4: One event-zone formatter
+### Task 4: C-56 same-minute Gallery moment heading
+
+**Files:**
+- Modify: `src/features/gallery/gallery-timeline.ts`
+- Modify: `tests/unit/gallery-timeline.test.ts`
+
+**Interfaces:**
+- `formatMomentHeading(moment, timeZone)` remains the scoped Gallery moment formatter. For a multi-photo same-day group, if formatted `startTime === endTime`, it renders that time once; a genuinely different formatted pair still uses `timeRange`. This task does not import or alter the C-61 formatter.
+
+- [ ] **Step 1: Write the focused failing regression**
+
+Create a two-photo group whose instants differ by seconds but format to the same minute in the event zone. Assert one time string, not `X–X`. Keep the existing one-photo, different-minute, different-meridiem, and cross-midnight expectations unchanged.
+
+- [ ] **Step 2: Verify RED**
+
+```bash
+npx vitest run --config vitest.config.ts tests/unit/gallery-timeline.test.ts -t 'collapses a multi-photo same-minute range'
+```
+
+Expected: FAIL because `timeRange(startTime, endTime)` currently duplicates equal formatted strings for multi-photo groups.
+
+- [ ] **Step 3: Implement minimal equality collapse and verify GREEN**
+
+In the same-day multi-photo branch, choose `startTime` when the formatted endpoints are identical; otherwise call the existing `timeRange`.
+
+```bash
+npx vitest run --config vitest.config.ts tests/unit/gallery-timeline.test.ts
+```
+
+- [ ] **Step 4: Task review checkpoint**
+
+Record RED/GREEN and obtain fresh-implementer plus independent review that C-56 stayed isolated from C-61. Resolve P1/P2; do not stage or commit.
+
+---
+
+### Task 5: One event-zone formatter on the four C-61 surfaces
 
 **Files:**
 - Modify: `src/app/event-date-time.ts`
 - Modify: `src/components/ManagerPhotoIntakePanel.tsx`
-- Modify: `src/components/HostAuthNav.tsx`
 - Modify: `src/features/uploads/GuestUploadFlow.tsx`
 - Modify: `src/pages/ManagerPage.tsx`
 - Modify: `src/pages/HostEventsPage.tsx`
 - Modify: `tests/unit/event-date-time.test.ts`
+- Create: `tests/unit/slice5-date-formatting-ast.test.ts`
 - Modify: `tests/ui/app.test.tsx`
 - Modify: `tests/ui/host-events.test.tsx` *(created by the account lifecycle checkpoint)*
 
 **Interfaces:**
 - The four named surfaces call `formatEventDate`, `formatEventDateTime`, `formatEventTimeRange`, and `formatRetentionDate` from `src/app/event-date-time.ts`. No `Intl.DateTimeFormat`, `toLocaleDateString`, `toLocaleTimeString`, or `toLocaleString` date call remains in them.
 - Equal start and end endpoints render one time, because `formatEventTimeRange` already collapses them.
+- The targeted AST test parses only the four owning surface files: `ManagerPhotoIntakePanel.tsx` (Intake schedule), `ManagerPage.tsx` (Manager header/retention), `GuestUploadFlow.tsx` (upload flow), and `HostEventsPage.tsx` (Host Events). It rejects date-valued local formatter calls there and explicitly whitelists the existing numeric count `toLocaleString` receivers (`MAX_EVENT_MEDIA`, stored/held/recoverable/export counts). No fifth file is modified or parsed by C-61. This is not a broad zero-match text assertion.
 
 - [ ] **Step 1: Write the failing zone and equality tests**
 
@@ -230,30 +292,27 @@ Tighten `validInstant` to require an explicit offset and a calendar-valid date r
 npx vitest run --config vitest.config.ts tests/unit/event-date-time.test.ts tests/ui/app.test.tsx -t 'event zone'
 ```
 
-- [ ] **Step 3: Implement, then prove the conversion is complete**
+- [ ] **Step 3: Implement, then prove the four-surface conversion with the AST audit**
 
 ```bash
-rg -n "toLocaleDateString|toLocaleTimeString|Intl\.DateTimeFormat" src/components/ManagerPhotoIntakePanel.tsx src/components/HostAuthNav.tsx src/features/uploads/GuestUploadFlow.tsx src/pages/ManagerPage.tsx src/pages/HostEventsPage.tsx
+npx vitest run --config vitest.config.ts tests/unit/slice5-date-formatting-ast.test.ts
 ```
 
-Expected: no matches. The formatter-scope ruling above explains why `gallery-timeline.ts`, `EventAppearanceCanvas.tsx`, and `GuestEventHero.tsx` still match elsewhere.
+Expected: PASS with every date-valued local call absent and every surviving numeric call matching the explicit receiver whitelist. `gallery-timeline.ts` is excluded because Task 4 owns C-56 independently.
 
 - [ ] **Step 4: Verify GREEN**
 
 ```bash
-npx vitest run --config vitest.config.ts tests/unit/event-date-time.test.ts tests/ui/app.test.tsx tests/ui/host-events.test.tsx
+npx vitest run --config vitest.config.ts tests/unit/event-date-time.test.ts tests/unit/slice5-date-formatting-ast.test.ts tests/ui/app.test.tsx tests/ui/host-events.test.tsx
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add src/app/event-date-time.ts src/components/ManagerPhotoIntakePanel.tsx src/components/HostAuthNav.tsx src/features/uploads/GuestUploadFlow.tsx src/pages/ManagerPage.tsx src/pages/HostEventsPage.tsx tests/unit/event-date-time.test.ts tests/ui/app.test.tsx tests/ui/host-events.test.tsx
-git commit -m "fix: read every host date in the event's own zone"
-```
+Record the four-surface formatter, AST whitelist, invalid-instant, DST, and equal-range evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
-### Task 5: A deterministic Guestbook default and the Album title
+### Task 6: A deterministic Guestbook default and the Album title
 
 **Files:**
 - Modify: `src/features/guestbook/manager-guestbook-state.ts`
@@ -292,16 +351,13 @@ npx vitest run --config vitest.config.ts tests/ui/manager-guestbook.test.tsx tes
 npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Task review checkpoint**
 
-```bash
-git add src/features/guestbook/manager-guestbook-state.ts worker/db/album.ts src/features/gallery/ManagerAlbum.tsx tests/ui/manager-guestbook.test.tsx tests/worker/album-api.test.ts tests/ui/album-workspace.test.tsx
-git commit -m "fix: settle the guestbook default and the album title"
-```
+Record deterministic Guestbook and authored-title-preservation evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
-### Task 6: Cover upload progress and cancel
+### Task 7: Cover upload progress and cancel
 
 **Files:**
 - Modify: `src/features/cover/cover-draft-client.ts`
@@ -313,7 +369,29 @@ git commit -m "fix: settle the guestbook default and the album title"
 **Ownership ruling.** `cover-operation-controller.ts` is **not** the owner of this work and must not be modified for it. It owns one accepted *publication receipt* — dispatch, `preparing`, `applied`, conflict, and retry — a lifecycle that begins after `POST .../cover/publications` returns `202` and has nothing to do with sending source bytes. The raw upload belongs to `use-cover-studio-session.ts`: `runDraft` there calls `transferCoverDraft` (the raw PUT) and then `inspectCoverDraft`, holds the per-attempt `generationRef` that already retires stale results, owns the preview `AbortController` map, and owns the discard reconciliation a cancel has to leave consistent. Wiring byte progress into the publication controller would put the state in a component that never sees the transfer and would need a second abort owner beside the one that already exists — the exact duplication the spec's "extend the existing controller" sentence is trying to prevent. The spec's intent is *one owner per lifecycle*; for source bytes that owner is the session hook.
 
 **Interfaces:**
-- The raw `PUT .../drafts/:id/raw` reports determinate byte progress and is cancellable. `transferCoverDraft` gains an optional progress callback and an `AbortSignal`; `CoverDraftSessionState` — today `{ status: 'idle' | 'loading' | 'ready' | 'error' }` — gains one transfer-bearing member so `CoverStudio` renders progress from the state it already consumes as `composeState`:
+- The reservation, raw transfer, and inspection accept the same per-attempt signal; the raw `PUT .../drafts/:id/raw` reports determinate byte progress:
+
+```ts
+export async function createCoverDraft(
+  options: CreateCoverDraftOptions & { signal?: AbortSignal },
+): Promise<CoverDraftReservation>;
+
+export async function transferCoverDraft(options: {
+  eventId: string;
+  draft: CoverDraftView;
+  file: File;
+  signal: AbortSignal;
+  onProgress(sentBytes: number, totalBytes: number): void;
+}): Promise<CoverDraftView>;
+
+export async function inspectCoverDraft(
+  eventId: string,
+  draft: CoverDraftView,
+  signal?: AbortSignal,
+): Promise<CoverDraftView>;
+```
+
+`CoverDraftSessionState` — today `{ status: 'idle' | 'loading' | 'ready' | 'error' }` — gains one transfer-bearing member so `CoverStudio` renders progress from the state it already consumes as `composeState`:
 
 ```ts
 export type CoverDraftSessionState =
@@ -325,7 +403,8 @@ export type CoverDraftSessionState =
 ```
 
   `transferring` is a substate of the existing `loading` phase, not a new phase beside it: every consumer that treats `loading` as "work in progress" must treat `transferring` the same way. Do not add a second controller, a second abort owner, or a second polling scheduler; reuse `runDraft`'s existing generation guard so a late progress event from a retired attempt updates nothing.
-- Cancel aborts the in-flight request through the session's existing abort ownership, restores the picker, and leaves no partially written draft the host cannot escape — it must route through the hook's `discard` path, which already serializes against `discardingRef`, rather than dropping the draft on the floor.
+- `use-cover-studio-session` owns exactly one `AbortController` per draft attempt, created before reservation and retained across raw transfer and inspection. The publication controller is unchanged and never receives this controller.
+- Cancel order is exact: retire the attempt generation; abort its controller; await the attempt promise settlement; replay only an ambiguous reservation with the same intent key; reread the authoritative draft; then enter the existing serialized discard reconciliation. Late transfer progress and late inspection results check both abort and generation and update nothing.
 
 - [ ] **Step 1: Write the failing progress and cancel tests**
 
@@ -333,33 +412,37 @@ export type CoverDraftSessionState =
 - the progress value is announced politely and does not spam the live region on every event;
 - Cancel during transfer aborts the request, returns to the picker, and issues no follow-up polling;
 - Cancel after the bytes land but before inspection completes resolves without claiming a failure the server did not report;
+- Cancel after the reservation commit but before its response is observed replays the same intent key exactly once, rereads the returned authoritative draft, then discards it; a known reservation is not replayed;
+- late transfer progress and inspection completion after cancel do not change session state, preview, focus, or publication state;
 - a network failure mid-transfer offers the existing retry path rather than a new one;
 - Cancel restores focus to the control that started the upload.
+
+Put the reservation/transfer/inspection cancellation rows in `tests/ui/cover-studio-session.test.tsx` under the exact describe name `cover draft cancel ordering`; keep visual progress/announcement rows in `tests/ui/cover-studio.test.tsx` under `cover upload progress`.
 
 - [ ] **Step 2: Run and verify RED**
 
 ```bash
-npx vitest run --config vitest.config.ts tests/ui/cover-studio.test.tsx -t 'progress'
+npx vitest run --config vitest.config.ts tests/ui/cover-studio.test.tsx -t 'cover upload progress'
+npx vitest run --config vitest.config.ts tests/ui/cover-studio-session.test.tsx -t 'cover draft cancel ordering'
 ```
+
+Expected: both commands FAIL for the intended missing behavior before `cover-draft-client.ts` or `use-cover-studio-session.ts` changes. The first lacks determinate progress; the second lacks the one-controller cancel ordering and ambiguous-reservation recovery.
 
 - [ ] **Step 3: Implement and verify GREEN**
 
-Use `XMLHttpRequest`'s `upload.onprogress` for the raw PUT, reusing the same credential-header helper the Manager upload transport extracted, so the two byte-carrying requests do not derive headers differently.
+Create the attempt controller in `runDraft` before reservation, pass its signal to all three calls through the exact interfaces above, and keep the attempt promise in the hook until settlement. Use `XMLHttpRequest`'s `upload.onprogress` for the raw PUT and the same credential-header helper the Manager upload transport extracted. Implement Cancel in the exact retire → abort → await → ambiguous replay → authoritative reread → existing discard order; do not change `cover-operation-controller.ts` or publication ownership.
 
 ```bash
 npx vitest run --config vitest.config.ts tests/ui/cover-studio.test.tsx tests/ui/cover-studio-session.test.tsx
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Task review checkpoint**
 
-```bash
-git add src/features/cover/cover-draft-client.ts src/features/cover/use-cover-studio-session.ts src/features/cover/CoverStudio.tsx tests/ui/cover-studio.test.tsx tests/ui/cover-studio-session.test.tsx
-git commit -m "feat: show cover upload progress and let it be cancelled"
-```
+Record one-attempt-controller, exact cancel ordering, ambiguous reservation, late-result, progress, and unchanged publication-owner evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
-### Task 7: Slice 5 evidence and closing gates
+### Task 8: Slice 5 evidence and closing gates
 
 **Files:**
 - Modify: `tests/e2e/accessibility.spec.ts`
@@ -377,7 +460,7 @@ Add gated Axe states for true-empty Intake, paused guest main page, paused guest
 
 **Write** C-16's row for the same reason. The account lifecycle checkpoint built the ladder and asserted nine rungs, recording that as progress prose rather than a row, because its tenth rung named copy that did not exist yet. C-16 closes here, so its single row names both halves: that checkpoint's nine-rung table and its per-rung request-timing contracts, and this checkpoint's renamed Pause / Resume controls with the tenth rung asserted against them — naming the owning test files from both.
 
-Then add C-50, C-53, C-55, C-56, C-57, C-58, and C-61. State the formatter-scope ruling in the C-61 row so a later reader does not read the surviving `Intl` call sites as an unfinished conversion, and state in the same row that `validInstant` now requires an explicit offset and a calendar-valid date, so the fail-closed promise is recorded as proved rather than assumed.
+Then add C-50, C-53, C-55, C-56, C-57, C-58, and C-61. C-50 names `ManagerPage.renderMediaGrid` and proves Library unchanged. C-56 names the independent two-photo same-minute `gallery-timeline` regression. C-61 names only its four surfaces, the targeted AST audit with numeric `toLocaleString` whitelist, and `validInstant`'s explicit-offset/calendar-valid rules; surviving out-of-scope or numeric formatter calls are not unfinished work.
 
 - [ ] **Step 3: Confirm the Slice 5 section is complete**
 
@@ -434,24 +517,21 @@ In `CLAUDE.md`, correct the pause description to guest-uploads-only, note the fu
 - [ ] **Step 5: Run the complete Slice 5 gates**
 
 ```bash
-npm run typecheck
-npm run typecheck:e2e
-npm run lint
-npm run verify:bindings
-npm test
-npm run build
-CI_BASE_SHA="$(git merge-base origin/main HEAD)" CI_HEAD_SHA="$(git rev-parse HEAD)" npm run ci:migrations
-npm run test:e2e
-git diff --check
+npx vitest run --config vitest.worker.config.ts tests/worker/migration-0021.test.ts tests/worker/manager-upload-actor.test.ts tests/worker/manager-upload-api.test.ts tests/worker/upload-api.test.ts tests/worker/photo-intake-api.test.ts tests/worker/manage-api.test.ts tests/worker/auth-api.test.ts tests/worker/repositories.test.ts tests/worker/event-theme-api.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts tests/worker/album-share-api.test.ts tests/worker/media-recovery-api.test.ts tests/worker/export-api.test.ts tests/worker/host-auth.test.ts tests/worker/host-auth-boundary.test.ts tests/worker/core-journey.test.ts tests/worker/messages-api.test.ts
+npx vitest run --config vitest.config.ts tests/unit/verify-fresh-d1.test.ts tests/unit/upload-queue.test.ts tests/unit/upload-flow-ownership.test.ts tests/unit/manager-upload-cleanup.test.ts tests/unit/browser-upload-transport.test.ts tests/unit/host-upload-availability.test.ts tests/unit/manager-event-merge.test.ts tests/unit/pending-registration.test.ts tests/unit/recovery.test.ts tests/unit/gallery-timeline.test.ts tests/unit/event-date-time.test.ts tests/unit/slice5-date-formatting-ast.test.ts
+npx vitest run --config vitest.config.ts tests/ui/manager-upload-dialog.test.tsx tests/ui/modal-surface.test.tsx tests/ui/gallery-viewer.test.tsx tests/ui/guest-upload-flow.test.tsx tests/ui/app.test.tsx tests/ui/manager-recovery.test.tsx tests/ui/album-workspace.test.tsx tests/ui/host-auth.test.tsx tests/ui/host-events.test.tsx tests/ui/copyable-link-card.test.tsx tests/ui/manager-photo-intake.test.tsx tests/ui/manager-guestbook.test.tsx tests/ui/cover-studio.test.tsx tests/ui/cover-studio-session.test.tsx
+npx vitest run --config vitest.config.ts tests/unit/event-settings-draft.test.ts tests/ui/event-settings-editor.test.tsx tests/ui/host-private-gallery.test.tsx tests/ui/manager-rsvp-panel.test.tsx tests/ui/event-appearance-editor.test.tsx
+npx playwright test tests/e2e/event-cover-studio.spec.ts --project=desktop
+npx playwright test tests/e2e/accessibility.spec.ts tests/e2e/manager-responsive.spec.ts --project=desktop -g "(Manager upload|paused guest|true-empty Intake|Cover upload|Rotate management link|Host Events|pending registration)"
+npx playwright test tests/e2e/manager-responsive.spec.ts tests/e2e/guest-responsive.spec.ts --project=mobile -g "(Manager upload cleanup retry at 320|paused guest|true-empty Intake|Cover upload)"
+npx playwright test tests/e2e/manager-navigation-intents.spec.ts tests/e2e/core-journey.spec.ts --project=desktop -g "(rotation save gate|guest read surfaces)"
+git diff --name-only --diff-filter=ACMR -- '*.ts' '*.tsx' | xargs -r npx eslint --
+git diff --check -- migrations/0021_manager_upload_and_album_era.sql shared src worker tests docs/superpowers/host-gallery-verification-matrix.md docs/operations.md docs/deployment.md docs/security.md CLAUDE.md
 ```
 
-Expected: every command exits zero. The known build chunk-size and missing-local-secret warnings may remain; no new warning is accepted.
+Expected: every focused command exits zero, followed by the Step 3 matrix parser. Do not substitute a full test, build, lint, typecheck, E2E, or migration run.
 
-- [ ] **Step 6: Commit the record**
+- [ ] **Step 6: Final Slice review and single-commit handoff**
 
-```bash
-git add tests/e2e/accessibility.spec.ts tests/e2e/guest-responsive.spec.ts docs/superpowers/host-gallery-verification-matrix.md CLAUDE.md
-git commit -m "docs: close the slice 5 verification record"
-```
-
-Do not push. Slice 6, scale and resilience, is the last slice in the program.
+Run the scoped `git diff --check`, confirm every task's fresh-implementer and independent review record is present, and obtain one final independent Slice review. Resolve every P1/P2. Keep the diff uncommitted during review; only the release owner may then stage the reviewed Slice 5 change set and create the Slice's single final commit. Do not push. Slice 6 remains separate.

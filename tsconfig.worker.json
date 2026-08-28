@@ -11,7 +11,7 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "noEmit": true,
-    "types": ["vitest/globals", "@cloudflare/vitest-pool-workers/types"]
+    "types": ["node", "vitest/globals", "@cloudflare/vitest-pool-workers/types"]
   },
   "include": ["worker", "shared", "tests/worker", "worker-configuration.d.ts", "vitest.worker.config.ts"]
 }

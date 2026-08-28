@@ -64,6 +64,7 @@ const baseGuestEvent: Omit<GuestEventView, 'theme'> = {
   rsvpState: 'disabled' as const,
   rsvpAccess: 'unavailable' as const,
   lifecycleRecheckAfterMs: null,
+  guestReadSurfaces: { available: true, reason: null } as const,
 };
 
 function json(data: unknown) {

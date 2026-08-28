@@ -6,7 +6,15 @@ import { applicationOrigins, canonicalOrigin, isApplicationOrigin, requestOrigin
 import { PREVIEW_APPLICATION_ROOT_ORIGIN } from '../../shared/origins';
 import type { AppEnv } from '../../worker/env';
 import { unsubscribeUrl } from '../../worker/services/notifications';
-import { cookiesFrom, exchangeEventEntry, origin, resetDatabase, testEnv } from './helpers';
+import {
+  cookiesFrom,
+  exchangeEventEntry,
+  hostAccess,
+  hostWriteHeaders,
+  origin,
+  resetDatabase,
+  testEnv,
+} from './helpers';
 
 // `origin` is the canonical `APP_ORIGIN`; these two come from `ALTERNATE_ORIGINS`
 // in `vitest.worker.config.ts`, so the suite runs against a deployment that
@@ -130,12 +138,6 @@ describe('links minted while answering on a second origin', () => {
     const created = await createEvent(ALTERNATE);
     const body = await created.json<any>();
     const manager = { ...cookiesFrom(created), csrf: body.data.csrfToken as string };
-    const write = {
-      'content-type': 'application/json',
-      cookie: manager.cookie,
-      origin: ALTERNATE,
-      'x-candidary-csrf': manager.csrf,
-    };
 
     const recovered = await createApp().request(
       `${ALTERNATE}/api/manage/events/${body.data.event.id}/entry`,
@@ -146,22 +148,24 @@ describe('links minted while answering on a second origin', () => {
       .toEqual({ origin: ALTERNATE, path: '/join', hasFragment: true });
 
     // Rotation is refused while an ownerless event still has a live creator
-    // recovery path, so the fixture gives it the durable owner that unblocks it.
-    await env.DB.prepare(`
-      INSERT INTO host_accounts (id, email, password_hash, created_at)
-      VALUES ('owner-origins', 'owner-origins@example.com', 'password-hash', '2026-07-28T00:00:00.000Z')
-    `).run();
+    // recovery path, so the fixture gives it an authenticated durable owner.
+    const owner = await hostAccess();
     await env.DB.prepare(`
       INSERT INTO event_hosts (event_id, account_id, role, created_at)
-      VALUES (?, 'owner-origins', 'owner', '2026-07-28T00:00:00.000Z')
-    `).bind(body.data.event.id).run();
+      VALUES (?, ?, 'owner', '2026-07-28T00:00:00.000Z')
+    `).bind(body.data.event.id, owner.account.id).run();
+    const write = { ...hostWriteHeaders(owner), origin: ALTERNATE };
 
     // The management link is followed by a full-page navigation the moment it
     // comes back, so an origin that disagreed with the page would move the host
     // to the other domain mid-session.
     const rotated = await createApp().request(
       `${ALTERNATE}/api/manage/events/${body.data.event.id}/links/manager/rotate`,
-      { method: 'POST', headers: write, body: '{}' },
+      {
+        method: 'POST',
+        headers: write,
+        body: JSON.stringify({ expectedManagerLinkRevision: 0 }),
+      },
       testEnv,
     );
     expect(linkParts((await rotated.json<any>()).data.managementLink).origin).toBe(ALTERNATE);

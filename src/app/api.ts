@@ -30,7 +30,7 @@ function cookieValue(name: string): string | undefined {
   return document.cookie.split('; ').find((part) => part.startsWith(`${name}=`))?.split('=')[1];
 }
 
-function attachCredentials(headers: Headers, method: string): Headers {
+export function attachCredentials(headers: Headers, method: string): Headers {
   if (['GET', 'HEAD'].includes(method)) return headers;
   // A browser can hold an event session and an account session at once, and the
   // route decides which one authorizes it. Both tokens are offered; the server

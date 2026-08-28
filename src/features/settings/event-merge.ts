@@ -42,6 +42,9 @@ const THEME_OWNED = ['theme'] as const satisfies readonly (keyof EventView)[];
 // The nested cover projection has one response owner. Copying the whole value
 // keeps its semantic config, revision, capability, and preparation coherent.
 const COVER_OWNED = ['cover'] as const satisfies readonly (keyof EventView)[];
+const SERVER_PROJECTION_OWNED = [
+  'hostUploadAvailability',
+] as const satisfies readonly (keyof EventView)[];
 
 function mergeOwned(
   current: EventView,
@@ -49,7 +52,7 @@ function mergeOwned(
   owned: readonly (keyof EventView)[],
 ): EventView {
   const merged = { ...current };
-  for (const key of owned) {
+  for (const key of [...SERVER_PROJECTION_OWNED, ...owned]) {
     // One assignment per key rather than a spread, so nothing outside the
     // owned list can travel with it.
     (merged as Record<string, unknown>)[key] = response[key];

@@ -58,6 +58,7 @@ import {
   toEntryInput,
   type AlbumInversePayload,
   type AlbumInverseState,
+  type AlbumStartRequest,
 } from './album-api';
 import { AlbumPreview } from './AlbumPreview';
 import { AlbumExportControl } from './AlbumExportControl';
@@ -81,6 +82,8 @@ import {
 
 interface ManagerAlbumProps {
   eventId: string;
+  /** The authored event name is the first-run title and the empty-title hint. */
+  eventName: string;
   active: boolean;
   /**
    * The event's IANA zone. A recovery deadline read in the browser's zone is a
@@ -615,17 +618,20 @@ function livePhotoIds(entries: readonly AlbumEntryView[]): Set<string> {
  * The timeline order, with retained slots kept.
  *
  * Only Start empty clears picks and markers. Reset to timeline order is an ordinary
- * edit, so it sorts the photographs it can date and keeps the opaque slots — which
- * carry no timeline of their own — after them rather than dropping them.
+ * edit, so it sorts visible and retained photo slots together by the ordering-only
+ * timeline fact the Manager projection carries for both.
  */
 function timelineOrderedEntries(entries: readonly AlbumEntryView[]): AlbumEntryView[] {
-  const photos = entries
-    .filter(isPhotoEntry)
-    .sort((left, right) => (
-      left.photo.timelineAt.localeCompare(right.photo.timelineAt)
-      || left.photo.id.localeCompare(right.photo.id)
-    ));
-  return [...photos, ...entries.filter(isRetainedEntry)];
+  const slots = entries.filter(
+    (entry): entry is AlbumPhotoEntry | AlbumRetainedEntry => entry.kind !== 'section',
+  );
+  return slots.sort((left, right) => {
+    const leftTimeline = isPhotoEntry(left) ? left.photo.timelineAt : left.slot.timelineAt;
+    const rightTimeline = isPhotoEntry(right) ? right.photo.timelineAt : right.slot.timelineAt;
+    const leftId = isPhotoEntry(left) ? left.photo.id : left.slot.mediaId;
+    const rightId = isPhotoEntry(right) ? right.photo.id : right.slot.mediaId;
+    return leftTimeline.localeCompare(rightTimeline) || leftId.localeCompare(rightId);
+  });
 }
 
 function normalizeDraftCover(draft: AlbumDraft): AlbumDraft {
@@ -841,6 +847,7 @@ function mergeCanonicalMembership(current: AlbumDraft, canonical: AlbumView): Al
  */
 export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(function ManagerAlbum({
   eventId,
+  eventName,
   active,
   eventTimezone,
   onGoToLibrary,
@@ -861,7 +868,10 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   onAnchorReady,
 }, ref) {
   const [album, setAlbum] = useState<AlbumView | null>(null);
-  const [draft, setDraft] = useState<AlbumDraft>(INITIAL_DRAFT);
+  const [draft, setDraft] = useState<AlbumDraft>(() => ({
+    ...INITIAL_DRAFT,
+    title: eventName,
+  }));
   const [autosave, setAutosave] = useState<AutosaveState>({ status: 'saved', failure: null });
   const [loading, setLoading] = useState(true);
   const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
@@ -898,7 +908,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const listRef = useRef<HTMLOListElement>(null);
   const lastFocusedEntryKey = useRef<string | null>(null);
   const selectSectionKey = useRef<string | null>(null);
-  const draftRef = useRef<AlbumDraft>(INITIAL_DRAFT);
+  const draftRef = useRef<AlbumDraft>({ ...INITIAL_DRAFT, title: eventName });
   const revisionRef = useRef(0);
   const loadGeneration = useRef(0);
   const loadFailureRef = useRef<LoadFailure | null>(null);
@@ -921,6 +931,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const currentShare = useRef<AlbumShareStatus>(null);
   const createShareOpen = useRef(false);
   const draftGeneration = useRef(0);
+  const autoStartAttemptedEvent = useRef<string | null>(null);
   const canonicalTrusted = useRef(true);
   const reconciliationFailureRef = useRef<LoadFailure | null>(null);
   const pendingOperations = useRef(new Set<Promise<unknown>>());
@@ -1275,7 +1286,14 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
         }
       },
     );
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // The workspace keys Album by event and Manager mutation generation. Retire
+      // both local generations too, so an endpoint that ignores AbortSignal still
+      // cannot adopt or announce a response after that owner has gone away.
+      loadGeneration.current += 1;
+      draftGeneration.current += 1;
+    };
   }, [active, adoptShare, eventId, loadCanonical]);
 
   useEffect(() => {
@@ -1798,7 +1816,6 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     const before = draftRef.current;
     const entries = timelineOrderedEntries(before.entries);
     const liveIds = livePhotoIds(entries);
-    const retained = entries.filter(isRetainedEntry).length;
     const next = {
       ...before,
       entries,
@@ -1810,9 +1827,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     const fallback = fallbackForEntryKey(entries[0] ? entryKey(entries[0]) : null)
       ?? leaveHeadingRef.current;
     focusUndoFallback(fallback);
-    const message = retained > 0
-      ? `Album order reset to the timeline. Sections were removed, and ${retained} recently deleted photo${retained === 1 ? '' : 's'} moved to the end.`
-      : 'Album order reset to the timeline. Sections were removed.';
+    const message = 'Album order reset to the timeline. Sections were removed.';
     applyDraft(next, true, [{ kind: 'reset-entries' }], {
       inverse: {
         kind: 'order',
@@ -1959,14 +1974,41 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     }
   }
 
-  async function choose(start: 'from-picks' | 'empty', clickDetail: number) {
-    if (starting || !undo.canPresent) return;
+  async function choose(
+    start: 'from-picks' | 'empty',
+    clickDetail: number,
+    observedAlbum: AlbumView | null = canonicalAlbumRef.current,
+    automatic = false,
+  ) {
+    const expectedReconciliation = observedAlbum?.reconciliation;
+    if (
+      starting
+      || !undo.canPresent
+      || !observedAlbum
+      || !expectedReconciliation
+      || (start === 'from-picks' && expectedReconciliation.kind === 'over-capacity')
+      || (automatic && autoStartAttemptedEvent.current === eventId)
+    ) return;
+    const startGeneration = draftGeneration.current;
+    const request: AlbumStartRequest = {
+      start,
+      expectedReconciliation: expectedReconciliation.kind,
+      expectedPickGeneration: observedAlbum.pickGeneration,
+      expectedRevision: observedAlbum.revision,
+    };
+    let settledCurrentGeneration = false;
     const before = draftRef.current;
     const capturedBefore = captureAlbumDraft(before);
     undo.dismiss();
     setStarting(true);
     try {
-      const result = await startAlbum(eventId, start);
+      // Consume the StrictMode/event latch only after every shared owner permits
+      // this exact observation to dispatch. A running Manager Undo can then settle
+      // and let the still-current initialize projection make its one attempt.
+      if (automatic) autoStartAttemptedEvent.current = eventId;
+      const result = await startAlbum(eventId, request);
+      if (startGeneration !== draftGeneration.current) return;
+      settledCurrentGeneration = true;
       if (!result.started) {
         adoptCanonical(result.album, true);
         audienceChangedRef.current?.();
@@ -2032,11 +2074,32 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       audienceChangedRef.current?.();
       onPicksChanged();
     } catch (caught) {
+      if (startGeneration !== draftGeneration.current) return;
+      settledCurrentGeneration = true;
+      if (caught instanceof ClientApiError && caught.code === 'REVISION_CONFLICT') {
+        conflictEpoch.current += 1;
+        canonicalTrusted.current = false;
+        setNotice(caught.message);
+        try {
+          await loadCanonical();
+        } catch {
+          // The canonical loader owns classification and recovery. In particular,
+          // do not turn a conflict into an automatic second Start attempt.
+        }
+        return;
+      }
       setNotice(errorMessage(caught, 'The Album could not be started.'));
     } finally {
-      setStarting(false);
+      if (settledCurrentGeneration) setStarting(false);
     }
   }
+
+  useEffect(() => {
+    if (!active || album?.reconciliation?.kind !== 'initialize') return;
+    if (!undo.canPresent) return;
+    if (autoStartAttemptedEvent.current === eventId) return;
+    void trackOperation(() => choose('from-picks', 0, album, true));
+  }, [active, album, eventId, undo.canPresent]);
 
   async function togglePreview() {
     if ((await settleDraft()).status !== 'ready') return;
@@ -2193,7 +2256,14 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     : null;
   const effectiveCover = explicitCover ?? photos[0]?.photo ?? null;
   const effectiveCoverId = effectiveCover?.id ?? null;
-  const needsReconciliation = album !== null && !album.saved && (photoCount + retainedCount) > 0;
+  const reconciliation = album?.reconciliation ?? null;
+  const initializeRecoveryAvailable = reconciliation?.kind === 'initialize'
+    && autoStartAttemptedEvent.current === eventId
+    && !starting;
+  const currentPickCount = photoCount + retainedCount;
+  const overCapacityReason = reconciliation?.kind === 'over-capacity'
+    ? `Start from picks is unavailable because ${reconciliation.pickCount} picks exceed the ${ALBUM_MAX_ENTRIES}-entry Album limit.`
+    : null;
   const invalidTitle = titleIsInvalid(draft);
   const visibleAutosave = effectiveAlbumAutosaveState(
     autosave,
@@ -2225,37 +2295,87 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       </div>
     </div>}
 
-    {needsReconciliation
+    {reconciliation?.kind === 'initialize'
       ? <>
           <p className="album-not-started">Not started yet</p>
           <section className="album-reconcile" aria-labelledby="album-reconcile-title">
-            <p className="section-label">Earlier Album picks</p>
-            <h3 id="album-reconcile-title">
-              {photoCount + retainedCount} photo{photoCount + retainedCount === 1 ? ' was' : 's were'} picked before this Album existed.
-            </h3>
-            <p>
-              These Album picks carry forward, so this Album can start from them —
-              in the order the photos arrived, with the first as the cover. Nothing is published
-              either way, and you can add or remove photos afterwards.
-            </p>
-            <div className="album-reconcile__actions">
-              <button
-                type="button"
-                className="button button--primary"
-                disabled={starting || !undo.canPresent}
-                onClick={(click) => { void trackOperation(() => choose('from-picks', click.detail)); }}
-              >Start the Album from {photoCount + retainedCount === 1 ? 'it' : 'them'}</button>
-              <button
-                type="button"
-                className="button button--secondary"
-                disabled={starting || !undo.canPresent}
-                onClick={(click) => { void trackOperation(() => choose('empty', click.detail)); }}
-              >Start empty</button>
-            </div>
-            <small>Starting empty clears those Album picks. It never deletes a delivered photo.</small>
+            <p className="section-label">Preparing Album</p>
+            <h3 id="album-reconcile-title">Starting your Album</h3>
+            {initializeRecoveryAvailable
+              ? <>
+                  <p>The Album still needs to be started from the current picks.</p>
+                  <button
+                    type="button"
+                    className="button button--primary"
+                    disabled={!undo.canPresent}
+                    onClick={(click) => {
+                      void trackOperation(() => choose('from-picks', click.detail, album));
+                    }}
+                  >Try starting from current picks</button>
+                </>
+              : <p role="status" aria-label="Starting the Album from current picks…">
+                  Starting the Album from current picks…
+                </p>}
           </section>
         </>
-      : <>
+      : reconciliation?.kind === 'historical'
+        ? <>
+            <p className="album-not-started">Not started yet</p>
+            <section className="album-reconcile" aria-labelledby="album-reconcile-title">
+              <p className="section-label">Earlier Album picks</p>
+              <h3 id="album-reconcile-title">
+                {reconciliation.historicalPickCount} existing pick{reconciliation.historicalPickCount === 1 ? '' : 's'} from before this update.
+              </h3>
+              <p>
+                This choice applies to every Album pick that exists now. Start from them to keep
+                their timeline order and use the first visible photo as the cover. Nothing is
+                published either way, and you can add or remove photos afterwards.
+              </p>
+              <div className="album-reconcile__actions">
+                <button
+                  type="button"
+                  className="button button--primary"
+                  disabled={starting || !undo.canPresent}
+                  onClick={(click) => { void trackOperation(() => choose('from-picks', click.detail)); }}
+                >Start the Album from {currentPickCount === 1 ? 'it' : 'them'}</button>
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  disabled={starting || !undo.canPresent}
+                  onClick={(click) => { void trackOperation(() => choose('empty', click.detail)); }}
+                >Start empty</button>
+              </div>
+              <small>Starting empty clears those Album picks. It never deletes a delivered photo.</small>
+            </section>
+          </>
+        : reconciliation?.kind === 'over-capacity'
+          ? <>
+              <p className="album-not-started">Not started yet</p>
+              <section className="album-reconcile" aria-labelledby="album-reconcile-title">
+                <p className="section-label">Album capacity</p>
+                <h3 id="album-reconcile-title">
+                  {reconciliation.pickCount} existing picks cannot fit in this Album.
+                </h3>
+                <p id="album-reconcile-capacity-reason">{overCapacityReason}</p>
+                <div className="album-reconcile__actions">
+                  <button
+                    type="button"
+                    className="button button--primary"
+                    aria-disabled="true"
+                    aria-describedby="album-reconcile-capacity-reason"
+                    onClick={(click) => click.preventDefault()}
+                  >Start the Album from {reconciliation.pickCount === 1 ? 'it' : 'them'}</button>
+                  <button
+                    type="button"
+                    className="button button--secondary"
+                    disabled={starting || !undo.canPresent}
+                    onClick={(click) => { void trackOperation(() => choose('empty', click.detail)); }}
+                  >Start empty</button>
+                </div>
+                <small>Starting empty clears those Album picks. It never deletes a delivered photo.</small>
+              </section>
+            </>
+          : <>
           <div className="album-autosave-row">
             <AutosaveStatus
               label="Album"
@@ -2330,6 +2450,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                       id="album-title"
                       ref={titleRef}
                       value={draft.title}
+                      placeholder={eventName}
                       aria-invalid={invalidTitle}
                       aria-describedby={invalidTitle ? 'album-title-error' : undefined}
                       onChange={(change) => {

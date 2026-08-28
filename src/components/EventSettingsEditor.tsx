@@ -179,9 +179,12 @@ export function EventSettingsEditor({
   const stateRef = useRef(state);
   const queueRef = useRef<SettingsQueueOwner | null>(null);
   const queueGenerationRef = useRef(0);
+  const saveGenerationRef = useRef(0);
+  const queuePausedRef = useRef(false);
   const sendSettingsRef = useRef<((
     save: EventSettingsSave,
-    generation: number,
+    queueGeneration: number,
+    saveGeneration: number,
   ) => Promise<AutosaveOutcome>) | null>(null);
   const describeFailureRef = useRef<((error: unknown) => AutosaveFailure) | null>(null);
   // The queue is built once, so anything it closes over has to be read through
@@ -209,8 +212,10 @@ export function EventSettingsEditor({
     return eventSettingsKey({ ...payload, rsvpRosterVersion: 0 });
   }
 
-  function ownsQueueGeneration(generation: number): boolean {
-    return queueRef.current?.generation === generation;
+  function ownsSaveGeneration(queueGeneration: number, saveGeneration: number): boolean {
+    return queueRef.current?.generation === queueGeneration
+      && saveGenerationRef.current === saveGeneration
+      && !queuePausedRef.current;
   }
 
   function currentQueue(): AutosaveQueue<EventSettingsSave> | null {
@@ -219,7 +224,8 @@ export function EventSettingsEditor({
 
   async function sendSettings(
     save: EventSettingsSave,
-    generation: number,
+    queueGeneration: number,
+    saveGeneration: number,
   ): Promise<AutosaveOutcome> {
     const { payload } = save;
     const scheduleChanged = scheduleKey(payload) !== confirmedScheduleKeyRef.current;
@@ -232,7 +238,7 @@ export function EventSettingsEditor({
         draftFromEvent(result.event),
         result.event.rsvpRosterVersion,
       ));
-      if (!ownsQueueGeneration(generation)) {
+      if (!ownsSaveGeneration(queueGeneration, saveGeneration)) {
         return { status: 'confirmed', key: confirmedKey };
       }
       raceRef.current = null;
@@ -246,7 +252,7 @@ export function EventSettingsEditor({
         key: confirmedKey,
       };
     } catch (caught) {
-      if (!ownsQueueGeneration(generation)) throw caught;
+      if (!ownsSaveGeneration(queueGeneration, saveGeneration)) throw caught;
       if (!(caught instanceof ClientApiError) || caught.code !== 'RSVP_ROSTER_INVALID') throw caught;
       // One read decides which kind of refusal this is. A version that moved is
       // a race worth rebasing; the same version is a roster that cannot open at
@@ -256,7 +262,7 @@ export function EventSettingsEditor({
       ));
       // A retired queue must settle terminally. Returning `rebased` here would
       // put its already-disposed state back into a perpetual saving phase.
-      if (!ownsQueueGeneration(generation)) throw caught;
+      if (!ownsSaveGeneration(queueGeneration, saveGeneration)) throw caught;
       confirmedScheduleKeyRef.current = scheduleKey(draftFromEvent(refreshed.event));
       savedRef.current(refreshed.event, { scheduleChanged: false });
       if (refreshed.event.rsvpRosterVersion === payload.rsvpRosterVersion) throw caught;
@@ -321,7 +327,7 @@ export function EventSettingsEditor({
       save: (snapshot) => {
         const send = sendSettingsRef.current;
         if (!send) return Promise.reject(new Error('The settings save owner is unavailable.'));
-        return send(snapshot, generation);
+        return send(snapshot, generation, saveGenerationRef.current);
       },
       describeFailure: (error) => describeFailureRef.current?.(error) ?? {
         message: 'These settings could not be saved.',
@@ -437,7 +443,20 @@ export function EventSettingsEditor({
     });
   }, [autosave, blockingField?.label, blockingField?.message, onAutosaveStateChange]);
 
-  useImperativeHandle(ref, () => ({ flush: () => { queueRef.current?.queue.flush(); } }), []);
+  useImperativeHandle(ref, () => ({
+    flush: () => { queueRef.current?.queue.flush(); },
+    pause: () => {
+      if (queuePausedRef.current) return;
+      queuePausedRef.current = true;
+      saveGenerationRef.current += 1;
+      queueRef.current?.queue.pause();
+    },
+    resume: () => {
+      if (!queuePausedRef.current) return;
+      queuePausedRef.current = false;
+      queueRef.current?.queue.resume();
+    },
+  }), []);
 
   useLayoutEffect(() => {
     if (

@@ -93,6 +93,8 @@ export interface ManagerGalleryWorkspaceProps {
   onModeChange(mode: GalleryMode): void;
   /** Manager-owned generation for every Gallery data owner after a mutation. */
   galleryMutationEpoch: number;
+  /** Manager upload successes not yet observed by this mounted Library owner. */
+  libraryInvalidationVersion?: number;
   /** The sole cross-resource mutation invalidator retained by inverse commands. */
   invalidateGalleryAfterMutation(): void;
   audience: GalleryAudienceAuthority;
@@ -184,6 +186,7 @@ ManagerGalleryWorkspaceProps
   mode,
   onModeChange,
   galleryMutationEpoch,
+  libraryInvalidationVersion = 0,
   invalidateGalleryAfterMutation,
   shared,
   exports,
@@ -201,6 +204,15 @@ ManagerGalleryWorkspaceProps
   const invalidateLibrary = useCallback(() => {
     setLibraryEpoch((current) => current + 1);
   }, []);
+  const consumedLibraryInvalidation = useRef({ eventId, version: 0 });
+  if (consumedLibraryInvalidation.current.eventId !== eventId) {
+    consumedLibraryInvalidation.current = { eventId, version: 0 };
+  }
+  useEffect(() => {
+    if (libraryInvalidationVersion <= consumedLibraryInvalidation.current.version) return;
+    consumedLibraryInvalidation.current.version = libraryInvalidationVersion;
+    invalidateLibrary();
+  }, [eventId, invalidateLibrary, libraryInvalidationVersion]);
   const [guestGalleryVisible, setGuestGalleryVisible] = useState(event.galleryVisible);
   const guestGalleryVisibleRef = useRef(event.galleryVisible);
   const visibilityEventId = useRef(eventId);
@@ -844,12 +856,14 @@ ManagerGalleryWorkspaceProps
     </div>
 
     {/* Mounted only while chosen, unlike the other two. Album owns the active editor and
-        leave preparation; the Manager-owned Undo remains visible outside this child. */}
+        leave preparation; the Manager-owned Undo remains visible outside this child. The
+        event/mutation key is also the retirement boundary for late Album settlements. */}
     {mode === 'album' && <div className="gallery-album-mode">
       <ManagerAlbum
         key={`${eventId}:${galleryMutationEpoch}`}
         ref={albumRef}
         eventId={eventId}
+        eventName={event.name}
         active={mode === 'album'}
         eventTimezone={event.eventTimezone}
         onGoToLibrary={() => onModeChange('library')}

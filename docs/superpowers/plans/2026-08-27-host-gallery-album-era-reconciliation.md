@@ -1,6 +1,6 @@
 # Host Gallery Album Era Reconciliation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use test-driven development, preserve all existing Slice 1–4 work, and do not commit unless the user asks.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use strict focused RED, minimal implementation, focused GREEN, then a fresh implementer handoff and independent review for every task. Do not commit this task or checkpoint: all five Slice 5 plans receive exactly one final commit only after every task and final Slice review gate passes.
 
 **Goal:** Stop telling a host a false "before Albums" story about picks they made minutes ago, and make Album capacity honest about the retained slots a timely Restore depends on.
 
@@ -13,7 +13,11 @@
 ## Global constraints and preflight rulings
 
 - Work only in `/home/henry/candidary/.worktrees/gallery-roadmap-remediation` on branch `codex/gallery-roadmap-remediation`. Do not push, deploy, merge, migrate a remote database, mutate a pull request, or change secrets.
-- **Depends on** `2026-08-27-host-gallery-manager-upload-authority.md`. Migration `0021` already exists and is immutable. This checkpoint creates **no** migration. If a defect is found in 0021's Album-era triggers, fix it in a new `0022` with its own review — never by editing 0021.
+- Preserve unrelated and untracked files plus all authored/custom content. Keep Slice 6 findings C-34, C-38, and C-62 out of scope.
+- Every task is independently testable and receives a fresh implementer handoff plus an independent task review. Record focused RED/GREEN evidence; resolve every P1/P2 before advancing.
+- Do not run repository-wide verification, full builds, full lint/typecheck, full E2E, `npm test`, or `ci:migrations`. Use only named test files/spec filters, changed-file lint where applicable, the matrix parser, and `git diff --check`.
+- Do not make task-level or checkpoint commits. The release owner creates exactly one final Slice 5 commit only after all five plans, focused gates, and final independent Slice review are complete.
+- **Depends on** `2026-08-27-host-gallery-manager-upload-authority.md`. Migration `0021` has been drafted and reviewed by that checkpoint but remains part of the one uncommitted Slice 5 change set until the single final commit/deployment. This checkpoint creates **no** migration. If its Album-era review or focused RED exposes a defect, correct `0021` in place and repeat the migration task plus every affected task review before proceeding; do not create `0022` for an uncommitted migration.
 - Provenance may never be inferred from `event_albums.created_at`, `media.created_at`, `favorited_at` ordering, or any clock comparison. Every reconciliation test uses identical timestamps so no assertion can pass by ordering.
 - `AlbumView` exposes `pickGeneration` and `reconciliation` only. `album_pick_version` is a repository-internal fact and must not appear in any response.
 - Every "pick" count in reconciliation — the category decision, `pickCount`, `historicalPickCount`, and the cap comparison — includes **active and retained-trash** picked rows, including expired cleanup-pending rows, even though only active photos render.
@@ -24,8 +28,8 @@
 - Public and Preview projections continue to omit retained entries. Do not change what a link holder sees.
 - The existing revision guard applies unchanged to every new Start and reset path.
 - **Start-advances-revision ruling.** Matching `expectedRevision` is only half of a revision guard; the other half is that a successful write moves it. At `153d05f` `AlbumRepository.start` writes `entries`, `saved_at`, and `updated_at` and never touches `revision` — the only two `revision = revision + 1` sites in `worker/db/album.ts` are on the save and metadata paths. Adding the expectation without the increment leaves the real hazard open: a cohost who read the album before the Start still holds a revision the server accepts afterwards, so their `PUT /album` — composed against the pre-Start entries — succeeds and silently replaces everything the Start just materialized. **Every successful new-client Start increments `revision` in the same guarded statement that sets `saved_at`**, on both `from-picks` and `empty`. A Start that conflicts must not increment. The legacy branch is unchanged, which is one more reason the compatibility window is one release and not more.
-- Every behavior change follows RED → GREEN → REFACTOR.
-- Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-album-era-reconciliation/`, then take an independent spec and code review. Fix every P1/P2 before advancing.
+- Every behavior change follows RED → minimal GREEN → scoped refactor.
+- Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-album-era-reconciliation/`; the task review checkpoint records the fresh implementer and independent reviewer outcome without committing.
 
 ## Checkpoint boundary
 
@@ -94,12 +98,9 @@ Compute the category in one repository read that counts active and retained-tras
 npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add shared/contracts.ts worker/db/album.ts tests/worker/album-api.test.ts
-git commit -m "feat: project album pick provenance"
-```
+Record projection RED/GREEN and no-raw-provenance evidence. Obtain fresh-implementer and independent review; resolve P1/P2 before Task 2. Do not stage or commit.
 
 ---
 
@@ -130,7 +131,7 @@ The three expectations answer three different questions and none substitutes for
 
 `expectedRevision` is also the field a successful Start must *advance*, per the start-advances-revision ruling. Reading it and not writing it protects the Start from a concurrent save but leaves the save unprotected from the Start, which is the direction that actually loses a host's work: the entries a Start materializes are the ones an unaware cohost's in-flight `PUT` would overwrite. The increment belongs in the same statement as `saved_at = ?`, so a conflicting Start cannot advance it and a succeeding one cannot fail to.
 
-The guarded D1 transaction matches `expectedRevision` and `expectedPickGeneration`, then the expected category, count, and cap, then rechecks provenance, saved state, and the complete retained picked cohort — all inside the same batch. Guard the first statement and check `results[0].meta.changes === 1`; `changes() = 1` chaining is only valid here for dependents that always change exactly one row, which the `Start empty` pick-clearing statement is not.
+The first and decisive mutation is one Album-row expectation/revision CAS. It matches `expectedRevision` and `expectedPickGeneration`, derives the expected category/count/cap, rechecks provenance, saved state, and the complete retained picked cohort, sets the selected entries/saved state, and increments revision in that one statement. `from-picks` ends there: it remains one guarded update. `empty` performs one immediately following and final mutation that clears every active/retained pick with `AND changes() = 1`. No mutation follows or depends on that variably sized clear. Every diagnostic after the mutation block is read-only.
 
 - [ ] **Step 1: Write the failing conflict table**
 
@@ -148,6 +149,7 @@ The guarded D1 transaction matches `expectedRevision` and `expectedPickGeneratio
 - a stale `expectedRevision` — a concurrent `PUT /album` landed between the read and the start — returns the canonical conflict and writes nothing, on both `from-picks` and `empty`;
 - **a successful Start advances the revision.** For each of `from-picks` and `empty`: read the album, run a successful new-client Start, and assert the returned `AlbumView.revision` is strictly greater than the one sent. Then replay a `PUT /album` carrying the **pre-Start** revision and assert it returns the canonical conflict and changes no entry — this is the row that fails when the increment is missing, and asserting only the returned revision is not enough, because a projection can report a number no guard actually enforces;
 - a Start that conflicts on any of the three expectations leaves `revision` exactly where it was, so a refused attempt cannot invalidate a cohost's live editor;
+- stale category, generation, or revision on either start choice leaves favorites, entries, saved state, and revision byte-for-byte unchanged; assert all four facts, not only the HTTP conflict;
 - the increment is exactly one per successful Start: a Start followed by an ordinary save advances the revision twice in total, not three times;
 - a legacy `{ start }` body does not advance the revision, matching today's behavior, and the contract test that names the branch for removal says so;
 - a legacy `{ start }` body, which carries no revision, keeps exactly today's unguarded behavior. Say so in the contract test that marks the branch for removal, so the compatibility window is not mistaken for a hole in the new guard.
@@ -162,9 +164,11 @@ Expected: FAIL — `albumStartSchema` is `.strict()` on `{ start }` alone.
 
 - [ ] **Step 3: Implement the guard**
 
-Extend `albumStartSchema` to accept both shapes — a discriminated accept, not an optional-field widening, so a new client that omits one expectation is refused rather than silently taking the legacy branch. Thread all three expectations into `AlbumRepository.start`, whose signature becomes `(eventId, choice, expectations | null, now)`; `null` is the legacy branch. Add `revision = revision + 1` to the guarded `event_albums` update on both choices, in the same statement as `saved_at`, and only on the expectation-bearing branch. Add the contract test that names the legacy branch for removal after one release.
+Extend `albumStartSchema` to accept both shapes — a discriminated accept, not an optional-field widening, so a new client that omits one expectation is refused rather than silently taking the legacy branch. Thread all three expectations into `AlbumRepository.start`, whose signature becomes `(eventId, choice, expectations | null, now)`; `null` is the legacy branch.
 
-The client is not updated here. `startAlbum` in `src/features/gallery/album-api.ts` still sends `{ start }` alone until Task 4, and the legacy branch is exactly what keeps it working across the two commits — that compatibility window is what makes the split safe, so do not add a required field to the legacy shape to close it early.
+Implement the expectation-bearing branch in the exact mutation order above. For `from-picks`, the one-row CAS computes/materializes the retained cohort and increments revision atomically; there is no dependent mutation. For `empty`, the one-row CAS saves the empty Album and increments revision, then the immediately following final statement clears every active/retained favorite with `AND changes() = 1`. Check `results[0].meta.changes === 1`; after statement 2 perform only SELECT diagnostics/classification. Do not attach another mutation to statement 2's `changes()`, because clearing zero picks is a legitimate successful Start empty. Add the contract test that names the legacy branch for removal after one release.
+
+The client is not updated here. `startAlbum` in `src/features/gallery/album-api.ts` still sends `{ start }` alone until Task 4, and the legacy branch is what keeps an old browser tab/client compatible when the server and new client ship together in the Slice's single final deployment. This is an old-client compatibility window, not a two-commit sequence, so do not add a required field to the legacy shape to close it early.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -172,29 +176,42 @@ The client is not updated here. `startAlbum` in `src/features/gallery/album-api.
 npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts tests/worker/manage-api.test.ts
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add worker/routes/manage.ts worker/db/album.ts tests/worker/album-api.test.ts
-git commit -m "feat: guard album start with an expected generation"
-```
+Record CAS ordering, stale-state non-mutation, and legacy compatibility evidence. A fresh implementer and independent reviewer must confirm no mutation follows Start empty's guarded clear. Resolve P1/P2; do not stage or commit.
 
 ---
 
 ### Task 3: Capacity that counts retained slots
 
 **Files:**
-- Modify: `worker/db/album.ts`
-- Modify: `worker/db/media.ts`
+- Modify only after a focused RED proves a gap: `worker/db/album.ts`
+- Modify only after a focused RED proves a gap: `worker/db/media.ts`
+- Modify only after an actual Reset-path RED proves the client lacks retained ordering: `shared/contracts.ts`
+- Modify only after that RED proves the gap: `src/features/gallery/ManagerAlbum.tsx`
 - Modify: `tests/worker/album-api.test.ts`
 - Modify: `tests/worker/media-recovery-api.test.ts`
+- Modify: `tests/worker/export-api.test.ts`
+- Modify only for the actual Reset-path regression: `tests/ui/album-workspace.test.tsx`
 
 **Interfaces:**
 - No new exported contract. Album capacity comparisons switch from "currently visible photos" to internal entries: saved section entries, active photo entries, and retained trashed-photo entries all consume a slot.
 - Unsaved reconciliation and the new-pick guard count active plus retained-trash picked rows.
 - Reset uses timeline order across active and retained-trash picks. Only `Start empty` clears them.
+- The Manager-only retained marker may carry its ordering-only `timelineAt` fact so Reset can interleave it with live photos. Public and Preview still omit the marker, and it must not gain image, caption, guest, filename, or Album-era provenance fields.
+- This task is regression-first: the principal guards already exist. Inventory current named coverage before adding tests and do not edit production for a row that already passes.
 
-- [ ] **Step 1: Write the failing capacity and retention tests**
+- [ ] **Step 1: Inventory current focused coverage**
+
+Run only the existing named files and record which of the required rows already exists and passes:
+
+```bash
+npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts tests/worker/media-recovery-api.test.ts tests/worker/export-api.test.ts -t "(album capacity|retained slot|restore|cover|reset|cleanup|export hold)"
+```
+
+Map each existing test name to cap edge, repeated trash/replace/restore, export hold, reset, cover, and cleanup. Do not count a nearby happy path as the named edge.
+
+- [ ] **Step 2: Add only missing capacity and retention regressions**
 
 - an Album at `ALBUM_MAX_ENTRIES` counting sections and retained slots refuses a new pick;
 - a timely Restore at that cap **succeeds** unconditionally;
@@ -204,20 +221,27 @@ git commit -m "feat: guard album start with an expected generation"
 - trashing the cover and replacing it, then restoring, resolves deterministically;
 - cleanup removes the marker and frees the slot exactly once;
 - reset materializes active and retained-trash picks in timeline order.
+- Exercise that reset assertion through the real Album editor Reset control. An ordinary Worker `PUT` whose request already supplies the desired order is not Reset evidence.
+- the `ALBUM_MAX_ENTRIES - 1`, exact-cap, and cap-plus-one edges include sections and retained slots;
+- expiry under an accepted export hold keeps the retained slot saveable/reorderable until cleanup owns removal.
 
-- [ ] **Step 2: Run and verify RED**
-
-```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts -t 'capacity'
-```
-
-- [ ] **Step 3: Implement and verify GREEN**
+- [ ] **Step 3: Run each new row and classify RED or verified-existing**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts tests/worker/media-recovery-api.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts tests/worker/media-recovery-api.test.ts tests/worker/export-api.test.ts -t "(album capacity|retained slot|restore|cover|reset|cleanup|export hold)"
 ```
 
-- [ ] **Step 4: Prove the public projection is unchanged**
+If every new regression passes against current production, record `verified-existing` and make no production change. If a named row fails for the intended capacity invariant, preserve that RED output and make the smallest production edit in the two conditional files.
+
+If the actual UI Reset regression fails because the retained marker lacks a comparable timeline fact, preserve that RED and add only the Manager-side ordering projection plus unified live/retained sort. Keep the existing autosave queue, revision guard, and Undo path; do not create a second Reset request owner.
+
+- [ ] **Step 4: Verify focused GREEN**
+
+```bash
+npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts tests/worker/media-recovery-api.test.ts tests/worker/export-api.test.ts -t "(album capacity|retained slot|restore|cover|reset|cleanup|export hold)"
+```
+
+- [ ] **Step 5: Prove the public projection is unchanged**
 
 ```bash
 npx vitest run --config vitest.worker.config.ts tests/worker/album-share-api.test.ts
@@ -225,12 +249,9 @@ npx vitest run --config vitest.worker.config.ts tests/worker/album-share-api.tes
 
 Expected: PASS unchanged — a link holder still never sees a retained entry.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Task review checkpoint**
 
-```bash
-git add worker/db/album.ts worker/db/media.ts tests/worker/album-api.test.ts tests/worker/media-recovery-api.test.ts
-git commit -m "fix: count retained album slots against capacity"
-```
+Record the coverage inventory, each new regression's initial result, and any minimal production diff justified by a focused RED. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
@@ -278,12 +299,9 @@ Reuse the existing Album draft generation guard and the autosave queue's settlem
 npx vitest run --config vitest.config.ts tests/ui/album-workspace.test.tsx tests/ui/app.test.tsx
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add src/features/gallery/ManagerAlbum.tsx src/features/gallery/album-api.ts src/features/gallery/ManagerGalleryWorkspace.tsx tests/ui/album-workspace.test.tsx
-git commit -m "fix: adopt current-era album picks directly"
-```
+Record UI reconciliation, one-observation expectations, StrictMode, revision adoption, and generation-retirement evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
@@ -299,24 +317,16 @@ C-17 is `implemented`: name the durable version/generation pair, the four projec
 - [ ] **Step 2: Run the complete checkpoint gates**
 
 ```bash
-npm run typecheck
-npm run typecheck:e2e
-npm run lint
-npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts tests/worker/album-share-api.test.ts tests/worker/media-recovery-api.test.ts tests/worker/migration-0021.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/album-api.test.ts tests/worker/album-share-api.test.ts tests/worker/media-recovery-api.test.ts tests/worker/export-api.test.ts tests/worker/migration-0021.test.ts
 npx vitest run --config vitest.config.ts tests/ui/album-workspace.test.tsx tests/ui/app.test.tsx
-npm test
-npm run build
-npm run test:e2e
-git diff --check
+git diff --name-only --diff-filter=ACMR -- '*.ts' '*.tsx' | xargs -r npx eslint --
+git diff --check -- shared/contracts.ts worker/db/album.ts worker/db/media.ts worker/routes/manage.ts src/features/gallery/ManagerAlbum.tsx src/features/gallery/album-api.ts src/features/gallery/ManagerGalleryWorkspace.tsx tests/worker/album-api.test.ts tests/worker/album-share-api.test.ts tests/worker/media-recovery-api.test.ts tests/worker/export-api.test.ts tests/ui/album-workspace.test.tsx tests/ui/app.test.tsx docs/superpowers/host-gallery-verification-matrix.md
 ```
 
-Expected: every command exits zero. The known build chunk-size and missing-local-secret warnings may remain; no new warning is accepted.
+Expected: every focused command exits zero. Do not substitute a full test, build, lint, typecheck, E2E, or migration run.
 
-- [ ] **Step 3: Commit the record**
+- [ ] **Step 3: Checkpoint review handoff**
 
-```bash
-git add docs/superpowers/host-gallery-verification-matrix.md
-git commit -m "docs: record album era reconciliation evidence"
-```
+Record the matrix rows and focused outputs, run the scoped `git diff --check`, and obtain independent checkpoint review. Keep the entire Slice diff uncommitted for later plans.
 
 Do not push. The next Slice 5 checkpoint is account lifecycle, rotation, and the safety ladder.

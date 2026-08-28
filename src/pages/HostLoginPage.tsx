@@ -2,7 +2,16 @@ import { type FormEvent, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { api, ClientApiError } from '../app/api';
-import { adoptTargetFor, HOST_EVENTS_PATH, safeReturnTo } from '../app/recovery';
+import {
+  clearPendingRegistration,
+  matchesPendingRegistration,
+} from '../app/pending-registration';
+import {
+  adoptTargetFor,
+  hostRegisterHref,
+  HOST_EVENTS_PATH,
+  safeReturnTo,
+} from '../app/recovery';
 import { MIN_HOST_PASSWORD_LENGTH } from '../../shared/constants';
 import { PageHeader } from '../components/Brand';
 import { AuthModeSwitch, AuthReturnNote } from '../components/HostAuthNav';
@@ -57,6 +66,17 @@ export function HostLoginPage() {
     const data = new FormData(event.currentTarget);
     try {
       if (mode === 'signin') {
+        const submittedEmail = String(data.get('email') ?? '');
+        if (await matchesPendingRegistration(submittedEmail, new Date())) {
+          const pending = await api<{ pending: boolean; expiresAt: string | null }>(
+            '/api/host/register/pending',
+          );
+          if (pending.pending) {
+            navigate(hostRegisterHref(adopt, returnTo, true), { replace: true });
+            return;
+          }
+          clearPendingRegistration();
+        }
         await api('/api/host/login', { method: 'POST', body: JSON.stringify({
           email: data.get('email'), password: data.get('password'),
         }) });

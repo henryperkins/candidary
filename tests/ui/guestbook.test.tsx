@@ -27,6 +27,7 @@ const EVENT: GuestEventView = {
   rsvpState: 'disabled',
   rsvpAccess: 'unavailable',
   lifecycleRecheckAfterMs: null,
+  guestReadSurfaces: { available: true, reason: null },
   theme: resolveEventTheme({ version: 1, presetId: 'candidary-default', overrides: {} }),
 };
 
@@ -162,13 +163,14 @@ describe('guest-facing Guestbook', () => {
     expect(screen.getByRole('button', { name: 'Send note' })).toBeEnabled();
   });
 
-  it.each(['rsvp-primary', 'before-start', 'waiting'] as const)(
-    'does not mount or request the Guestbook during %s',
+  it.each(['rsvp-primary', 'before-start'] as const)(
+    'does not mount or request the Guestbook during an unavailable %s phase',
     async (phase) => {
     const unavailable: GuestEventView = {
       ...EVENT,
       phase,
       uploadsEnabled: false,
+      guestReadSurfaces: { available: false, reason: 'before-photo-open' },
       rsvpState: phase === 'rsvp-primary' ? 'open' : 'closed',
       rsvpAccess: phase === 'rsvp-primary'
         ? 'editable'

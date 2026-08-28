@@ -1,9 +1,9 @@
 import { Check, ChevronLeft, ChevronRight, Plus, X } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useRef, useState } from 'react';
 
 import { mediaPreview } from '../../app/api';
 import type { ManagerGalleryMediaView } from '../../../shared/contracts';
+import { ModalSurface } from '../../components/ModalSurface';
 import { formatMomentHeading, galleryPhotoTitle } from './gallery-timeline';
 
 export type ViewerContinuationOutcome =
@@ -54,6 +54,12 @@ export function GalleryViewer({
   const photo = photos[index];
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(
+    document.activeElement instanceof HTMLElement ? document.activeElement : null,
+  );
+  const inertExceptionRef = useRef<HTMLElement | null>(
+    document.querySelector('[data-gallery-live-host="true"]'),
+  );
   const retryRef = useRef<HTMLButtonElement>(null);
   const continuationRef = useRef<Promise<ViewerContinuationOutcome> | null>(null);
   const viewerMounted = useRef(true);
@@ -65,7 +71,6 @@ export function GalleryViewer({
   const [failedPreviewId, setFailedPreviewId] = useState<string | null>(null);
   const [continuationFailure, setContinuationFailure] = useState(false);
   const [exhaustedContinuationForPhotoId, setExhaustedContinuationForPhotoId] = useState<string | null>(null);
-  const [host] = useState(() => document.createElement('div'));
   const liveMessage = photo
     ? `${positionLabel(index, photos.length, hasMore)}. ${galleryPhotoTitle(photo)}, from ${photo.guestName}.`
     : '';
@@ -73,36 +78,6 @@ export function GalleryViewer({
   useEffect(() => {
     if (!live && liveMessage) onAnnouncement?.(liveMessage);
   }, [live, liveMessage, onAnnouncement]);
-
-  /**
-   * The same containment Cover Studio uses. `aria-modal` alone left the manager
-   * shell tabbable and readable behind the dialog; inerting the other body
-   * children is what actually removes it. This runs as a layout effect so the
-   * host is in the document before the focus effect below reaches for the close
-   * button. Focus restoration stays with the gallery, which knows the origin tile.
-   */
-  useLayoutEffect(() => {
-    document.body.append(host);
-    const inerted: HTMLElement[] = [];
-    for (const sibling of Array.from(document.body.children)) {
-      if (sibling === host || !(sibling instanceof HTMLElement)) continue;
-      if (sibling.dataset.galleryLiveHost === 'true') continue;
-      if (sibling.hasAttribute('inert')) continue;
-      sibling.setAttribute('inert', '');
-      inerted.push(sibling);
-    }
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      for (const sibling of inerted) sibling.removeAttribute('inert');
-      document.body.style.overflow = previousOverflow;
-      host.remove();
-    };
-  }, [host]);
-
-  useEffect(() => {
-    closeRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     viewerMounted.current = true;
@@ -181,11 +156,6 @@ export function GalleryViewer({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeViewer();
-        return;
-      }
       if (event.key === 'ArrowRight') {
         event.preventDefault();
         moveForward();
@@ -194,31 +164,11 @@ export function GalleryViewer({
       if (event.key === 'ArrowLeft' && index > 0) {
         event.preventDefault();
         moveBackward();
-        return;
-      }
-      if (event.key === 'Tab') {
-        // Disabled controls must be excluded: Previous is disabled on the first
-        // photo and Favorite while its write is in flight, and wrapping onto one
-        // of those called focus() on an element that cannot take it, stranding
-        // the host where they were.
-        const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
-        );
-        const first = focusable?.[0];
-        const last = focusable?.[focusable.length - 1];
-        if (!first || !last) return;
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first.focus();
-        }
       }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [index, photos, closeViewer, moveForward, moveBackward]);
+  }, [index, photos, moveForward, moveBackward]);
 
   if (!photo) return null;
   const title = galleryPhotoTitle(photo);
@@ -232,13 +182,15 @@ export function GalleryViewer({
     startAt: photo.timelineAt,
     endAt: photo.timelineAt,
   };
-  return createPortal(<div
-    className="gallery-viewer"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby={titleId}
-    ref={dialogRef}
-  >
+  return <ModalSurface
+    labelledBy={titleId}
+    initialFocusRef={closeRef}
+    onRequestClose={closeViewer}
+    closePolicy={{ escape: true, backdrop: true }}
+    dialogRef={dialogRef}
+    inertExceptionRef={inertExceptionRef}
+    returnFocusRef={returnFocusRef}
+  ><div className="gallery-viewer">
     {/* One region, mounted outside every branch below. Stepping through the gallery changes
         only the photograph, so a region rendered beside its own first text is never announced
         and the host navigates in silence. It carries position, title and contributor together
@@ -322,5 +274,5 @@ export function GalleryViewer({
           : <><Plus aria-hidden="true" /> <span aria-hidden="true">Pick</span></>}
       </button>
     </div>
-  </div>, host);
+  </div></ModalSurface>;
 }

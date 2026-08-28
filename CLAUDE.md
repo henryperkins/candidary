@@ -107,6 +107,14 @@ the credential that actually authorized the request; guest writes use their even
 Do not replace these helpers with a route-id check or assume the event and host cookies are
 interchangeable.
 
+Manager uploads derive one of two authorities after `requireManager`; request bodies never choose the
+authority. A management-link request uses `manager-link` authority with its authenticated Manager
+event session. An account owner/cohost uses `manager-account` authority with the current host session
+plus one server-only Manager upload actor bound to the account, event, and current live Manager token.
+That actor is identity storage, not a browser credential: its source secrets are discarded, it cannot
+mint a cookie, and event-session resolution rejects it before secret comparison. Reservation may
+atomically ensure the actor; content, finalize, and cancel only look up an existing one.
+
 There are three cookie scopes, and none of them can authorize another's writes:
 `candidary_session`/`candidary_csrf` (event guest), `candidary_host`/`candidary_host_csrf` (host
 account), and `candidary_rsvp`/`candidary_rsvp_csrf` (one household). `assertCsrf()` picks the header
@@ -151,6 +159,20 @@ Every reservation carries a client-generated `idempotencyKey` unique per `(event
 re-enters the same media row rather than creating a new one — see `MediaRepository.refreshIdempotent`.
 The queue distinguishes "retry the whole transfer" from "retry finalize only" via `retryStage`, so a
 transient confirmation failure does not re-send bytes.
+
+The canonical pipeline carries a server-created `UploadAuthority` through reserve, idempotent refresh,
+post-buffer claim, commit, and cancel. The authority selects the intake predicate at both service and
+SQL layers: guests retain the exact `uploads_enabled` plus event-start schedule, while `manager-link`
+and `manager-account` ignore only that guest pause/schedule and still require a live management window,
+Worker ingress, capacity, validation, and promotion fences. Both Manager authorities use the four
+`/api/manage/events/:eventId/uploads` routes backed by the same upload implementation. They accept no
+guest/account/actor attribution field; the server always persists `guest_name = 'Host'`.
+
+Pausing this intake affects only **new guest uploads**. Once the server-owned `guestReadSurfaces`
+projection is available, the event shell and any terminal receipt, My deliveries, Guestbook, and an
+independently enabled Guest gallery remain available. `/event/:slug/fullscreen` consumes the same
+Gallery availability and item projection as the main guest page; it deliberately remains a
+Gallery-only shell rather than duplicating the main page's secondary panels.
 
 ### Media privacy
 
@@ -299,6 +321,10 @@ objects nothing can find again.
 
 ## Conventions
 
+- **Event-zone display**: `src/app/event-date-time.ts` is the canonical formatter owner for exactly
+  four host surfaces: the Intake schedule, Manager header/retention, upload flow, and Host Events.
+  Keep date-valued locale formatting out of those callers. The Gallery timeline's same-minute
+  grouping remains a separate formatter concern.
 - **Errors**: throw `ApiError(code, message, status, fieldErrors?)` from `shared/errors.ts`. `code` must be
   in the `ApiErrorCode` union — add new codes there and document them in `docs/operations.md`. `app.onError`
   converts to the wire shape; unknown errors become `INTERNAL_ERROR`. Messages are guest-facing prose.

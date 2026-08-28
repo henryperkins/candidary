@@ -133,10 +133,13 @@ export function EventAppearanceEditor({
   const [autosave, setAutosave] = useState<AutosaveState>({ status: 'saved', failure: null });
   const queueRef = useRef<AppearanceQueueOwner | null>(null);
   const queueGenerationRef = useRef(0);
+  const saveGenerationRef = useRef(0);
+  const queuePausedRef = useRef(false);
   const sendThemeRef = useRef<((
     config: EventThemeConfigV1,
     draft: { key: string; intent: string },
-    generation: number,
+    queueGeneration: number,
+    saveGeneration: number,
   ) => Promise<AutosaveOutcome>) | null>(null);
   const describeThemeFailureRef = useRef<((error: unknown) => AutosaveFailure) | null>(null);
   // The queue settles from a promise continuation, so what is on screen has to
@@ -217,8 +220,10 @@ export function EventAppearanceEditor({
     ]);
   }
 
-  function ownsQueueGeneration(generation: number): boolean {
-    return queueRef.current?.generation === generation;
+  function ownsSaveGeneration(queueGeneration: number, saveGeneration: number): boolean {
+    return queueRef.current?.generation === queueGeneration
+      && saveGenerationRef.current === saveGeneration
+      && !queuePausedRef.current;
   }
 
   function currentQueue(): AutosaveQueue<EventThemeConfigV1> | null {
@@ -308,7 +313,8 @@ export function EventAppearanceEditor({
   async function sendTheme(
     config: EventThemeConfigV1,
     draft: { key: string; intent: string },
-    generation: number,
+    queueGeneration: number,
+    saveGeneration: number,
   ): Promise<AutosaveOutcome> {
     const result = await onEventWrite(() => api<{ event: EventView }>(
       '/api/manage/events/' + event.id + '/theme',
@@ -316,7 +322,7 @@ export function EventAppearanceEditor({
     ));
     const normalized = result.event.theme;
     const confirmedKey = serializeEventThemeConfig(normalized.config);
-    if (!ownsQueueGeneration(generation)) {
+    if (!ownsSaveGeneration(queueGeneration, saveGeneration)) {
       return { status: 'confirmed', key: confirmedKey };
     }
     /* Normalization is adopted only while the host is still looking at the
@@ -371,7 +377,7 @@ export function EventAppearanceEditor({
       save: (snapshot, draft) => {
         const send = sendThemeRef.current;
         if (!send) return Promise.reject(new Error('The appearance save owner is unavailable.'));
-        return send(snapshot, draft, generation);
+        return send(snapshot, draft, generation, saveGenerationRef.current);
       },
       describeFailure: (error) => describeThemeFailureRef.current?.(error) ?? {
         message: 'The event appearance could not be saved.',
@@ -427,7 +433,20 @@ export function EventAppearanceEditor({
       blockingField,
     });
   }, [autosave, blockingField?.label, blockingField?.message, onAutosaveStateChange]);
-  useImperativeHandle(ref, () => ({ flush: () => { queueRef.current?.queue.flush(); } }), []);
+  useImperativeHandle(ref, () => ({
+    flush: () => { queueRef.current?.queue.flush(); },
+    pause: () => {
+      if (queuePausedRef.current) return;
+      queuePausedRef.current = true;
+      saveGenerationRef.current += 1;
+      queueRef.current?.queue.pause();
+    },
+    resume: () => {
+      if (!queuePausedRef.current) return;
+      queuePausedRef.current = false;
+      queueRef.current?.queue.resume();
+    },
+  }), []);
 
   async function publishCover() {
     setCoverError(null);

@@ -136,6 +136,9 @@ export class AuthService {
     const parsed = parseSecretToken(rawSession);
     const session = await this.sessions.getById(parsed.id);
     if (!session) throw new ApiError('SESSION_REQUIRED', 'Open a valid event link to continue.', 401);
+    if (session.managerUploadAccountId !== null) {
+      throw new ApiError('SESSION_REQUIRED', 'Open a valid event link to continue.', 401);
+    }
     const suppliedDigest = await digestSecret(parsed.secret, this.env.SESSION_HMAC_KEY);
     if (!constantTimeEqual(suppliedDigest, session.secretDigest)) {
       throw new ApiError('SESSION_REQUIRED', 'Open a valid event link to continue.', 401);

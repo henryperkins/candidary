@@ -101,6 +101,9 @@ export function parsePersonText(value: string): PersonTextResult {
  */
 export const EVENT_START_MIGRATION_SENTINEL = '1970-01-01T00:00:00.000Z';
 
+export const GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE =
+  'Shared photos and Guestbook become available when photo sharing opens.';
+
 export interface EventLifecycleInput {
   // Photo delivery is *permitted* for this event. It no longer means "open":
   // the clock decides that.
@@ -227,6 +230,9 @@ export function resolveGuestEventPhase(
       phase,
       rsvpState,
       rsvpAccess,
+      guestReadSurfaces: phase === 'rsvp-primary'
+        ? { available: false, reason: 'before-photo-open' }
+        : { available: true, reason: null },
       lifecycleRecheckAfterMs: nextBoundaryDelay(nowMs, [rsvpClosesAt(input)]),
     };
   }
@@ -255,6 +261,9 @@ export function resolveGuestEventPhase(
     phase,
     rsvpState,
     rsvpAccess,
+    guestReadSurfaces: nowMs >= scheduledOpenAt
+      ? { available: true, reason: null }
+      : { available: false, reason: 'before-photo-open' },
     // Every guest-view boundary, not merely every phase change: during an
     // early-open `photos-primary` period the phase does not move at the
     // deadline or at the start, but the RSVP disclosure goes from editable to

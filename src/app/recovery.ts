@@ -10,6 +10,23 @@ import { canonicalManagerReturnPath, isManagerEventId } from './manager-location
 
 export const HOST_EVENTS_PATH = '/host/events';
 
+// Confirmation can resume only the Manager destination checked by the shared
+// Manager-location contract. Every other successful confirmation ends at the
+// account's event list; no raw query value becomes a navigation target.
+export function registrationConfirmationDestination({
+  boundEvent,
+  returnTo,
+  validatedAdopt,
+}: {
+  boundEvent: boolean;
+  returnTo: string | null | undefined;
+  /** The already-validated result of adoptTargetFor for this return context. */
+  validatedAdopt: string | null | undefined;
+}): string {
+  if (!boundEvent || !returnTo || !validatedAdopt) return HOST_EVENTS_PATH;
+  return canonicalManagerReturnPath(returnTo)?.href ?? HOST_EVENTS_PATH;
+}
+
 // A path is usable only if it is the host's event list or a canonical Manager
 // destination. Manager validation and normalization belong to its shared contract.
 export function safeReturnTo(value: string | null | undefined): string | null {

@@ -39,6 +39,7 @@ import {
   type EventCoverFocusV1,
   type EventCoverPreparationView,
 } from '../../../shared/event-cover';
+import type { ApiErrorCode } from '../../../shared/errors';
 import { resolveEventTheme } from '../../../shared/event-theme';
 import { PHOTOGRAPHIC_COVER } from './cover-images';
 import { makeMedia } from './ui-data';
@@ -75,15 +76,25 @@ export const GUEST_EVENT_FIXTURE: GuestEventView = {
   // remains to wake for. A partial that moves the phase moves both of these.
   rsvpAccess: 'unavailable',
   lifecycleRecheckAfterMs: null,
+  guestReadSurfaces: { available: true, reason: null },
   theme: eventTheme('candidary-default'),
 };
 
+const MANAGER_EVENT_GUEST_FIELDS = (({
+  guestReadSurfaces,
+  ...guestFields
+}: GuestEventView) => {
+  void guestReadSurfaces;
+  return guestFields;
+})(GUEST_EVENT_FIXTURE);
+
 export const EVENT_FIXTURE: EventView = {
-  ...GUEST_EVENT_FIXTURE,
+  ...MANAGER_EVENT_GUEST_FIELDS,
   // Manager-only, like the capacity counters beside them: a guest is never told
   // how much of the event is in Recently deleted.
   recoverableMediaCount: 0,
   recoverableBytes: 0,
+  hostUploadAvailability: { enabled: true, reason: null },
   // Manager-only semantic configuration and preparation never reach the guest.
   cover: {
     config: { version: 1, source: { kind: 'none' } },
@@ -104,6 +115,8 @@ export const EVENT_FIXTURE: EventView = {
   storedBytes: 128,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z',
   managementAccessExpiresAt: '2026-10-19T00:00:00Z',
+  managerLinkRevision: 0,
+  managerLinkRotationAvailability: { enabled: true, reason: null },
   purgeAfter: '2026-12-19T00:00:00Z',
   createdAt: '2026-07-29T00:00:00Z',
   deletedAt: null,
@@ -329,6 +342,31 @@ export interface AlbumWorkspaceRouteOptions {
   exportReadyAfterReads?: number;
 }
 
+export interface ManagerUploadRouteFailure {
+  status: number;
+  code: ApiErrorCode;
+  message: string;
+}
+
+export interface ManagerUploadRouteOptions {
+  /** Holds the raw content response until the browser case releases it. */
+  contentGate?: Promise<void>;
+  /** Replayed for every content attempt; `network` exercises the transport-only branch. */
+  contentFailure?: 'network' | ManagerUploadRouteFailure;
+  /** Replayed for each cancellation and its one reconciliation attempt. */
+  cancelFailure?: 'network';
+}
+
+export interface ManagerLinkRotationRouteOptions {
+  managementLink: string;
+}
+
+export interface ManagerLinkRotationRouteObservation {
+  body: unknown;
+  headers: Record<string, string>;
+  responseStatus: number;
+}
+
 interface ManagerRouteOptions {
   event?: Partial<EventView>;
   // Keyed by the cursor the client sends back; `first` answers a request that carries no cursor.
@@ -346,6 +384,8 @@ interface ManagerRouteOptions {
   cover?: Buffer;
   coverSlotFailures?: Partial<Record<'webp' | 'jpeg', number>>;
   coverScenario?: CoverStudioRouteScenario;
+  uploads?: ManagerUploadRouteOptions;
+  managerLinkRotation?: ManagerLinkRotationRouteOptions;
   entry?: { eventLink: string | null; disabledAt: string | null };
   rsvp?: {
     summary?: RsvpSummary;
@@ -982,6 +1022,11 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   const currentGuestbookSummary = () => options.guestbook?.summary
     ?? managerSummary(guestbookItems, event.galleryVisible);
   const base = `**/api/manage/events/${event.id}`;
+  const managerUploads = options.uploads;
+  const managerLinkRotation = options.managerLinkRotation;
+  const managerLinkRotationRequests: ManagerLinkRotationRouteObservation[] = [];
+  let managerUploadSequence = 0;
+  const managerUploadReservations = new Map<string, { mediaId: string; mimeType: string }>();
   const albumOptions = options.album ?? {};
   const albumRequests: AlbumRouteObservation[] = [];
   const initialMedia = options.mediaPages.first?.media ?? [];
@@ -1505,6 +1550,170 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     recordCoverRoute(audit, route, 'event-refresh', 200, { 'content-type': 'application/json' });
     return route.fulfill({ json: { data: { event }, requestId: 'request-a' } });
   });
+  if (managerLinkRotation) {
+    await page.route(`${base}/links/manager/rotate`, (route) => {
+      const headers = route.request().headers();
+      const body = route.request().postDataJSON() as unknown;
+      const cookie = headers.cookie ?? '';
+      const hasAccountSession = cookie.split('; ').some((part) => (
+        part.startsWith('candidary_host=')
+      ));
+      const hasAccountCsrf = Boolean(headers['x-candidary-host-csrf']);
+      if (!hasAccountSession || !hasAccountCsrf) {
+        managerLinkRotationRequests.push({ body, headers, responseStatus: 403 });
+        return route.fulfill({
+          status: 403,
+          headers: { 'cache-control': 'private, no-store' },
+          json: {
+            code: 'ROLE_FORBIDDEN',
+            message: 'A signed-in event owner or cohost is required.',
+            requestId: 'request-manager-link-rotation',
+          },
+        });
+      }
+
+      const currentRevision = event.managerLinkRevision;
+      const request = body !== null && typeof body === 'object' && !Array.isArray(body)
+        ? body as Record<string, unknown>
+        : {};
+      const exactBody = Object.keys(request).length === 1
+        && Number.isInteger(request.expectedManagerLinkRevision)
+        && request.expectedManagerLinkRevision === currentRevision;
+      if (!exactBody || currentRevision === null) {
+        managerLinkRotationRequests.push({ body, headers, responseStatus: 409 });
+        return route.fulfill({
+          status: 409,
+          headers: { 'cache-control': 'private, no-store' },
+          json: {
+            code: 'REVISION_CONFLICT',
+            message: 'The management link changed since this page loaded. Reload and try again.',
+            requestId: 'request-manager-link-rotation',
+          },
+        });
+      }
+
+      const managerLinkRevision = currentRevision + 1;
+      event = { ...event, managerLinkRevision };
+      managerLinkRotationRequests.push({ body, headers, responseStatus: 200 });
+      return route.fulfill({
+        headers: { 'cache-control': 'private, no-store' },
+        json: {
+          data: {
+            managementLink: managerLinkRotation.managementLink,
+            managerLinkRevision,
+          },
+          requestId: 'request-manager-link-rotation',
+        },
+      });
+    });
+  }
+  await page.route(`${base}/uploads/batch`, (route) => {
+    const payload = route.request().postDataJSON() as {
+      files: Array<{ idempotencyKey: string; mimeType: string }>;
+    };
+    const items = payload.files.map(({ idempotencyKey, mimeType }) => {
+      let reservation = managerUploadReservations.get(idempotencyKey);
+      if (!reservation) {
+        managerUploadSequence += 1;
+        reservation = { mediaId: `manager-upload-${managerUploadSequence}`, mimeType };
+        managerUploadReservations.set(idempotencyKey, reservation);
+      }
+      return {
+        idempotencyKey,
+        status: 'accepted' as const,
+        alreadyDelivered: false,
+        media: {
+          id: reservation.mediaId,
+          mimeType: reservation.mimeType,
+          uploadState: 'reserved' as const,
+        },
+        uploadUrl: `/api/manage/events/${event.id}/uploads/${reservation.mediaId}/content`,
+        uploadUrlExpiresAt: '2099-09-19T23:00:00.000Z',
+      };
+    });
+    return route.fulfill({
+      status: 201,
+      json: { data: { items }, requestId: 'request-manager-upload-reserve' },
+    });
+  });
+  await page.route(
+    new RegExp(`/api/manage/events/${event.id}/uploads/[^/?]+/content$`, 'u'),
+    async (route) => {
+      await managerUploads?.contentGate;
+      if (managerUploads?.contentFailure === 'network') {
+        await route.abort('connectionclosed');
+        return;
+      }
+      if (managerUploads?.contentFailure) {
+        const failure = managerUploads.contentFailure;
+        await route.fulfill({
+          status: failure.status,
+          json: { code: failure.code, message: failure.message, requestId: 'request-manager-upload-content' },
+        });
+        return;
+      }
+      const mediaId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+      const reservation = [...managerUploadReservations.values()]
+        .find((candidate) => candidate.mediaId === mediaId);
+      await route.fulfill({
+        json: {
+          data: {
+            media: {
+              id: mediaId,
+              mimeType: reservation?.mimeType ?? 'image/jpeg',
+              uploadState: 'stored',
+            },
+          },
+          requestId: 'request-manager-upload-content',
+        },
+      });
+    },
+  );
+  await page.route(
+    new RegExp(`/api/manage/events/${event.id}/uploads/[^/?]+/finalize$`, 'u'),
+    (route) => {
+      const mediaId = new URL(route.request().url()).pathname.split('/').at(-2)!;
+      const reservation = [...managerUploadReservations.values()]
+        .find((candidate) => candidate.mediaId === mediaId);
+      return route.fulfill({
+        json: {
+          data: {
+            media: {
+              id: mediaId,
+              mimeType: reservation?.mimeType ?? 'image/jpeg',
+              uploadState: 'stored',
+            },
+          },
+          requestId: 'request-manager-upload-finalize',
+        },
+      });
+    },
+  );
+  await page.route(
+    new RegExp(`/api/manage/events/${event.id}/uploads/[^/?]+$`, 'u'),
+    async (route) => {
+      if (route.request().method() !== 'DELETE') return route.fallback();
+      if (managerUploads?.cancelFailure === 'network') {
+        await route.abort('connectionclosed');
+        return;
+      }
+      const mediaId = new URL(route.request().url()).pathname.split('/').at(-1)!;
+      const reservation = [...managerUploadReservations.values()]
+        .find((candidate) => candidate.mediaId === mediaId);
+      await route.fulfill({
+        json: {
+          data: {
+            media: {
+              id: mediaId,
+              mimeType: reservation?.mimeType ?? 'image/jpeg',
+              uploadState: 'deleted',
+            },
+          },
+          requestId: 'request-manager-upload-cancel',
+        },
+      });
+    },
+  );
   await page.route(`${base}/settings`, (route) => route.fulfill({
     json: {
       data: { event: { ...event, ...route.request().postDataJSON() as Partial<EventView> } },
@@ -2131,5 +2340,9 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     });
   });
 
-  return { ...audit, album: { requests: albumRequests } };
+  return {
+    ...audit,
+    album: { requests: albumRequests },
+    managerLinkRotation: { requests: managerLinkRotationRequests },
+  };
 }

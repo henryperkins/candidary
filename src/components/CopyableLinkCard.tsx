@@ -12,12 +12,20 @@ interface CopyableLinkCardProps {
   sensitive?: boolean;
   /** Keeps a product proper noun intact in control names; defaults remain sentence-cased. */
   controlNoun?: string;
+  /** Reports only the current copy attempt after Clipboard has settled. */
+  onCopyOutcome?: (outcome: 'copied' | 'unavailable') => void;
 }
 
 const SENSITIVE_MASK = '••••••••••••';
 
 export const CopyableLinkCard = forwardRef<HTMLButtonElement, CopyableLinkCardProps>(
-  function CopyableLinkCard({ label, value, sensitive = false, controlNoun }, copyButtonRef) {
+  function CopyableLinkCard({
+    label,
+    value,
+    sensitive = false,
+    controlNoun,
+    onCopyOutcome,
+  }, copyButtonRef) {
     const [copyResult, setCopyResult] = useState<CopyResult | null>(null);
     const [expanded, setExpanded] = useState(false);
     const [revealedValue, setRevealedValue] = useState<string | null>(null);
@@ -62,6 +70,7 @@ export const CopyableLinkCard = forwardRef<HTMLButtonElement, CopyableLinkCardPr
         await navigator.clipboard.writeText(copiedValue);
         if (copyAttempt !== null && copyAttemptRef.current !== copyAttempt) return;
         setCopyResult({ value: copiedValue, state: 'copied' });
+        onCopyOutcome?.('copied');
       } catch {
         if (copyAttempt !== null && copyAttemptRef.current !== copyAttempt) return;
         // Clipboard access is routinely refused on iOS Safari and in any non-secure context, so leave
@@ -69,6 +78,7 @@ export const CopyableLinkCard = forwardRef<HTMLButtonElement, CopyableLinkCardPr
         setCopyResult({ value: copiedValue, state: 'unavailable' });
         if (sensitive) setRevealedValue(copiedValue);
         else setExpanded(true);
+        onCopyOutcome?.('unavailable');
       }
     }
 

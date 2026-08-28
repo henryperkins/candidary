@@ -3,6 +3,8 @@ import { type FormEvent, useState } from 'react';
 
 import { api, ClientApiError } from '../app/api';
 import { MIN_HOST_PASSWORD_LENGTH } from '../../shared/constants';
+import type { RegistrationPendingResponse } from '../../shared/contracts';
+import type { AcceptedPendingRegistration } from '../app/pending-registration';
 
 interface HostAccountPanelProps {
   // Present on the create-success screen, absent everywhere else. The server still
@@ -15,6 +17,10 @@ interface HostAccountPanelProps {
   // The route owns durable presentation state. This fires only once the server has
   // accepted registration and the browser can resume its pending challenge.
   onStarted?: () => void;
+  // The panel alone owns the resolved response. The parent receives the address
+  // only after acceptance, hashes it, and never needs it again for a resend.
+  onRegistrationPending?: (pending: AcceptedPendingRegistration) => void;
+  onRegistrationResent?: (pending: { resumeExpiresAt: string }) => void;
   // Starting over changes only the local presentation and lets a route clear its
   // pending hint; it never consumes or changes the server-side challenge.
   onRestarted?: () => void;
@@ -41,6 +47,8 @@ export function HostAccountPanel({
   bindEventId,
   onCompleted,
   onStarted,
+  onRegistrationPending,
+  onRegistrationResent,
   onRestarted,
   initialStage = 'form',
   mode = 'registration',
@@ -59,12 +67,16 @@ export function HostAccountPanel({
   async function register(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setFields({});
     const data = new FormData(event.currentTarget);
+    const email = String(data.get('email') ?? '').trim().toLowerCase();
     try {
-      await api('/api/host/register', { method: 'POST', body: JSON.stringify({
+      const pending = await api<RegistrationPendingResponse>('/api/host/register', {
+        method: 'POST', body: JSON.stringify({
         email: data.get('email'),
         password: data.get('password'),
         ...(bindEventId ? { bindEventId } : {}),
-      }) });
+        }),
+      });
+      await onRegistrationPending?.({ email, resumeExpiresAt: pending.resumeExpiresAt });
       // Only the stage moves. Nothing is bound until the mailbox code is proved,
       // so the caller is deliberately not told anything here.
       setStage('code');
@@ -94,7 +106,14 @@ export function HostAccountPanel({
   async function resend() {
     setBusy(true); setError(''); setNotice('');
     try {
-      await api(resendEndpoint, { method: 'POST', body: JSON.stringify({}) });
+      if (mode === 'registration') {
+        const pending = await api<RegistrationPendingResponse>(resendEndpoint, {
+          method: 'POST', body: JSON.stringify({}),
+        });
+        await onRegistrationResent?.({ resumeExpiresAt: pending.resumeExpiresAt });
+      } else {
+        await api(resendEndpoint, { method: 'POST', body: JSON.stringify({}) });
+      }
       setNotice('A new code is on its way.');
     } catch (caught) {
       setError(caught instanceof ClientApiError ? caught.message : 'That code could not be sent. Try again.');
@@ -131,7 +150,7 @@ export function HostAccountPanel({
     return <section className="host-panel">
       <span className="success-icon"><MailCheck aria-hidden="true" /></span>
       <h2>Check your email.</h2>
-      <p>Enter the six-digit code if one arrives. It confirms your address so we can email you about your event.</p>
+      <p>Enter the six-digit code if one arrives. Your account is created only after you confirm it.</p>
       {error && <p className="form-error" role="alert">{error}</p>}
       {notice && <p className="form-note" role="status">{notice}</p>}
       <form className="create-form" onSubmit={confirm} noValidate>
@@ -161,16 +180,16 @@ export function HostAccountPanel({
           but until the code is entered nothing has been saved, so this must not say
           it has. */}
       <p className="form-note">{bindEventId
-        ? 'Until you enter it, this event still depends on its management link.'
-        : 'You can do this later. Confirming only gates the emails we send you.'}</p>
+        ? 'Until you enter it, no account exists and this event still depends on its management link.'
+        : 'Until you enter it, no account exists. You can come back and confirm later.'}</p>
     </section>;
   }
 
   return <section className="host-panel">
     {!embedded && <>
       <h2>Save this event to your email</h2>
-      <p>You’ll be able to get back to it without the management link,
-        and we’ll warn you before your access ends.</p>
+      <p>Your account is created only after you confirm the code we email you. Then you’ll be able
+        to get back without the management link, and we’ll warn you before your access ends.</p>
     </>}
     {error && <p className="form-error" role="alert">{error}</p>}
     <form className="create-form" onSubmit={register} noValidate>
@@ -196,7 +215,7 @@ export function HostAccountPanel({
           : <small id="host-password-hint" className="field-hint">At least {MIN_HOST_PASSWORD_LENGTH} characters.</small>}
       </div>
       <button className="button button--primary button--wide" disabled={busy}>
-        {busy ? 'Creating your account…' : 'Create account'}
+        {busy ? 'Sending your confirmation code…' : 'Create account'}
       </button>
     </form>
   </section>;

@@ -102,6 +102,7 @@ async function coverPublicationTerminalResponse(
   eventId: string,
   operationId: string,
   now: Date,
+  via: 'link' | 'account',
 ): Promise<Response | null> {
   const terminal = await readCoverPublicationTerminalResult(context.env, eventId, operationId);
   if (!terminal) return null;
@@ -111,7 +112,7 @@ async function coverPublicationTerminalResponse(
         applied: true,
         appliedRevision: terminal.appliedRevision,
         operation: terminal.view,
-        event: await currentEventView(context, eventId, now),
+        event: await currentEventView(context, eventId, now, via),
       },
       requestId: context.get('requestId'),
     });
@@ -121,7 +122,7 @@ async function coverPublicationTerminalResponse(
       data: {
         applied: false,
         operation: terminal.view,
-        event: await currentEventView(context, eventId, now),
+        event: await currentEventView(context, eventId, now, via),
       },
       requestId: context.get('requestId'),
     }, 409);
@@ -385,7 +386,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
           data: {
             applied: false,
             operation: outcome.view,
-            event: await currentEventView(context, auth.event.id, now),
+            event: await currentEventView(context, auth.event.id, now, auth.via),
           },
           requestId: context.get('requestId'),
         }, 409);
@@ -395,7 +396,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
           applied: outcome.applied,
           appliedRevision: outcome.appliedRevision,
           operation: outcome.view,
-          event: await currentEventView(context, auth.event.id, now),
+          event: await currentEventView(context, auth.event.id, now, auth.via),
         },
         requestId: context.get('requestId'),
       });
@@ -408,7 +409,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
           message: error.message,
           data: {
             operation: await selectEventCoverPreparation(context.env, auth.event.id, now),
-            event: await currentEventView(context, auth.event.id, now),
+            event: await currentEventView(context, auth.event.id, now, auth.via),
           },
           requestId: context.get('requestId'),
         }, 409);
@@ -434,7 +435,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
         message: error.message,
         data: {
           operation: await selectEventCoverPreparation(context.env, auth.event.id, now),
-          event: await currentEventView(context, auth.event.id, now),
+          event: await currentEventView(context, auth.event.id, now, auth.via),
         },
         requestId: context.get('requestId'),
       }, 409);
@@ -447,7 +448,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
       data: {
         applied: false,
         operation: acceptance.view,
-        event: await currentEventView(context, auth.event.id, now),
+        event: await currentEventView(context, auth.event.id, now, auth.via),
       },
       requestId: context.get('requestId'),
     }, 409);
@@ -459,7 +460,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
         applied: true,
         appliedRevision: acceptance.receipt.applied_revision,
         operation: acceptance.view,
-        event: await currentEventView(context, auth.event.id, now),
+        event: await currentEventView(context, auth.event.id, now, auth.via),
       },
       requestId: context.get('requestId'),
     });
@@ -484,7 +485,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
     dispatched = dispatch.dispatched;
   }
   const terminalResponse = await coverPublicationTerminalResponse(
-    context, auth.event.id, request.operationId, now,
+    context, auth.event.id, request.operationId, now, auth.via,
   );
   if (terminalResponse) return terminalResponse;
   // `complete + failed` deliberately returns the retained failed D1 result:
@@ -512,7 +513,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
       now,
     });
     const lateTerminalResponse = await coverPublicationTerminalResponse(
-      context, auth.event.id, request.operationId, now,
+      context, auth.event.id, request.operationId, now, auth.via,
     );
     if (lateTerminalResponse) return lateTerminalResponse;
     context.header('Retry-After', String(recovery?.retryAfterSeconds ?? 2));
@@ -531,7 +532,7 @@ eventCoverRoutes.post('/manage/events/:eventId/cover/publications', async (conte
     now,
   }) ?? acceptance.view;
   const lateTerminalResponse = await coverPublicationTerminalResponse(
-    context, auth.event.id, request.operationId, now,
+    context, auth.event.id, request.operationId, now, auth.via,
   );
   if (lateTerminalResponse) return lateTerminalResponse;
   context.header('Location', `${coverBase(auth.event.id)}/publications/${request.operationId}`);
@@ -581,7 +582,7 @@ eventCoverRoutes.get(
         ...(terminal?.status === 'applied'
           ? {
               appliedRevision: terminal.appliedRevision,
-              event: await currentEventView(context, auth.event.id, now),
+              event: await currentEventView(context, auth.event.id, now, auth.via),
             }
           : {}),
       },
@@ -761,8 +762,9 @@ async function currentEventView(
   context: Context<AppBindings>,
   eventId: string,
   now: Date,
+  via: 'link' | 'account',
 ) {
   const event = await new EventsRepository(context.env.DB).getById(eventId);
   if (!event) throw new ApiError('EVENT_NOT_FOUND', 'This event could not be found.', 404);
-  return selectManagerEventView(context.env, event, now);
+  return selectManagerEventView(context.env, event, now, via);
 }

@@ -2568,9 +2568,27 @@ describe('manager exports', () => {
     `).bind(nextJob.id).all()).results).toEqual([{ media_id: kept.id }]);
   });
 
-  it('keeps an expired recoverable photo until the export holding its source is terminal', async () => {
+  it('keeps an expired retained slot saveable and reorderable under an accepted export hold until cleanup', async () => {
     const access = await eventAccess();
     const media = await uploadPending(access, 'held-source-cleanup', 'Held caption');
+    const neighbour = await uploadPending(access, 'held-source-neighbour', 'Neighbour caption');
+    await testEnv.DB.prepare(`
+      UPDATE media SET favorited_at = ? WHERE id IN (?, ?)
+    `).bind(ALBUM_SNAPSHOT_SOURCE_AT, media.id, neighbour.id).run();
+    const saved = await createApp().request(`/api/manage/events/${access.event.id}/album`, {
+      method: 'PUT',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        revision: 0,
+        entries: [
+          { kind: 'photo', mediaId: media.id },
+          { kind: 'section', id: 'held-section', heading: 'Held section' },
+          { kind: 'photo', mediaId: neighbour.id },
+        ],
+        metadata: { title: 'Held album', description: '', coverMediaId: media.id },
+      }),
+    }, testEnv);
+    expect(saved.status).toBe(200);
     const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
       method: 'POST', headers: writeHeaders(access.manager), body: '{}',
     }, testEnv);
@@ -2607,6 +2625,49 @@ describe('manager exports', () => {
     expect((await restore.json<any>()).code).toBe('MEDIA_STATE_CONFLICT');
     expect(await testEnv.CANONICAL_MEDIA_BUCKET.head(media.objectKey)).not.toBeNull();
 
+    const heldResponse = await createApp().request(
+      `/api/manage/events/${access.event.id}/album`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+    const heldAlbum = (await heldResponse.json<any>()).data.album;
+    expect(heldAlbum).toMatchObject({
+      photoCount: 1,
+      retainedCount: 1,
+      sectionCount: 1,
+      coverRetained: {
+        mediaId: media.id,
+        restoreUntil: '2026-06-02T12:00:00.000Z',
+        state: 'expired-cleanup-pending',
+      },
+    });
+    const reordered = await createApp().request(`/api/manage/events/${access.event.id}/album`, {
+      method: 'PUT',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        revision: heldAlbum.revision,
+        entries: [
+          { kind: 'photo', mediaId: neighbour.id },
+          { kind: 'section', id: 'held-section', heading: 'Held section' },
+          { kind: 'photo', mediaId: media.id },
+        ],
+        metadata: { title: 'Held album', description: '', coverMediaId: neighbour.id },
+      }),
+    }, testEnv);
+    expect(reordered.status).toBe(200);
+    const reorderedAlbum = (await reordered.json<any>()).data.album;
+    expect(reorderedAlbum.entries.map((entry: any) => (
+      entry.kind === 'photo' ? entry.photo.id
+        : entry.kind === 'photo-retained' ? entry.slot.mediaId : entry.id
+    ))).toEqual([neighbour.id, 'held-section', media.id]);
+    expect(reorderedAlbum).toMatchObject({
+      photoCount: 1,
+      retainedCount: 1,
+      sectionCount: 1,
+      coverMediaId: neighbour.id,
+      coverRetained: null,
+    });
+
     await failPristineExport(job.id);
 
     expect(await cleanupExpiredRecoverableMedia(testEnv, new Date()))
@@ -2619,6 +2680,35 @@ describe('manager exports', () => {
     expect(await testEnv.DB.prepare(`
       SELECT recoverable_media_count AS count, recoverable_bytes AS bytes FROM events WHERE id = ?
     `).bind(access.event.id).first()).toEqual({ count: 0, bytes: 0 });
+
+    const cleanedResponse = await createApp().request(
+      `/api/manage/events/${access.event.id}/album`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+    const cleanedAlbum = (await cleanedResponse.json<any>()).data.album;
+    expect(cleanedAlbum).toMatchObject({
+      revision: reorderedAlbum.revision + 1,
+      photoCount: 1,
+      retainedCount: 0,
+      sectionCount: 1,
+      coverMediaId: neighbour.id,
+    });
+    expect(JSON.stringify(cleanedAlbum)).not.toContain(media.id);
+
+    const staleSave = await createApp().request(`/api/manage/events/${access.event.id}/album`, {
+      method: 'PUT',
+      headers: writeHeaders(access.manager),
+      body: JSON.stringify({
+        revision: reorderedAlbum.revision,
+        entries: [
+          { kind: 'photo', mediaId: neighbour.id },
+          { kind: 'photo', mediaId: media.id },
+        ],
+      }),
+    }, testEnv);
+    expect(staleSave.status).toBe(409);
+    expect((await staleSave.json<any>()).code).toBe('REVISION_CONFLICT');
   });
 
   it('refuses retry before deleting ready inventory and resets all six Guestbook fields after durable deletion', async () => {

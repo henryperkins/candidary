@@ -1,6 +1,6 @@
 # Host Gallery Account Lifecycle and Rotation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use test-driven development, preserve all existing Slice 1–4 work, and do not commit unless the user asks.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use strict focused RED, minimal implementation, focused GREEN, then a fresh implementer handoff and independent review for every task. Do not commit this task or checkpoint: all five Slice 5 plans receive exactly one final commit only after every task and final Slice review gate passes.
 
 **Goal:** Make registration tell the truth about when an account exists, give the events dashboard the three controls it is missing, make management-link rotation something a host can only do when they can survive it, and normalize seven destructive actions onto one three-rung ladder — built here, closed by the checkpoint that renames its last rung.
 
@@ -13,7 +13,11 @@
 ## Global constraints and preflight rulings
 
 - Work only in `/home/henry/candidary/.worktrees/gallery-roadmap-remediation` on branch `codex/gallery-roadmap-remediation`. Do not push, deploy, merge, migrate a remote database, mutate a pull request, or change secrets.
-- **Depends on** `2026-08-27-host-gallery-manager-upload-authority.md` for the atomic `LinkService.rotateManagementLink` transaction. Do not reimplement it here.
+- Preserve unrelated and untracked files plus all authored/custom content. Keep Slice 6 findings C-34, C-38, and C-62 out of scope.
+- Every task is independently testable and receives a fresh implementer handoff plus an independent task review. Record focused RED/GREEN evidence; resolve every P1/P2 before advancing.
+- Do not run repository-wide verification, full builds, full lint/typecheck, full E2E, `npm test`, or `ci:migrations`. Use only named test files/spec filters, changed-file lint where applicable, the matrix parser, and `git diff --check`.
+- Do not make task-level or checkpoint commits. The release owner creates exactly one final Slice 5 commit only after all five plans, focused gates, and final independent Slice review are complete.
+- **Depends on** `2026-08-27-host-gallery-manager-upload-authority.md` for migration 0021's `manager_link_revision`, the account-authorized `managerLinkRevision` projection, the strict expected-revision request, and the atomic `LinkService.rotateManagementLink` transaction. Do not reimplement them here.
 - No migration belongs to this checkpoint.
 - The browser stores only `SHA-256(normalize(email))` and the 15-minute expiry under a versioned `localStorage` key. It never stores the raw email, password, confirmation code, browser secret, or challenge ID. A test must assert each of those five absences explicitly.
 - `GET /api/host/register/pending` accepts **no email**. It answers only for the browser's own registration cookie and returns exactly `{ data: { pending, expiresAt }, requestId }` with `private, no-store`. Existing anti-enumeration behavior for another browser or a different address is unchanged — add regressions, do not relax them.
@@ -22,8 +26,8 @@
 - On a network or transport outcome where commit cannot be known, the UI must not claim either link state. Its exact copy is **Couldn't confirm whether the link changed. Rotate again to create a link you can save.**
 - Client-side validation happens before every request on every rung of the ladder. **No request that has a confirmation may be sent before that confirmation succeeds** — which is the two lower rungs. The reversible rung has no confirmation and is deliberately immediate; do not read this constraint as an instruction to add one.
 - Preserve the existing host registration, verification, ownership, and management-link services as authoritative. Host Events receives bounded controls, not a new organizer product. Archive is explicitly not introduced.
-- Every behavior change follows RED → GREEN → REFACTOR.
-- Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-account-lifecycle-and-rotation/`, then take an independent spec and code review. Fix every P1/P2 before advancing.
+- Every behavior change follows RED → minimal GREEN → scoped refactor.
+- Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-account-lifecycle-and-rotation/`; the task review checkpoint records the fresh implementer and independent reviewer outcome without committing.
 
 ## Checkpoint boundary
 
@@ -36,18 +40,22 @@ This checkpoint owns C-09, C-10, C-52, and C-59, and it **builds** the safety la
 ### Task 1: Truthful registration and a pending marker
 
 **Files:**
+- Modify: `shared/contracts.ts`
 - Modify: `worker/routes/host-auth.ts`
 - Modify: `worker/services/host-auth.ts`
 - Create: `src/app/pending-registration.ts`
 - Create: `tests/unit/pending-registration.test.ts`
+- Modify: `src/components/HostAccountPanel.tsx`
 - Modify: `src/pages/HostRegisterPage.tsx`
 - Modify: `src/pages/HostLoginPage.tsx`
+- Modify only if the callback wiring requires it: `src/pages/CreatePage.tsx`
 - Modify: `tests/worker/host-auth.test.ts`
 - Modify: `tests/worker/host-auth-boundary.test.ts`
 - Create: `tests/ui/host-auth.test.tsx`
+- Modify: `tests/ui/app.test.tsx` *(CreatePage callback flow only)*
 
 **Interfaces:**
-- `POST /api/host/register` accepted response becomes `{ data: { registrationPending: true, resumeExpiresAt }, requestId }`.
+- `RegistrationPendingResponse` in `shared/contracts.ts` becomes `{ registrationPending: true; resumeExpiresAt: string }`. Both `POST /api/host/register` and a successfully delivered `POST /api/host/register/resend` return it inside the existing success envelope.
 - New: `GET /api/host/register/pending` → `{ data: { pending: boolean, expiresAt: string | null }, requestId }`.
 - Produces:
 
@@ -59,11 +67,30 @@ export interface PendingRegistrationMarker {
   expiresAt: string;
 }
 
-export function rememberPendingRegistration(email: string, expiresAt: string): Promise<void>;
+export interface AcceptedPendingRegistration {
+  email: string;
+  resumeExpiresAt: string;
+}
+
+export function rememberPendingRegistration(input: AcceptedPendingRegistration): Promise<void>;
+/** Preserve the stored digest and replace only its expiry. False means no valid stored marker. */
+export function refreshPendingRegistrationExpiry(resumeExpiresAt: string): boolean;
 export function readPendingRegistration(now: Date): Promise<PendingRegistrationMarker | null>;
 export function matchesPendingRegistration(email: string, now: Date): Promise<boolean>;
 export function clearPendingRegistration(): void;
 ```
+
+`HostAccountPanel` is the sole owner of accepted start/resend response data and exposes two non-overlapping persistence handoffs:
+
+```ts
+interface HostAccountPanelProps {
+  // existing props
+  onRegistrationPending?: (pending: AcceptedPendingRegistration) => void;
+  onRegistrationResent?: (pending: { resumeExpiresAt: string }) => void;
+}
+```
+
+After an accepted initial submit, the panel passes the normalized submit email together with the returned expiry to `onRegistrationPending`; the parent calls `rememberPendingRegistration`, so it has the raw email exactly long enough to hash it. After a delivered resend, including after a reload where the panel no longer has raw email, the panel passes only the returned expiry to `onRegistrationResent`; the parent calls `refreshPendingRegistrationExpiry`, which preserves the stored digest. Standalone `HostRegisterPage` wires both handoffs. The CreatePage flow wires the same handoffs only if its existing `onStarted` contract cannot carry them cleanly; do not edit CreatePage for presentation-only duplication. A failed or undelivered resend invokes neither handoff and leaves the serialized marker byte-for-byte unchanged.
 
 - [ ] **Step 1: Write the failing marker tests**
 
@@ -72,6 +99,8 @@ export function clearPendingRegistration(): void;
 - an expired marker reads as `null` and is cleared;
 - a corrupt or wrong-version payload reads as `null` without throwing;
 - a different address does not match;
+- `refreshPendingRegistrationExpiry` preserves the exact stored digest while replacing only `expiresAt`, including after a simulated reload with no raw email in memory;
+- refresh with no valid stored marker returns false and never creates a digest-less marker;
 - `clearPendingRegistration` removes the key.
 
 - [ ] **Step 2: Write the failing endpoint tests**
@@ -83,12 +112,13 @@ export function clearPendingRegistration(): void;
 - after completion it returns `pending: false`;
 - the response carries `private, no-store`;
 - existing anti-enumeration responses for register, login, resend, and forgot-password are unchanged.
+- initial accepted registration and a successfully delivered resend each include an exact `resumeExpiresAt`; a failed/undelivered resend does not report success and does not extend expiry.
 
 - [ ] **Step 3: Run and verify RED**
 
 ```bash
 npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts
-npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts -t 'register/pending'
+npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts -t '(register/pending|resumeExpiresAt)'
 ```
 
 Expected: both FAIL.
@@ -103,6 +133,8 @@ The two suites above cover the marker module and the endpoint. Neither can prove
 
 *Cross-tab and reload.* A marker written in one tab is honored by a second mount reading the same storage; a reload mid-registration resumes from the marker; and completion, **Start over**, an explicit restart, and expiry each clear it so a later sign-in is not intercepted.
 
+*Persistence ownership.* Run the same table through standalone `HostRegisterPage` and the CreatePage-embedded `HostAccountPanel`: accepted start hands off `{ email, resumeExpiresAt }` and stores the computed digest/expiry; after a remount with no raw email in panel or parent state, a delivered resend hands off only `{ resumeExpiresAt }`, preserves the existing digest, and replaces the expiry; a rejected resend invokes neither callback and leaves the prior marker byte-for-byte unchanged. Assert `HostAccountPanel` invokes each callback only after `api()` resolves.
+
 Registration copy states that the account is created only after code confirmation.
 
 ```bash
@@ -111,25 +143,22 @@ npx vitest run --config vitest.config.ts tests/ui/host-auth.test.tsx
 
 Expected: FAIL — the page behavior does not exist.
 
-- [ ] **Step 5: Implement the marker, the endpoint, the pages, and the copy**
+- [ ] **Step 5: Implement the marker, endpoint, panel-owned expiry, pages, and copy**
+
+Add `resumeExpiresAt` to the shared response contract and return it from the service result used by both start and resend. `HostAccountPanel` reads the response and invokes `onRegistrationPending({ email, resumeExpiresAt })` or `onRegistrationResent({ resumeExpiresAt })` only after the corresponding request resolves successfully. The initial owner hashes the handed-off email once; resend refreshes the existing marker through `refreshPendingRegistrationExpiry` and never requires raw email. Wire standalone and CreatePage flows through the same owner contract; edit `CreatePage.tsx` only if this contract requires it.
 
 - [ ] **Step 6: Verify GREEN**
 
 Every suite this task creates is run here. A test file that is written but never executed and never staged is worse than no test: it reads in review as coverage that does not exist.
 
 ```bash
-npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts tests/ui/host-auth.test.tsx
+npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts tests/ui/host-auth.test.tsx tests/ui/app.test.tsx -t "(pending registration|CreatePage registration resend)"
 npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts tests/worker/host-auth-boundary.test.ts
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Task review checkpoint**
 
-```bash
-git add worker/routes/host-auth.ts worker/services/host-auth.ts src/app/pending-registration.ts src/pages/HostRegisterPage.tsx src/pages/HostLoginPage.tsx tests/unit/pending-registration.test.ts tests/ui/host-auth.test.tsx tests/worker/host-auth.test.ts tests/worker/host-auth-boundary.test.ts
-git commit -m "fix: say when a host account is created"
-```
-
-Confirm the file is staged before committing — `git status --short tests/ui/host-auth.test.tsx` must show it as added, not untracked.
+Record start/resend expiry, callback ownership, storage non-disclosure, standalone, CreatePage, endpoint, and anti-enumeration evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit, and confirm every newly created test file appears in `git status --short`.
 
 ---
 
@@ -165,12 +194,9 @@ npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'registration 
 npx vitest run --config vitest.config.ts tests/unit/recovery.test.ts tests/ui/app.test.tsx
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Task review checkpoint**
 
-```bash
-git add src/pages/HostRegisterPage.tsx src/app/recovery.ts tests/unit/recovery.test.ts tests/ui/app.test.tsx
-git commit -m "fix: end registration on the events dashboard"
-```
+Record safe-return and failed-bind evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
@@ -200,7 +226,10 @@ git commit -m "fix: end registration on the events dashboard"
 
 ```bash
 npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts -t 'eventTimezone'
+npx vitest run --config vitest.config.ts tests/ui/host-events.test.tsx
 ```
+
+Expected: the Worker command fails on the missing allowlist field, and the UI command fails on the missing create/search/sort/time-zone behaviors. Record both RED outputs before changing the route or page.
 
 - [ ] **Step 3: Implement and verify GREEN**
 
@@ -209,16 +238,13 @@ npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts
 npx vitest run --config vitest.config.ts tests/ui/host-events.test.tsx
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Task review checkpoint**
 
-```bash
-git add worker/routes/host-auth.ts shared/contracts.ts src/pages/HostEventsPage.tsx tests/worker/host-auth.test.ts tests/ui/host-events.test.tsx
-git commit -m "feat: give the events dashboard create, search, and sort"
-```
+Record exact allowlist, formatter, search/sort, and keyboard evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
-### Task 4: Account-gated rotation availability
+### Task 4: Account-gated rotation availability and revision contract
 
 **Files:**
 - Modify: `shared/contracts.ts`
@@ -238,6 +264,8 @@ export interface ManagerLinkRotationAvailability {
 
 Derived from the **same accepted authorization source** `requireManager` resolved, and invalidated with the event and account resources. Enabled only when authorization resolved through an active host account holding owner or cohost membership for that event.
 
+- Consumes the earlier `EventView.managerLinkRevision: number | null` contract. Account owner/cohost reads receive the current integer; link-only receives `null`. The strict route body is `{ expectedManagerLinkRevision: number }`; it returns `{ managementLink, managerLinkRevision }` and never a token ID.
+
 - [ ] **Step 1: Write the failing availability tests**
 
 - account owner → enabled;
@@ -247,6 +275,8 @@ Derived from the **same accepted authorization source** `requireManager` resolve
 - a disabled account or removed membership → not enabled;
 - a direct `POST .../links/manager/rotate` from link-only access still returns `403 ROLE_FORBIDDEN`;
 - the existing `OWNER_CLAIM_REQUIRED` 409 precondition is preserved.
+- account request observed revision `0`, request B succeeds to `1`, then delayed request A with `0` conflicts and cannot rotate B's link;
+- unknown, missing, negative, or extra request fields are `VALIDATION_FAILED`; token IDs are absent from request, projection, success, and failure bodies.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -260,12 +290,9 @@ npx vitest run --config vitest.worker.config.ts tests/worker/manage-api.test.ts 
 npx vitest run --config vitest.worker.config.ts tests/worker/manage-api.test.ts
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Task review checkpoint**
 
-```bash
-git add shared/contracts.ts worker/http/event-view.ts worker/routes/manage.ts tests/worker/manage-api.test.ts
-git commit -m "feat: gate link rotation on an owning account"
-```
+Record availability, revision privacy, strict-body, delayed-request, and account-precedence evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
@@ -283,6 +310,7 @@ git commit -m "feat: gate link rotation on an owning account"
 - Link-only access renders a focusable disabled action with the inline explanation **Sign in to an account that owns or cohosts this event to rotate its link**, plus the existing sign-in / save-to-account path.
 - Before sending, `ManagerPage` retires the current resource generation and pauses export polling and other Manager mutations while retaining the last trusted view behind the dialog.
 - The result renders through `CopyableLinkCard` in Slice 2's sensitive mode and initially focuses **Copy management link**.
+- Every rotation request sends the `managerLinkRevision` from the same account-authorized `EventView` that enabled the action. On ambiguous transport outcome, refresh the account-authorized projection first; rerotation uses that refreshed revision, never the stale pre-request value or a token/timestamp.
 
 - [ ] **Step 1: Write the failing dialog suite**
 
@@ -298,7 +326,8 @@ git commit -m "feat: gate link rotation on an owning account"
 *Outcomes*
 - a clear HTTP failure before commit resumes resources and says the current link was **not** changed;
 - a network or transport outcome renders exactly **Couldn't confirm whether the link changed. Rotate again to create a link you can save.** and claims neither state;
-- a subsequent account-authorized rotation invalidates any unknown replacement.
+- after that ambiguous outcome, the client refreshes the account-authorized projection and the next rotation sends its observed revision; if B already committed, delayed/stale A cannot rotate B, while the refreshed rerotation can invalidate the unknown replacement safely;
+- no link-only or ownerless recovery path is added.
 
 *Save gate*
 - until Copy succeeds or the fallback acknowledgement is given, Escape and backdrop are disabled, the Router blocker rejects Back **and** a programmatic location change, and `beforeunload` warns;
@@ -313,18 +342,17 @@ git commit -m "feat: gate link rotation on an owning account"
 npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'rotate'
 ```
 
-- [ ] **Step 3: Implement and verify GREEN**
+- [ ] **Step 3: Implement revision-aware rotation and verify GREEN**
+
+Build the request body from the captured account-authorized event view. Treat `managerLinkRevision === null` as unavailable even if a stale availability object says enabled. After ambiguous transport failure, resume only the account read needed to refresh the projection; do not issue a new rotate until the user confirms again, and then send the refreshed revision.
 
 ```bash
 npx vitest run --config vitest.config.ts tests/ui/copyable-link-card.test.tsx tests/ui/app.test.tsx tests/ui/manager-recovery.test.tsx
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Task review checkpoint**
 
-```bash
-git add src/pages/ManagerPage.tsx src/components/CopyableLinkCard.tsx src/components/ManagementLinkRecovery.tsx tests/ui/copyable-link-card.test.tsx tests/ui/app.test.tsx tests/ui/manager-recovery.test.tsx
-git commit -m "fix: make a rotated link impossible to lose"
-```
+Record expected-revision, ambiguous refresh/rerotate, result gate, sole blocker, and focus evidence. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
@@ -394,12 +422,9 @@ npx vitest run --config vitest.config.ts tests/ui/app.test.tsx -t 'safety ladder
 npx vitest run --config vitest.config.ts tests/ui/app.test.tsx tests/ui/album-workspace.test.tsx tests/ui/manager-recovery.test.tsx
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Task review checkpoint**
 
-```bash
-git add src/pages/ManagerPage.tsx src/features/gallery/ManagerAlbum.tsx src/features/gallery/ManagerPrivateGallery.tsx src/components/EventSettingsEditor.tsx tests/ui/app.test.tsx tests/ui/album-workspace.test.tsx tests/ui/manager-recovery.test.tsx
-git commit -m "fix: match confirmation friction to consequence"
-```
+Record every named rung and per-rung request timing result. Obtain fresh-implementer and independent review; resolve P1/P2. Do not stage or commit.
 
 ---
 
@@ -432,24 +457,18 @@ Do **not** write or edit a C-16 row here. Per the ladder-ownership ruling, the l
 - [ ] **Step 5: Run the complete checkpoint gates**
 
 ```bash
-npm run typecheck
-npm run typecheck:e2e
-npm run lint
 npx vitest run --config vitest.worker.config.ts tests/worker/host-auth.test.ts tests/worker/host-auth-boundary.test.ts tests/worker/manage-api.test.ts
-npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts tests/ui/host-auth.test.tsx tests/ui/app.test.tsx tests/ui/host-events.test.tsx tests/ui/manager-recovery.test.tsx
-npm test
-npm run build
-npm run test:e2e
-git diff --check
+npx vitest run --config vitest.config.ts tests/unit/pending-registration.test.ts tests/unit/recovery.test.ts tests/ui/host-auth.test.tsx tests/ui/app.test.tsx tests/ui/host-events.test.tsx tests/ui/manager-recovery.test.tsx tests/ui/copyable-link-card.test.tsx tests/ui/album-workspace.test.tsx
+npx playwright test tests/e2e/accessibility.spec.ts --project=desktop -g "(pending registration|Host Events|Rotate management link)"
+npx playwright test tests/e2e/manager-navigation-intents.spec.ts --project=desktop -g "rotation save gate"
+git diff --name-only --diff-filter=ACMR -- '*.ts' '*.tsx' | xargs -r npx eslint --
+git diff --check -- shared/contracts.ts worker/routes/host-auth.ts worker/services/host-auth.ts worker/http/event-view.ts worker/routes/manage.ts src/app/pending-registration.ts src/app/recovery.ts src/components/HostAccountPanel.tsx src/components/CopyableLinkCard.tsx src/components/ManagementLinkRecovery.tsx src/pages/HostRegisterPage.tsx src/pages/HostLoginPage.tsx src/pages/CreatePage.tsx src/pages/HostEventsPage.tsx src/pages/ManagerPage.tsx tests/unit tests/ui tests/worker tests/e2e/accessibility.spec.ts tests/e2e/manager-navigation-intents.spec.ts docs/superpowers/host-gallery-verification-matrix.md docs/security.md
 ```
 
-Expected: every command exits zero. The known build chunk-size and missing-local-secret warnings may remain; no new warning is accepted.
+Expected: every focused command exits zero. Do not substitute a full test, build, lint, typecheck, E2E, or migration run.
 
-- [ ] **Step 6: Commit the record**
+- [ ] **Step 6: Checkpoint review handoff**
 
-```bash
-git add tests/e2e/accessibility.spec.ts tests/e2e/manager-navigation-intents.spec.ts docs/superpowers/host-gallery-verification-matrix.md docs/security.md
-git commit -m "docs: record account lifecycle and rotation evidence"
-```
+Record the bounded browser, security, matrix, and focused outputs; run scoped `git diff --check` and obtain independent checkpoint review. Keep the entire Slice diff uncommitted for the final plan.
 
 Do not push. The next Slice 5 checkpoint is pause scope, first run, and deterministic polish.

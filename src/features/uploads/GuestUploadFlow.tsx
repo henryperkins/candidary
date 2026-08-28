@@ -1,41 +1,15 @@
 import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, Pencil, RotateCcw, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 
-import { MAX_IMAGE_BYTES } from '../../../shared/constants';
 import type { GuestEventCoverView } from '../../../shared/event-cover';
 import { guestEventCoverSlotPath } from '../../app/api';
+import { DATE_UNAVAILABLE, formatEventDate } from '../../app/event-date-time';
 import { readGuestName, rememberGuestName } from '../../app/guest-name-storage';
 import { GuestEventHero } from '../../components/GuestEventHero';
-import { createBrowserTransport } from './browser-upload-transport';
-import {
-  getReceiptCount,
-  removeQueueItem,
-  runUploadQueue,
-  type UploadQueueItem,
-  type UploadQueueState,
-  type UploadTransport,
-} from './upload-queue';
+import type { UploadQueueItem, UploadQueueState } from './upload-queue';
+import { IMAGE_ACCEPT } from './upload-selection';
 
-const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/heic-sequence,image/heif-sequence,.heic,.heif';
-const CLIENT_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const ALLOWED_IMAGE_TYPES = new Set([
-  ...CLIENT_IMAGE_TYPES,
-  'image/jpg',
-  'image/heic',
-  'image/heif',
-  'image/heic-sequence',
-  'image/heif-sequence',
-]);
-const PROVISIONAL_HEIF_TYPES = new Map([
-  ['', null],
-  ['application/octet-stream', null],
-  ['binary/octet-stream', null],
-  ['image/x-heic', 'heic'],
-  ['image/x-heic-sequence', 'heic'],
-  ['image/x-heif', 'heif'],
-  ['image/x-heif-sequence', 'heif'],
-]);
-interface GuestUploadEvent {
+export interface GuestUploadEvent {
   name: string;
   eventDate: string;
   welcomeMessage: string;
@@ -43,29 +17,29 @@ interface GuestUploadEvent {
   cover: GuestEventCoverView;
 }
 
-interface GuestUploadFlowProps {
+export interface UploadFlowSession {
+  readonly items: readonly UploadQueueItem[];
+  readonly sending: boolean;
+  readonly receiptCount: number;
+  adoptFiles(files: FileList | null, isNewCapture: boolean): void;
+  canRemoveItem(itemId: string): boolean;
+  removeItem(itemId: string): void;
+  send(): Promise<void>;
+  cancel(): Promise<void>;
+}
+
+export interface GuestUploadFlowProps {
   event: GuestUploadEvent;
   slug: string;
-  transport?: UploadTransport;
-  onDelivered?: (count: number) => void;
+  session: UploadFlowSession;
+  uploadsAvailable: boolean;
+  unavailableMessage: string;
+  variant?: 'guest' | 'manager';
   guestName?: string;
   onGuestNameChange?: (name: string) => void;
   onLeaveGuestbook?: () => void;
-}
-
-function validationMessage(file: File): string | null {
-  if (file.size < 1) return 'This photo is empty. Choose it again.';
-  if (file.size > MAX_IMAGE_BYTES) return 'This photo is larger than 20 MB.';
-  const extension = file.name.toLowerCase().split('.').pop();
-  const normalizedType = file.type.toLowerCase();
-  const expectedExtension = PROVISIONAL_HEIF_TYPES.get(normalizedType);
-  const provisionalHeif = PROVISIONAL_HEIF_TYPES.has(normalizedType)
-    && (extension === 'heic' || extension === 'heif')
-    && (!expectedExtension || extension === expectedExtension);
-  if (!ALLOWED_IMAGE_TYPES.has(normalizedType) && !provisionalHeif) {
-    return 'Choose a JPG, PNG, WebP, HEIC, or HEIF photo.';
-  }
-  return null;
+  headingLevel?: 'h1' | 'h2' | 'h3';
+  receiptAction?: ReactNode;
 }
 
 function statusLabel(state: UploadQueueState, progress: number) {
@@ -85,45 +59,35 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`) {
 export function GuestUploadFlow({
   event,
   slug,
-  transport,
-  onDelivered,
+  session,
+  uploadsAvailable,
+  unavailableMessage,
+  variant = 'guest',
   guestName,
   onGuestNameChange,
   onLeaveGuestbook,
+  headingLevel = variant === 'manager' ? 'h3' : 'h1',
+  receiptAction,
 }: GuestUploadFlowProps) {
   const [fallbackName, setFallbackName] = useState(readGuestName);
-  const name = guestName ?? fallbackName;
-  const [editingName, setEditingName] = useState(!name);
+  const manager = variant === 'manager';
+  const name = manager ? 'Host' : guestName ?? fallbackName;
+  const [editingName, setEditingName] = useState(!manager && !name);
   const [nameError, setNameError] = useState('');
-  const [items, setItems] = useState<UploadQueueItem[]>([]);
-  const [sending, setSending] = useState(false);
   const cameraInput = useRef<HTMLInputElement>(null);
   const libraryInput = useRef<HTMLInputElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
-  const objectUrls = useRef(new Set<string>());
-  const uploadController = useRef<AbortController | null>(null);
-  const notifiedReceipt = useRef<number | null>(null);
-  const receiptCount = getReceiptCount(items);
+  const { items, sending, receiptCount } = session;
+  const Heading = headingLevel;
 
   function updateName(value: string) {
+    if (manager) return;
     if (guestName === undefined) setFallbackName(value);
     onGuestNameChange?.(value);
   }
 
-  useEffect(() => () => {
-    uploadController.current?.abort();
-    uploadController.current = null;
-    objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
-  }, []);
-
-  useEffect(() => {
-    if (receiptCount && notifiedReceipt.current !== receiptCount) {
-      notifiedReceipt.current = receiptCount;
-      onDelivered?.(receiptCount);
-    }
-  }, [onDelivered, receiptCount]);
-
   function saveName(): string | null {
+    if (manager) return 'Host';
     const trimmed = name.trim();
     if (!trimmed) {
       setNameError('Enter your name before adding photos.');
@@ -140,56 +104,18 @@ export function GuestUploadFlow({
   }
 
   function openSource(input: HTMLInputElement | null) {
-    if (!event.uploadsEnabled || !saveName()) return;
+    if (!uploadsAvailable || !saveName()) return;
     input?.click();
   }
 
-  function addFiles(files: FileList | null, isNewCapture: boolean) {
-    if (!files?.length || !saveName()) return;
-    const next = Array.from(files).map((file): UploadQueueItem => {
-      const error = validationMessage(file);
-      let previewUrl: string | undefined;
-      if (CLIENT_IMAGE_TYPES.has(file.type) && typeof URL.createObjectURL === 'function') {
-        previewUrl = URL.createObjectURL(file);
-        objectUrls.current.add(previewUrl);
-      }
-      return {
-        id: crypto.randomUUID(),
-        file,
-        state: error ? 'failed' : 'selected',
-        progress: 0,
-        isNewCapture,
-        ...(error ? { error, validationError: true } : {}),
-        ...(previewUrl ? { previewUrl } : {}),
-      };
-    });
-    setItems((current) => [...current, ...next]);
+  function adoptFiles(files: FileList | null, isNewCapture: boolean) {
+    if (!uploadsAvailable || !saveName()) return;
+    session.adoptFiles(files, isNewCapture);
   }
 
-  function remove(id: string) {
-    const target = items.find((item) => item.id === id);
-    if (target?.previewUrl) {
-      URL.revokeObjectURL(target.previewUrl);
-      objectUrls.current.delete(target.previewUrl);
-    }
-    setItems((current) => removeQueueItem(current, id));
-  }
-
-  async function send() {
-    const savedName = saveName();
-    if (!savedName || sending) return;
-    const controller = new AbortController();
-    uploadController.current = controller;
-    setSending(true);
-    const activeTransport = transport ?? createBrowserTransport(slug, savedName);
-    const result = await runUploadQueue(items, activeTransport, {
-      concurrency: 2,
-      onChange: setItems,
-      signal: controller.signal,
-    });
-    setItems(result);
-    setSending(false);
-    uploadController.current = null;
+  async function sendSelected() {
+    if (!uploadsAvailable || !saveName()) return;
+    await session.send();
   }
 
   const unresolvedCount = items.filter(({ state, validationError }) =>
@@ -200,24 +126,38 @@ export function GuestUploadFlow({
   const validationFailureCount = items.filter(({ validationError }) => validationError).length;
   const onlyValidationFailures = items.length > 0 && validationFailureCount === items.length;
   const reviewMode = items.length > 0;
-  const eventDate = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
-    .format(new Date(`${event.eventDate}T12:00:00`));
+  const eventDate = formatEventDate(event.eventDate, 'compact') ?? DATE_UNAVAILABLE;
 
-  if (receiptCount) {
+  if (receiptCount > 0) {
     return <section className="photo-drop photo-drop--receipt" aria-live="polite">
       <div className="delivery-receipt">
         <span className="delivery-receipt__check"><Check aria-hidden="true" /></span>
-        <p className="delivery-receipt__eyebrow">Delivered to {event.name}</p>
-        <h1>Your {receiptCount} {plural(receiptCount, 'photo')} {receiptCount === 1 ? 'was' : 'were'} sent.</h1>
-        {validationFailureCount > 0 && <p className="delivery-receipt__caveat">{validationFailureCount} {plural(validationFailureCount, 'photo')} could not be added.</p>}
-        <p>Thanks, {name}. You’re all done and can close this page.</p>
-        {onLeaveGuestbook && <button type="button" className="button button--secondary delivery-receipt__guestbook" onClick={onLeaveGuestbook}>Leave a guestbook note</button>}
+        <p className="delivery-receipt__eyebrow">
+          {manager ? `Added to ${event.name}` : `Delivered to ${event.name}`}
+        </p>
+        <Heading>{manager
+          ? <>{receiptCount} {plural(receiptCount, 'photo')} {receiptCount === 1 ? 'was' : 'were'} added.</>
+          : <>Your {receiptCount} {plural(receiptCount, 'photo')} {receiptCount === 1 ? 'was' : 'were'} sent.</>}
+        </Heading>
+        {validationFailureCount > 0 && <p className="delivery-receipt__caveat">
+          {validationFailureCount} {plural(validationFailureCount, 'photo')} could not be added.
+        </p>}
+        <p>{manager
+          ? 'The delivered photos are now in Intake.'
+          : <>Thanks, {name}. You’re all done and can close this page.</>}
+        </p>
+        {!manager && onLeaveGuestbook && <button
+          type="button"
+          className="button button--secondary delivery-receipt__guestbook"
+          onClick={onLeaveGuestbook}
+        >Leave a guestbook note</button>}
+        {receiptAction}
       </div>
     </section>;
   }
 
   return <section className={`photo-drop${reviewMode ? ' photo-drop--review' : ''}`}>
-    {!reviewMode && <GuestEventHero
+    {!manager && !reviewMode && <GuestEventHero
       event={event}
       sourceFor={(slot) => guestEventCoverSlotPath(slug, slot)}
       lookup={false}
@@ -226,14 +166,20 @@ export function GuestUploadFlow({
     <div className="photo-drop__card">
       {reviewMode && <header className="review-heading">
         <p>{event.name} <span aria-hidden="true">·</span> {eventDate}</p>
-        <p>Sending as {name}</p>
-        <h1>{sending ? 'Sending photos' : 'Ready to send'}</h1>
-        <button type="button" className="text-button" onClick={() => setEditingName(true)} disabled={sending}>
-          <Pencil aria-hidden="true" /> Edit name
-        </button>
+        <p>{manager ? 'From Host' : `Sending as ${name}`}</p>
+        <Heading>{manager
+          ? sending ? 'Adding photos' : 'Ready to add'
+          : sending ? 'Sending photos' : 'Ready to send'}
+        </Heading>
+        {!manager && <button
+          type="button"
+          className="text-button"
+          onClick={() => setEditingName(true)}
+          disabled={sending}
+        ><Pencil aria-hidden="true" /> Edit name</button>}
       </header>}
 
-      {editingName ? <label className="photo-drop__name">
+      {!manager && (editingName ? <label className="photo-drop__name">
         <span>Your name <strong>Required</strong></span>
         <input
           ref={nameInput}
@@ -249,18 +195,35 @@ export function GuestUploadFlow({
         />
       </label> : !reviewMode && <div className="sending-as">
         <span>Sending as {name}</span>
-        <button type="button" className="text-button" aria-label="Edit name" onClick={() => setEditingName(true)}><Pencil aria-hidden="true" /> Edit</button>
-      </div>}
-      {nameError && <p className="field-error" id="guest-name-error" role="alert"><AlertCircle aria-hidden="true" /> {nameError}</p>}
+        <button
+          type="button"
+          className="text-button"
+          aria-label="Edit name"
+          onClick={() => setEditingName(true)}
+        ><Pencil aria-hidden="true" /> Edit</button>
+      </div>)}
+      {manager && !reviewMode && <div className="sending-as"><span>From Host</span></div>}
+      {nameError && <p className="field-error" id="guest-name-error" role="alert">
+        <AlertCircle aria-hidden="true" /> {nameError}
+      </p>}
 
       {!reviewMode ? <div className="photo-source-actions">
-        <button type="button" className="source-button source-button--camera" disabled={!event.uploadsEnabled} onClick={() => openSource(cameraInput.current)}>
-          <Camera aria-hidden="true" /> Take a photo
-        </button>
-        <button type="button" className="source-button source-button--library" disabled={!event.uploadsEnabled} onClick={() => openSource(libraryInput.current)}>
-          <Images aria-hidden="true" /> Choose recent photos
-        </button>
-        <p>{event.uploadsEnabled ? 'No account needed. Your name is remembered here.' : 'The host has paused photo delivery for now.'}</p>
+        <button
+          type="button"
+          className="source-button source-button--camera"
+          disabled={!uploadsAvailable}
+          onClick={() => openSource(cameraInput.current)}
+        ><Camera aria-hidden="true" /> Take a photo</button>
+        <button
+          type="button"
+          className="source-button source-button--library"
+          disabled={!uploadsAvailable}
+          onClick={() => openSource(libraryInput.current)}
+        ><Images aria-hidden="true" /> Choose recent photos</button>
+        <p>{uploadsAvailable
+          ? manager ? 'Photos are added privately to Intake.' : 'No account needed. Your name is remembered here.'
+          : unavailableMessage}
+        </p>
       </div> : <>
         <ul className="selection-grid" aria-label="Selected photos" aria-live="polite">
           {items.map((item) => <li key={item.id} className={`selection-card selection-card--${item.state}`}>
@@ -269,35 +232,76 @@ export function GuestUploadFlow({
                 ? <img src={item.previewUrl} alt="" />
                 : <ImageIcon aria-hidden="true" />}
               {item.isNewCapture && <span className="new-badge">New</span>}
-              {['selected', 'failed'].includes(item.state) && <button type="button" aria-label={`Remove ${item.file.name}`} onClick={() => remove(item.id)} disabled={sending}><X aria-hidden="true" /></button>}
-              {['reserving', 'queued', 'uploading', 'finalizing'].includes(item.state) && <span className="selection-card__spinner"><LoaderCircle aria-hidden="true" /></span>}
-              {item.state === 'delivered' && <span className="selection-card__delivered"><Check aria-hidden="true" /></span>}
+              {['selected', 'failed'].includes(item.state) && <button
+                type="button"
+                aria-label={`Remove ${item.file.name}`}
+                onClick={() => session.removeItem(item.id)}
+                disabled={sending || !session.canRemoveItem(item.id)}
+              ><X aria-hidden="true" /></button>}
+              {['reserving', 'queued', 'uploading', 'finalizing'].includes(item.state) && <span className="selection-card__spinner">
+                <LoaderCircle aria-hidden="true" />
+              </span>}
+              {item.state === 'delivered' && <span className="selection-card__delivered">
+                <Check aria-hidden="true" />
+              </span>}
             </div>
             <div className="selection-card__status">
               <strong>{item.file.name}</strong>
               <span>{statusLabel(item.state, item.progress)}</span>
               {item.error && <small>{item.error}</small>}
-              {item.state === 'uploading' && <progress max="100" value={item.progress} aria-label={`Sending ${item.file.name}`} />}
+              {item.state === 'uploading' && <progress
+                max="100"
+                value={item.progress}
+                aria-label={`Sending ${item.file.name}`}
+              />}
             </div>
           </li>)}
         </ul>
         <div className="selection-add-actions">
-          <button type="button" className="source-button source-button--library" disabled={sending} onClick={() => openSource(libraryInput.current)}><Images aria-hidden="true" /> Add recent photos</button>
-          <button type="button" className="text-button" disabled={sending} onClick={() => openSource(cameraInput.current)}><RotateCcw aria-hidden="true" /> Retake a photo</button>
+          <button
+            type="button"
+            className="source-button source-button--library"
+            disabled={sending || !uploadsAvailable}
+            onClick={() => openSource(libraryInput.current)}
+          ><Images aria-hidden="true" /> Add recent photos</button>
+          <button
+            type="button"
+            className="text-button"
+            disabled={sending || !uploadsAvailable}
+            onClick={() => openSource(cameraInput.current)}
+          ><RotateCcw aria-hidden="true" /> Retake a photo</button>
         </div>
+        {!uploadsAvailable && <p className="field-error" role="alert">
+          <AlertCircle aria-hidden="true" /> {unavailableMessage}
+        </p>}
         <div className="selection-summary">
           <span>{items.length} {plural(items.length, 'photo')} selected</span>
-          {failedCount > 0 && <span className="selection-summary__attention">{failedCount} {plural(failedCount, 'needs', 'need')} attention</span>}
+          {failedCount > 0 && <span className="selection-summary__attention">
+            {failedCount} {plural(failedCount, 'needs', 'need')} attention
+          </span>}
         </div>
-        {(sending || unresolvedCount > 0) && <button type="button" className="send-button" disabled={sending} onClick={() => void send()}>
-          {sending ? <><LoaderCircle aria-hidden="true" /> Sending…</> : `${attemptedFailureCount > 0 ? 'Retry' : 'Send'} ${unresolvedCount} ${plural(unresolvedCount, 'photo')}`}
+        {(sending || unresolvedCount > 0) && <button
+          type="button"
+          className="send-button"
+          disabled={sending || !uploadsAvailable}
+          onClick={() => void sendSelected()}
+        >{sending
+            ? <><LoaderCircle aria-hidden="true" /> {manager ? 'Adding…' : 'Sending…'}</>
+            : `${attemptedFailureCount > 0 ? 'Retry' : 'Send'} ${unresolvedCount} ${plural(unresolvedCount, 'photo')}`}
         </button>}
-        {sending && <button type="button" className="text-button send-cancel" onClick={() => uploadController.current?.abort()}>
-          Cancel sending
-        </button>}
-        <p className="progress-note">{onlyValidationFailures
-          ? 'Remove or replace the photos that need attention.'
-          : 'Keep this page open while your photos transfer.'}</p>
+        {sending && <button
+          type="button"
+          className="text-button send-cancel"
+          onClick={() => void session.cancel()}
+        >{manager ? 'Cancel uploads' : 'Cancel sending'}</button>}
+        <p className="progress-note">{!uploadsAvailable
+          ? unavailableMessage
+          : onlyValidationFailures
+            ? 'Remove or replace the photos that need attention.'
+            : manager
+              ? 'Keep this dialog open while your photos transfer.'
+              : 'Keep this page open while your photos transfer.'}
+        </p>
       </>}
 
       <input
@@ -309,7 +313,10 @@ export function GuestUploadFlow({
         accept={IMAGE_ACCEPT}
         capture="environment"
         aria-label="Take a photo from your camera"
-        onChange={(change) => { addFiles(change.currentTarget.files, true); change.currentTarget.value = ''; }}
+        onChange={(change) => {
+          adoptFiles(change.currentTarget.files, true);
+          change.currentTarget.value = '';
+        }}
       />
       <input
         ref={libraryInput}
@@ -320,7 +327,10 @@ export function GuestUploadFlow({
         accept={IMAGE_ACCEPT}
         multiple
         aria-label="Choose recent photos from your library"
-        onChange={(change) => { addFiles(change.currentTarget.files, false); change.currentTarget.value = ''; }}
+        onChange={(change) => {
+          adoptFiles(change.currentTarget.files, false);
+          change.currentTarget.value = '';
+        }}
       />
     </div>
   </section>;

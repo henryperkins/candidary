@@ -1,9 +1,15 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useState } from 'react';
+import { StrictMode, useState } from 'react';
 
-import { GuestUploadFlow } from '../../src/features/uploads/GuestUploadFlow';
+import {
+  GuestUploadFlow as ControlledGuestUploadFlow,
+  type GuestUploadEvent,
+} from '../../src/features/uploads/GuestUploadFlow';
+import { readGuestName, rememberGuestName } from '../../src/app/guest-name-storage';
+import { GuestPhotoUpload } from '../../src/pages/EventPage';
+import { useGuestUploadSession } from '../../src/features/uploads/use-guest-upload-session';
 import type { UploadQueueItem, UploadTransport } from '../../src/features/uploads/upload-queue';
 
 const event = {
@@ -15,6 +21,51 @@ const event = {
     revision: 0, hasCover: false, available2xProfiles: [], surfaceTreatment: 'none' as const,
   },
 };
+
+function GuestUploadFlow({
+  event: uploadEvent,
+  slug,
+  transport: uploadTransport,
+  onDelivered,
+  guestName,
+  onGuestNameChange,
+  onLeaveGuestbook,
+}: {
+  event: GuestUploadEvent;
+  slug: string;
+  transport?: UploadTransport;
+  onDelivered?: (count: number) => void;
+  guestName?: string;
+  onGuestNameChange?: (name: string) => void;
+  onLeaveGuestbook?: () => void;
+}) {
+  const [fallbackName, setFallbackName] = useState(readGuestName);
+  const currentName = guestName ?? fallbackName;
+  const changeName = (name: string) => {
+    if (guestName === undefined) {
+      setFallbackName(name);
+      rememberGuestName(name);
+    }
+    onGuestNameChange?.(name);
+  };
+  const session = useGuestUploadSession({
+    slug,
+    guestName: currentName,
+    uploadsAvailable: uploadEvent.uploadsEnabled,
+    transport: uploadTransport,
+    onDelivered,
+  });
+  return <ControlledGuestUploadFlow
+    event={uploadEvent}
+    slug={slug}
+    session={session}
+    uploadsAvailable={uploadEvent.uploadsEnabled}
+    unavailableMessage="The host has paused photo delivery for now."
+    guestName={currentName}
+    onGuestNameChange={changeName}
+    onLeaveGuestbook={onLeaveGuestbook}
+  />;
+}
 
 function transport(): UploadTransport {
   return {
@@ -299,6 +350,81 @@ describe('mobile guest photo delivery', () => {
     view.unmount();
 
     expect(reserveSignal?.aborted).toBe(true);
+  });
+
+  it('survives StrictMode effect replay and still reaches a receipt', async () => {
+    // Mutation caught: leaving the guest owner marked unmounted after the replay cleanup.
+    const queueTransport = transport();
+    const user = userEvent.setup();
+    render(<StrictMode>
+      <GuestUploadFlow event={event} slug="alex-jordan" transport={queueTransport} />
+    </StrictMode>);
+    await user.type(screen.getByLabelText('Your name'), 'Taylor');
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'strict-guest.jpg', { type: 'image/jpeg' })] },
+    });
+
+    await user.click(await screen.findByRole('button', { name: 'Send 1 photo' }));
+
+    expect(await screen.findByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
+  });
+
+  it('owns a transfer only for the photos-primary phase and starts fresh after re-entry', async () => {
+    // Mutations caught: hoisting the owner above the phase boundary or reusing stale queue state.
+    let heldSignal: AbortSignal | undefined;
+    const heldTransport: UploadTransport = {
+      ...transport(),
+      upload: vi.fn((_item, _reservation, _progress, signal) => new Promise<void>((_resolve, reject) => {
+        heldSignal = signal;
+        signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('Sending was cancelled.', 'AbortError')),
+          { once: true },
+        );
+      })),
+    };
+    const freshTransport = transport();
+    const onDelivered = vi.fn();
+
+    function PhaseHarness({ active, uploadTransport }: {
+      active: boolean;
+      uploadTransport: UploadTransport;
+    }) {
+      const [guestName, setGuestName] = useState('Taylor');
+      return active ? <GuestPhotoUpload
+        event={event}
+        slug="alex-jordan"
+        guestName={guestName}
+        onGuestNameChange={setGuestName}
+        onDelivered={onDelivered}
+        onLeaveGuestbook={vi.fn()}
+        transport={uploadTransport}
+      /> : <p>Photos are not primary.</p>;
+    }
+
+    const user = userEvent.setup();
+    const view = render(<PhaseHarness active uploadTransport={heldTransport} />);
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['held'], 'held.jpg', { type: 'image/jpeg' })] },
+    });
+    await user.click(await screen.findByRole('button', { name: 'Send 1 photo' }));
+    await waitFor(() => expect(heldSignal).toBeDefined());
+
+    view.rerender(<PhaseHarness active={false} uploadTransport={heldTransport} />);
+    expect(heldSignal?.aborted).toBe(true);
+    expect(screen.getByText('Photos are not primary.')).toBeVisible();
+
+    view.rerender(<PhaseHarness active uploadTransport={freshTransport} />);
+    expect(screen.queryByText('held.jpg')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /photo.*sent/iu })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose recent photos' })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['fresh'], 'fresh.jpg', { type: 'image/jpeg' })] },
+    });
+    await user.click(await screen.findByRole('button', { name: 'Send 1 photo' }));
+
+    expect(await screen.findByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
+    expect(onDelivered).toHaveBeenCalledWith(1);
   });
 
   it('turns shipped-adapter cancellation into visible retry guidance', async () => {

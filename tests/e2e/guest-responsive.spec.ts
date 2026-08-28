@@ -125,6 +125,68 @@ test('the full-screen gallery stays contained with a reachable close target at 3
   expect(closeSize.height).toBeGreaterThanOrEqual(44);
 });
 
+test('paused guest main and fullscreen share the Gallery projection and stay contained at 320 px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  const gallery = makeMedia(4, 'published');
+  const contributions = makeMedia(2);
+  await stubGuestRoutes(page, {
+    event: {
+      uploadsEnabled: false,
+      phase: 'waiting',
+      guestReadSurfaces: { available: true, reason: null },
+    },
+    gallery,
+    contributions,
+    messages: [{
+      id: 'paused-responsive-note',
+      guestName: 'Avery',
+      body: 'The Guestbook remains part of the event while new uploads are paused.',
+      moderationStatus: 'approved',
+      createdAt: '2026-09-19T23:00:00Z',
+    }],
+  });
+
+  await page.goto('/event/maya-theo');
+  await expect(page.getByRole('heading', { name: 'New guest uploads are paused' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Take a photo', exact: true })).toHaveCount(0);
+
+  const guestbook = page.locator('details.guestbook');
+  await guestbook.locator('summary').click();
+  await expect(guestbook).toHaveAttribute('open', '');
+  await expect(page.getByText('The Guestbook remains part of the event while new uploads are paused.'))
+    .toBeVisible();
+
+  const sharedGallery = page.locator('details.event-extra').filter({ hasText: 'Shared gallery' });
+  await sharedGallery.locator('summary').click();
+  await expect(page.locator('.photo-grid figure')).toHaveCount(gallery.length);
+  const mainOrder = await page.locator('.photo-grid figcaption > span').allTextContents();
+
+  const deliveries = page.locator('details.event-extra').filter({ hasText: 'My deliveries' });
+  await deliveries.locator('summary').click();
+  await expect(page.locator('.contributions li')).toHaveCount(contributions.length);
+
+  const mainDocument = await measureDocument(page);
+  expect(mainDocument.scrollWidth, 'paused guest main page at 320')
+    .toBeLessThanOrEqual(mainDocument.clientWidth + 1);
+
+  await sharedGallery.getByRole('link', { name: 'View full screen' }).click();
+  await expect(page.getByRole('heading', { name: 'Shared gallery · Maya & Theo' })).toBeVisible();
+  const fullscreenOrder = await page.locator('.fullscreen__grid figcaption').allTextContents();
+  expect(fullscreenOrder).toEqual(mainOrder);
+  await expect(page.locator('details.guestbook')).toHaveCount(0);
+  await expect(page.locator('.contributions')).toHaveCount(0);
+  await expect(page.getByText('My deliveries', { exact: true })).toHaveCount(0);
+
+  const fullscreenCaption = await measureOverflow(page.locator('.fullscreen figcaption').first());
+  expect(fullscreenCaption.scrollWidth).toBeLessThanOrEqual(fullscreenCaption.clientWidth + 1);
+  const fullscreenDocument = await measureDocument(page);
+  expect(fullscreenDocument.scrollWidth, 'paused guest fullscreen at 320')
+    .toBeLessThanOrEqual(fullscreenDocument.clientWidth + 1);
+  const close = await measureTarget(page.getByRole('link', { name: 'Close full-screen gallery' }));
+  expect(close.width).toBeGreaterThanOrEqual(44);
+  expect(close.height).toBeGreaterThanOrEqual(44);
+});
+
 test('guest media grids widen at the 761 px enhancement boundary', async ({ page }) => {
   await stubGuestRoutes(page, { gallery: makeMedia(6) });
 

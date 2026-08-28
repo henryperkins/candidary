@@ -333,6 +333,8 @@ export class AccountsRepository {
   async replaceRegistrationCode(input: {
     id: string;
     browserSecretDigest: string;
+    expectedCodeDigest: string;
+    expectedExpiresAt: string;
     codeDigest: string;
     expiresAt: string;
     now: string;
@@ -340,13 +342,17 @@ export class AccountsRepository {
     const result = await this.db.prepare(`
       UPDATE host_registration_challenges
       SET code_digest = ?, attempts = 0, expires_at = ?, updated_at = ?
-      WHERE id = ? AND browser_secret_digest = ? AND consumed_at IS NULL AND expires_at > ?
+      WHERE id = ? AND browser_secret_digest = ?
+        AND code_digest = ? AND expires_at = ?
+        AND consumed_at IS NULL AND expires_at > ?
     `).bind(
       input.codeDigest,
       input.expiresAt,
       input.now,
       input.id,
       input.browserSecretDigest,
+      input.expectedCodeDigest,
+      input.expectedExpiresAt,
       input.now,
     ).run();
     return (result.meta.changes ?? 0) === 1;

@@ -17,6 +17,11 @@ import { EventThemePresetSelector } from '../components/EventThemePresetSelector
 import { HostAccountPanel } from '../components/HostAccountPanel';
 import { hostRegisterHref } from '../app/recovery';
 import {
+  clearPendingRegistration,
+  refreshPendingRegistrationExpiry,
+  rememberPendingRegistration,
+} from '../app/pending-registration';
+import {
   CoverUploadRejected,
   publishCoverUpload,
   validateCoverFile,
@@ -175,7 +180,14 @@ export function CreatePage() {
         of being told their address was confirmed. */}
     {!created.savedToAccount && <HostAccountPanel
       bindEventId={created.event.id}
-      onCompleted={({ boundEvent }) => { if (boundEvent) setSaved(true); }}
+      onCompleted={({ boundEvent }) => {
+        clearPendingRegistration();
+        if (boundEvent) setSaved(true);
+      }}
+      onRegistrationPending={rememberPendingRegistration}
+      onRegistrationResent={({ resumeExpiresAt }) => {
+        refreshPendingRegistrationExpiry(resumeExpiresAt);
+      }}
       onStarted={() => navigate(hostRegisterHref(created.event.id, `/manage/event/${created.event.id}`, true))}
     />}
   </main></div>;

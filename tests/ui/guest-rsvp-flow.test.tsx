@@ -25,6 +25,7 @@ const event: GuestEventView = {
   rsvpState: 'open',
   rsvpAccess: 'editable',
   lifecycleRecheckAfterMs: null,
+  guestReadSurfaces: { available: false, reason: 'before-photo-open' },
   theme: { tokens: {} } as GuestEventView['theme'],
 };
 

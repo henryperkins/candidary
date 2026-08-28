@@ -420,7 +420,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     const controller = new AbortController();
     loadMoreController.current = controller;
     setLoadingMore(true);
-    const request = (async () => {
+    const request: Promise<NextPageResult> = (async () => {
       try {
         const page = await api<GalleryPage>(galleryPath(query, favoritesOnly, order, requested), {
           signal: controller.signal,

@@ -163,6 +163,7 @@ export function CoverStudio({
   const continueRef = useRef<HTMLButtonElement>(null);
   const pendingBackFocusRef = useRef(false);
   const pendingConfirmFocusRef = useRef(false);
+  const pendingUploadCancelFocusRef = useRef(false);
   const confirmOriginRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<Element | null>(null);
   const composeRequestedRef = useRef(false);
@@ -170,6 +171,7 @@ export function CoverStudio({
   const composerRef = useRef<CoverComposerHandle>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasDragRef = useRef<CanvasDragOrigin | null>(null);
+  const transferProgressRef = useRef<{ sentBytes: number; totalBytes: number } | null>(null);
   const [canvasDragging, setCanvasDragging] = useState(false);
   const hostRef = useRef<HTMLDivElement | null>(null);
   if (hostRef.current === null && typeof document !== 'undefined') {
@@ -236,17 +238,26 @@ export function CoverStudio({
   }, [armSentinel, discardError, discarding]);
 
   const discardDraft = useCallback(async () => {
+    const cancelingPreparation = composeState.status === 'loading'
+      || composeState.status === 'transferring';
     setDiscarding(true);
     setDiscardError(null);
     try {
       if (operation.canDiscardDraft()) await onDiscardDraft();
+      if (cancelingPreparation) {
+        pendingUploadCancelFocusRef.current = true;
+        setDirty(false);
+        setStep('choose');
+        setConfirmingDiscard(false);
+        return;
+      }
       finishClose();
     } catch {
       setDiscardError('This draft could not be discarded. Check your connection and try again.');
     } finally {
       setDiscarding(false);
     }
-  }, [finishClose, onDiscardDraft, operation]);
+  }, [composeState.status, finishClose, onDiscardDraft, operation]);
 
   useEffect(() => {
     if (!open) return;
@@ -257,6 +268,7 @@ export function CoverStudio({
     setDiscarding(false);
     setDiscardError(null);
     pendingConfirmFocusRef.current = false;
+    pendingUploadCancelFocusRef.current = false;
     composeRequestedRef.current = false;
     autoClosedRef.current = false;
   }, [open]);
@@ -352,6 +364,12 @@ export function CoverStudio({
     pendingConfirmFocusRef.current = false;
     confirmOriginRef.current?.focus();
   }, [confirmingDiscard]);
+
+  useEffect(() => {
+    if (confirmingDiscard || !pendingUploadCancelFocusRef.current || step !== 'choose') return;
+    pendingUploadCancelFocusRef.current = false;
+    dialogRef.current?.querySelector<HTMLInputElement>('input[type="file"]')?.focus();
+  }, [confirmingDiscard, composeState.status, source, step]);
 
   useEffect(() => {
     if (step === 'compose' && composeState.status === 'error') composeRetryRef.current?.focus();
@@ -452,6 +470,35 @@ export function CoverStudio({
   const effectiveFocus = focus ?? draft?.initialFocus ?? null;
   const available2xProfiles = draft?.available2xProfiles ?? [];
   const composeReady = composeState.status === 'ready' && Boolean(draft && effectiveFocus);
+  const draftInProgress = composeState.status === 'loading'
+    || composeState.status === 'transferring';
+  const transferProgress = (() => {
+    if (composeState.status !== 'transferring') {
+      transferProgressRef.current = null;
+      return null;
+    }
+    const totalBytes = Math.max(0, composeState.totalBytes);
+    const previous = transferProgressRef.current;
+    const sentBytes = Math.min(
+      totalBytes,
+      Math.max(
+        previous?.totalBytes === totalBytes ? previous.sentBytes : 0,
+        Math.max(0, composeState.sentBytes),
+      ),
+    );
+    transferProgressRef.current = { sentBytes, totalBytes };
+    const percent = totalBytes > 0 ? Math.floor((sentBytes / totalBytes) * 100) : 0;
+    const announcedPercent = Math.floor(percent / 10) * 10;
+    return {
+      sentBytes,
+      totalBytes,
+      announcement: totalBytes > 0 && sentBytes >= totalBytes
+        ? 'Upload complete.'
+        : sentBytes > 0
+          ? `Uploading photo, ${announcedPercent}%.`
+          : 'Upload started.',
+    };
+  })();
   const uploadIncomplete = source?.kind === 'upload' && !composeReady;
   const doneDisabled = !source
     || uploadIncomplete
@@ -461,6 +508,16 @@ export function CoverStudio({
   const preparing = operationState.phase === 'preparing';
   const stepLabel = `Step ${stepIndex + 1} of ${steps.length}`;
   const editingDisabled = operationState.dispatched;
+  const transferProgressView = transferProgress && <div className="cover-studio__upload-progress">
+    <progress
+      aria-label="Uploading cover photo"
+      max={transferProgress.totalBytes}
+      value={transferProgress.sentBytes}
+    />
+    <p role="status" aria-live="polite" aria-atomic="true">
+      {transferProgress.announcement}
+    </p>
+  </div>;
   const dragEnabled = step === 'compose'
     && composeReady
     && Boolean(draft && effectiveFocus)
@@ -602,11 +659,15 @@ export function CoverStudio({
           onRemove={remove}
           presetThumbnail={presetThumbnail}
           canRemove={canRemove}
-          busy={composeState.status === 'loading' || editingDisabled}
+          busy={draftInProgress || editingDisabled}
         />}
 
+        {step === 'choose' && transferProgressView}
+
         {step === 'compose' && composeState.status !== 'ready' && <div className="cover-studio__compose-state">
-          {composeState.status !== 'error'
+          {composeState.status === 'transferring'
+            ? transferProgressView
+            : composeState.status !== 'error'
             ? <p role="status">Preparing your photo…</p>
             : <div role={error ? undefined : 'alert'}>
                 <p>That photo could not be prepared. Your current cover is still live.</p>

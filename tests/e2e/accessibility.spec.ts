@@ -2,7 +2,12 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 import type { Locator, Page, TestInfo } from '@playwright/test';
 
-import type { EventView, ManagerGalleryMediaView } from '../../shared/contracts';
+import type {
+  EventView,
+  GuestEventView,
+  HostSessionResponse,
+  ManagerGalleryMediaView,
+} from '../../shared/contracts';
 import type { ExportView } from '../../src/app/types';
 import type { ExportGuestbookEntryRecord } from '../../worker/db/types';
 import { buildGuestbookHtml } from '../../worker/export/guestbook-html';
@@ -22,6 +27,8 @@ import { computedStyleContrast } from './helpers/theme-contrast';
 // 320 is the narrowest supported phone; 768 is the tablet side of the public header's own boundary.
 const HEADER_WIDTHS = [320, 768];
 const RECOVERY_EVENT_ID = '11111111-2222-4333-8444-555555555555';
+const E2E_ORIGIN = 'http://127.0.0.1:4173';
+const ROTATED_MANAGEMENT_LINK = 'https://example.test/manage/replacement-id.replacement-secret';
 // The public header keeps exactly these exits: the count is asserted so neither a
 // hidden one nor an added one can pass unnoticed. On `/` the row reads navigate | return | act, and
 // `How it works` is the only member of it whose presence varies by width — it is a page anchor the
@@ -120,12 +127,14 @@ async function expectNoAxeViolations(page: Page, surface: string) {
 }
 
 const REQUIRED_MANAGER_AXE_FIXTURES = [
-  'Intake default', 'Intake filtered', 'Intake Recently deleted', 'RSVP',
+  'Intake default', 'Intake filtered', 'Intake Recently deleted',
+  'true-empty Intake', 'Manager upload held transfer', 'Cover upload progress', 'RSVP',
   'Library default', 'Library selection', 'Library selection tray', 'Library viewer',
   'Album editor', 'Album Preview', 'Album create-link dialog', 'Album live-link state',
   'Album stop-link alertdialog', 'Guest gallery all', 'Guest gallery unpublished',
   'Guest gallery published', 'Guest gallery hidden', 'Guest gallery single-write',
   'Guest gallery bulk-write', 'Guestbook', 'Share', 'Settings', 'Album-leave prompt',
+  'Rotate management link confirmation', 'Rotate management link sensitive result',
   'RSVP pending-work prompt', 'Settings pending-work prompt',
   'Move to Recently deleted dialog', 'Entry rotation confirmation',
   'Entry disable confirmation',
@@ -137,6 +146,30 @@ type ManagerAxeFixture = {
   setup(page: Page): Promise<void>;
   ready(page: Page): Promise<void>;
   cleanup?(page: Page): Promise<void>;
+};
+
+const REQUIRED_GUEST_AXE_FIXTURES = [
+  'paused guest main page',
+  'paused guest fullscreen',
+] as const;
+
+type GuestAxeFixtureName = typeof REQUIRED_GUEST_AXE_FIXTURES[number];
+type GuestAxeFixture = {
+  name: GuestAxeFixtureName;
+  setup(page: Page): Promise<void>;
+  ready(page: Page): Promise<void>;
+};
+
+const REQUIRED_HOST_AXE_FIXTURES = [
+  'pending registration route',
+  'Host Events search and sort',
+] as const;
+
+type HostAxeFixtureName = typeof REQUIRED_HOST_AXE_FIXTURES[number];
+type HostAxeFixture = {
+  name: HostAxeFixtureName;
+  setup(page: Page): Promise<void>;
+  ready(page: Page): Promise<void>;
 };
 
 const REQUIRED_PUBLIC_ALBUM_AXE_FIXTURES = [
@@ -160,12 +193,54 @@ async function readyModal(page: Page, role: 'dialog' | 'alertdialog', name: stri
   await expect(page.getByRole(role, { name })).toBeVisible();
 }
 
+async function installHostAccountSession(page: Page) {
+  await page.context().addCookies([
+    {
+      name: 'candidary_host',
+      value: 'host-session.fixture-secret',
+      url: E2E_ORIGIN,
+      httpOnly: true,
+      sameSite: 'Lax',
+    },
+    {
+      name: 'candidary_host_csrf',
+      value: 'host-csrf-fixture',
+      url: E2E_ORIGIN,
+      sameSite: 'Strict',
+    },
+  ]);
+  await page.route('**/api/host/session', (route) => route.fulfill({
+    headers: { 'cache-control': 'private, no-store' },
+    json: {
+      data: {
+        account: { email: 'host@example.test' },
+        events: [{ id: EVENT_FIXTURE.id }],
+      },
+      requestId: 'request-host-session',
+    },
+  }));
+}
+
 async function openManagerSection(page: Page, name: typeof MANAGER_SECTIONS[number]['name']) {
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   if (name !== 'Intake') {
     await page.getByRole('navigation', { name: 'Manager sections' })
       .getByRole('button', { name }).click();
   }
+}
+
+async function openManagerLinkRotationConfirmation(page: Page) {
+  await installHostAccountSession(page);
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+    event: {
+      managerLinkRevision: 4,
+      managerLinkRotationAvailability: { enabled: true, reason: null },
+    },
+    managerLinkRotation: { managementLink: ROTATED_MANAGEMENT_LINK },
+  });
+  await openManagerSection(page, 'Settings');
+  await page.getByRole('button', { name: 'Rotate manager link' }).click();
 }
 
 async function openGalleryMode(page: Page, mode: 'Library' | 'Album' | 'Guest gallery') {
@@ -381,6 +456,136 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
       await expect(page.getByRole('button', { name: 'Restore retained-photo.jpg' })).toBeVisible();
     },
   },
+  {
+    name: 'true-empty Intake',
+    async setup(page) {
+      await stubManagerRoutes(page, {
+        event: { storedMediaCount: 0 },
+        mediaPages: { first: { media: [], nextCursor: null } },
+      });
+      await openManagerSection(page, 'Intake');
+    },
+    async ready(page) {
+      const empty = page.getByRole('heading', { name: 'No photos yet' }).locator('..');
+      await expect(empty).toBeVisible();
+      await expect(empty.getByText("Guests' photos arrive privately here.")).toBeVisible();
+      await expect(empty.getByRole('button', { name: 'Share event' })).toBeVisible();
+      await expect(empty.getByRole('button', { name: 'Add photos' })).toBeVisible();
+      await expect(page.getByRole('img', { name: 'Event QR code' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'No matching photos' })).toHaveCount(0);
+    },
+  },
+  (() => {
+    let releaseContent = () => {};
+    const contentGate = new Promise<void>((resolve) => { releaseContent = resolve; });
+    let managerUrl = '';
+    return {
+      name: 'Manager upload held transfer',
+      async setup(page) {
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: [], nextCursor: null } },
+          uploads: { contentGate },
+        });
+        await page.goto('/');
+        await openManagerSection(page, 'Intake');
+        managerUrl = page.url();
+        await page.getByRole('button', { name: 'Add photos' }).click();
+        const dialog = page.getByRole('dialog', { name: 'Add photos' });
+        await dialog.locator('input[data-photo-source="library"]').setInputFiles({
+          name: 'held-manager-upload.jpg',
+          mimeType: 'image/jpeg',
+          buffer: Buffer.from('held-manager-upload'),
+        });
+        const contentRequest = page.waitForRequest((request) => (
+          request.method() === 'PUT'
+          && new URL(request.url()).pathname.includes('/uploads/')
+          && new URL(request.url()).pathname.endsWith('/content')
+        ));
+        await dialog.getByRole('button', { name: 'Send 1 photo' }).click();
+        await contentRequest;
+      },
+      async ready(page) {
+        const dialog = page.getByRole('dialog', { name: 'Add photos' });
+        await expect(dialog).toBeVisible();
+        await expect(dialog.getByRole('button', { name: 'Close Add photos' })).toHaveCount(0);
+        await expect(dialog.getByRole('button', { name: 'Cancel uploads' })).toBeVisible();
+
+        const backNavigation = page.goBack();
+        await expect(page).toHaveURL(managerUrl);
+        await expect(dialog).toBeVisible();
+
+        const gallery = page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' });
+        await gallery.evaluate((button) => {
+          button.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            view: window,
+          }));
+        });
+        await backNavigation;
+        await expect(page).toHaveURL(managerUrl);
+        await expect(gallery).toHaveAttribute('aria-pressed', 'false');
+        await expect(dialog).toBeVisible();
+      },
+      async cleanup(page) {
+        releaseContent();
+        await expect(page).toHaveURL(
+          `/manage/event/${EVENT_FIXTURE.id}?section=gallery`,
+        );
+        const dialog = page.getByRole('dialog', { name: 'Add photos' });
+        await expect(dialog.getByRole('heading', { name: '1 photo was added.' })).toBeVisible();
+      },
+    } satisfies ManagerAxeFixture;
+  })(),
+  (() => {
+    let releaseRawTransfer = () => {};
+    let rawTransferReached = Promise.resolve();
+    return {
+      name: 'Cover upload progress',
+      async setup(page) {
+        let markRawTransferReached = () => {};
+        rawTransferReached = new Promise<void>((resolve) => {
+          markRawTransferReached = resolve;
+        });
+        const rawTransferGate = new Promise<void>((resolve) => {
+          releaseRawTransfer = resolve;
+        });
+        await stubManagerRoutes(page, {
+          mediaPages: { first: { media: [], nextCursor: null } },
+        });
+        await page.route(
+          `**/api/manage/events/${EVENT_FIXTURE.id}/cover/drafts/draft-e2e/raw`,
+          async (route) => {
+            markRawTransferReached();
+            await rawTransferGate;
+            await route.fallback();
+          },
+        );
+        await openManagerSection(page, 'Settings');
+        await page.getByRole('button', { name: 'Change cover' }).click();
+        await page.getByLabel('Choose photo').setInputFiles({
+          name: 'cover-progress.jpg',
+          mimeType: 'image/jpeg',
+          buffer: Buffer.alloc(19_000_000),
+        });
+        await rawTransferReached;
+      },
+      async ready(page) {
+        const studio = page.getByRole('dialog', { name: 'Cover Studio' });
+        const progress = studio.getByRole('progressbar', { name: 'Uploading cover photo' });
+        await expect(progress).toBeVisible();
+        await expect(progress).toHaveAttribute('max', '19000000');
+        await expect(studio.getByRole('status')).toContainText(/Upload (started|complete)|Uploading photo/u);
+        await expect(studio.getByRole('button', { name: 'Continue' })).toBeDisabled();
+      },
+      async cleanup(page) {
+        releaseRawTransfer();
+        await expect(page.getByRole('progressbar', { name: 'Uploading cover photo' }))
+          .toHaveCount(0);
+      },
+    } satisfies ManagerAxeFixture;
+  })(),
   {
     name: 'RSVP',
     async setup(page) {
@@ -856,6 +1061,38 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
     },
   },
   {
+    name: 'Rotate management link confirmation',
+    async setup(page) {
+      await openManagerLinkRotationConfirmation(page);
+    },
+    async ready(page) {
+      await readyModal(page, 'dialog', 'Rotate management link?');
+      const dialog = page.getByRole('dialog', { name: 'Rotate management link?' });
+      await expect(dialog.getByRole('button', { name: 'Keep current link' })).toBeFocused();
+      await expect(dialog.getByRole('button', { name: 'Rotate link' })).toBeEnabled();
+      await expect(dialog).toContainText('The current management link will stop working immediately.');
+      await expect(dialog).toContainText('You must save the replacement before continuing.');
+    },
+  },
+  {
+    name: 'Rotate management link sensitive result',
+    async setup(page) {
+      await openManagerLinkRotationConfirmation(page);
+      await page.getByRole('dialog', { name: 'Rotate management link?' })
+        .getByRole('button', { name: 'Rotate link' }).click();
+    },
+    async ready(page) {
+      await readyModal(page, 'dialog', 'Save your new management link');
+      const dialog = page.getByRole('dialog', { name: 'Save your new management link' });
+      await expect(dialog.getByText('The prior management link is no longer valid.')).toBeVisible();
+      await expect(dialog.getByRole('button', { name: 'Copy management link' })).toBeFocused();
+      await expect(dialog.getByRole('button', { name: 'Continue managing' })).toBeDisabled();
+      await expect(dialog.getByRole('textbox', { name: 'Management link' })).toHaveCount(0);
+      await expect(dialog.getByText(ROTATED_MANAGEMENT_LINK, { exact: true })).toHaveCount(0);
+      await expect(dialog.locator('.link-card__mask')).toBeVisible();
+    },
+  },
+  {
     name: 'RSVP pending-work prompt',
     async setup(page) {
       await stubManagerRoutes(page, {
@@ -973,6 +1210,177 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
 for (const fixture of MANAGER_AXE_FIXTURES) {
   test(`${fixture.name} is axe-clean`, async ({ page }) => {
     await scanManagerFixture(page, fixture);
+  });
+}
+
+const PAUSED_GUEST_EVENT = {
+  uploadsEnabled: false,
+  phase: 'waiting',
+  guestReadSurfaces: { available: true, reason: null },
+} satisfies Partial<GuestEventView>;
+
+const PAUSED_GUEST_NOTE = {
+  id: 'paused-axe-note',
+  guestName: 'Avery',
+  body: 'The shared celebration remains available while new uploads are paused.',
+  moderationStatus: 'approved',
+  createdAt: '2026-09-19T23:00:00Z',
+} as const;
+
+async function scanGuestFixture(page: Page, fixture: GuestAxeFixture) {
+  await installViteRefreshGlobals(page);
+  await fixture.setup(page);
+  await fixture.ready(page);
+  await expectNoAxeViolations(page, fixture.name);
+}
+
+const GUEST_AXE_FIXTURES: GuestAxeFixture[] = [
+  (() => {
+    const gallery = makeMedia(3, 'published');
+    const contributions = makeMedia(1);
+    return {
+      name: 'paused guest main page',
+      async setup(page) {
+        await stubGuestRoutes(page, {
+          event: PAUSED_GUEST_EVENT,
+          gallery,
+          contributions,
+          messages: [PAUSED_GUEST_NOTE],
+        });
+        await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+        await page.locator('details.guestbook summary').click();
+        await page.locator('details.event-extra').filter({ hasText: 'Shared gallery' })
+          .locator('summary').click();
+        await page.locator('details.event-extra').filter({ hasText: 'My deliveries' })
+          .locator('summary').click();
+      },
+      async ready(page) {
+        await readyHeading(page, 'New guest uploads are paused');
+        await expect(page.getByRole('button', { name: 'Take a photo', exact: true }))
+          .toHaveCount(0);
+        await expect(page.locator('details.guestbook')).toHaveAttribute('open', '');
+        await expect(page.getByText(PAUSED_GUEST_NOTE.body)).toBeVisible();
+        await expect(page.locator('.photo-grid figure')).toHaveCount(gallery.length);
+        await expect(page.locator('.contributions li')).toHaveCount(contributions.length);
+      },
+    } satisfies GuestAxeFixture;
+  })(),
+  (() => {
+    const gallery = makeMedia(3, 'published');
+    return {
+      name: 'paused guest fullscreen',
+      async setup(page) {
+        await stubGuestRoutes(page, { event: PAUSED_GUEST_EVENT, gallery });
+        await page.goto(`/event/${EVENT_FIXTURE.slug}/fullscreen`);
+      },
+      async ready(page) {
+        await readyHeading(page, `Shared gallery · ${EVENT_FIXTURE.name}`);
+        await expect(page.locator('.fullscreen__grid figure')).toHaveCount(gallery.length);
+        await expect(page.getByRole('link', { name: 'Close full-screen gallery' })).toBeVisible();
+        await expect(page.locator('details.guestbook')).toHaveCount(0);
+        await expect(page.getByText(/My deliveries/u)).toHaveCount(0);
+      },
+    } satisfies GuestAxeFixture;
+  })(),
+];
+
+for (const fixture of GUEST_AXE_FIXTURES) {
+  test(`${fixture.name} is axe-clean`, async ({ page }) => {
+    await scanGuestFixture(page, fixture);
+  });
+}
+
+const HOST_AXE_SESSION = {
+  account: {
+    id: 'account-axe',
+    email: 'host@example.test',
+    displayName: 'Axe Host',
+    emailVerified: true,
+    notificationsEnabled: true,
+  },
+  events: [
+    {
+      id: 'event-gallery-dinner',
+      name: 'Gallery Dinner',
+      slug: 'gallery-dinner',
+      eventDate: '2027-01-02',
+      eventTimezone: 'Pacific/Auckland',
+      storedMediaCount: 40,
+      managementAccessExpiresAt: '2027-01-03T10:30:00.000Z',
+    },
+    {
+      id: 'event-other',
+      name: 'Studio Reception',
+      slug: 'studio-reception',
+      eventDate: '2026-09-19',
+      eventTimezone: 'America/Chicago',
+      storedMediaCount: 12,
+      managementAccessExpiresAt: '2026-09-20T00:30:00.000Z',
+    },
+    {
+      id: 'event-gallery-picnic',
+      name: 'Gallery Picnic',
+      slug: 'gallery-picnic',
+      eventDate: '2025-06-01',
+      eventTimezone: 'Europe/London',
+      storedMediaCount: 3,
+      managementAccessExpiresAt: '2025-06-01T23:30:00.000Z',
+    },
+  ],
+} satisfies HostSessionResponse;
+
+const HOST_AXE_FIXTURES: HostAxeFixture[] = [
+  {
+    name: 'pending registration route',
+    async setup(page) {
+      await page.addInitScript(() => {
+        localStorage.setItem('candidary.pending-registration.v1', JSON.stringify({
+          version: 1,
+          emailDigest: '61c0ee79db216f84107d8d2d7bfb35266f66b06773a99a0786e3a173ffe920ee',
+          expiresAt: '2099-01-01T00:15:00.000Z',
+        }));
+      });
+      await page.goto('/host/register?pending=1');
+    },
+    async ready(page) {
+      await readyHeading(page, 'Check your email.');
+      await expect(page.getByRole('textbox', { name: 'Confirmation code' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Confirm my email' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Start over' })).toBeVisible();
+      await expect(page.getByText('Until you enter it, no account exists.', { exact: false }))
+        .toBeVisible();
+    },
+  },
+  {
+    name: 'Host Events search and sort',
+    async setup(page) {
+      await page.route('**/api/host/session', (route) => route.fulfill({
+        headers: { 'cache-control': 'private, no-store' },
+        json: { data: HOST_AXE_SESSION, requestId: 'request-host-events-axe' },
+      }));
+      await page.goto('/host/events');
+      await readyHeading(page, 'Your events');
+      await page.getByRole('searchbox', { name: 'Search events' }).fill('gallery');
+      await page.getByRole('combobox', { name: 'Sort events' }).selectOption('oldest');
+    },
+    async ready(page) {
+      await expect(page.getByRole('searchbox', { name: 'Search events' })).toHaveValue('gallery');
+      await expect(page.getByRole('combobox', { name: 'Sort events' })).toHaveValue('oldest');
+      await expect(page.getByRole('status')).toHaveText('2 events');
+      const events = page.locator('.host-event-list > li');
+      await expect(events).toHaveCount(2);
+      await expect(events.nth(0)).toContainText('Gallery Picnic');
+      await expect(events.nth(1)).toContainText('Gallery Dinner');
+    },
+  },
+];
+
+for (const fixture of HOST_AXE_FIXTURES) {
+  test(`${fixture.name} is axe-clean`, async ({ page }) => {
+    await installViteRefreshGlobals(page);
+    await fixture.setup(page);
+    await fixture.ready(page);
+    await expectNoAxeViolations(page, fixture.name);
   });
 }
 
@@ -1106,15 +1514,66 @@ for (const fixture of PUBLIC_ALBUM_AXE_FIXTURES) {
   });
 }
 
-test('the Slice 4 named Axe inventories are complete', () => {
+test('Slice 5 named Axe inventories are exact and unique', () => {
   expect(MANAGER_AXE_FIXTURES.map(({ name }) => name))
     .toEqual([...REQUIRED_MANAGER_AXE_FIXTURES]);
+  expect(GUEST_AXE_FIXTURES.map(({ name }) => name))
+    .toEqual([...REQUIRED_GUEST_AXE_FIXTURES]);
+  expect(HOST_AXE_FIXTURES.map(({ name }) => name))
+    .toEqual([...REQUIRED_HOST_AXE_FIXTURES]);
   expect(PUBLIC_ALBUM_AXE_FIXTURES.map(({ name }) => name))
     .toEqual([...REQUIRED_PUBLIC_ALBUM_AXE_FIXTURES]);
   expect(new Set(MANAGER_AXE_FIXTURES.map(({ name }) => name)).size)
     .toBe(REQUIRED_MANAGER_AXE_FIXTURES.length);
+  expect(new Set(GUEST_AXE_FIXTURES.map(({ name }) => name)).size)
+    .toBe(REQUIRED_GUEST_AXE_FIXTURES.length);
+  expect(new Set(HOST_AXE_FIXTURES.map(({ name }) => name)).size)
+    .toBe(REQUIRED_HOST_AXE_FIXTURES.length);
   expect(new Set(PUBLIC_ALBUM_AXE_FIXTURES.map(({ name }) => name)).size)
     .toBe(REQUIRED_PUBLIC_ALBUM_AXE_FIXTURES.length);
+  const allNames = [
+    ...MANAGER_AXE_FIXTURES,
+    ...GUEST_AXE_FIXTURES,
+    ...HOST_AXE_FIXTURES,
+    ...PUBLIC_ALBUM_AXE_FIXTURES,
+  ].map(({ name }) => name);
+  expect(new Set(allNames).size).toBe(allNames.length);
+});
+
+test('Manager upload terminal expiry closes through terminal handoff without claiming cancellation', async ({ page }) => {
+  await installViteRefreshGlobals(page);
+  const cancelRequests: string[] = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() === 'DELETE' && path.includes('/uploads/')) cancelRequests.push(path);
+  });
+  await stubManagerRoutes(page, {
+    event: { managerLinkRevision: null },
+    mediaPages: { first: { media: [], nextCursor: null } },
+    uploads: {
+      contentFailure: {
+        status: 410,
+        code: 'EVENT_EXPIRED',
+        message: 'This event access has expired.',
+      },
+    },
+  });
+  await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+  await page.getByRole('button', { name: 'Add photos' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add photos' });
+  await dialog.locator('input[data-photo-source="library"]').setInputFiles({
+    name: 'expired-manager-upload.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from('expired-manager-upload'),
+  });
+  await dialog.getByRole('button', { name: 'Send 1 photo' }).click();
+
+  await expect(dialog).toHaveCount(0);
+  const notice = page.getByRole('region', { name: 'Manager notice' });
+  await expect(notice).toContainText('This event access has expired.');
+  await expect(page.getByRole('button', { name: 'Add photos' })).toHaveAttribute('aria-disabled', 'true');
+  await expect(page.getByText(/cancell?ed/iu)).toHaveCount(0);
+  expect(cancelRequests).toEqual([]);
 });
 
 function animationName(locator: Locator) {
@@ -1501,6 +1960,35 @@ test('manager navigation exposes visible labels, selected state, and mobile-size
   await page.getByRole('button', { name: 'Share', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Share', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(intake).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('Pause and Resume guest uploads stay keyboard reachable and touch-sized at 390px and 320px', async ({ page }, testInfo) => {
+  onlyOnce(testInfo);
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+  });
+
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
+    await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+
+    for (const name of ['Pause guest uploads', 'Resume guest uploads'] as const) {
+      const control = page.getByRole('button', { name, exact: true });
+      await expect(control).toBeVisible();
+      await control.focus();
+      await page.keyboard.press('Shift+Tab');
+      await expect(control).not.toBeFocused();
+      await page.keyboard.press('Tab');
+      await expect(control).toBeFocused();
+
+      const target = await measureTarget(control);
+      expect(target.width, `${name} width at ${width}`).toBeGreaterThanOrEqual(44);
+      expect(target.height, `${name} height at ${width}`).toBeGreaterThanOrEqual(44);
+      await page.keyboard.press('Enter');
+    }
+  }
 });
 
 test('full-page manager recovery is labelled, associated, touch-sized, contained, and axe-clean', async ({ page }) => {

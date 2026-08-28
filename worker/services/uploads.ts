@@ -9,17 +9,19 @@ import type { UploadBatchItemView } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import { resolvePhotoIntake } from '../../shared/rsvp';
 import { MediaRepository, uploadMediaView, type ReserveMediaRecord } from '../db/media';
-import type { AppEnv, AuthenticatedSession } from '../env';
+import type { EventRecord } from '../db/types';
+import type { AppEnv } from '../env';
 import { assertWorkerIngressEnabled } from '../media-upload-release';
 import { sanitizeFilename } from '../security/filenames';
 import { mediaReservationObjectKey } from '../storage/media-keys';
+import type { UploadAuthority } from './upload-authority';
 
 export interface InitiateUploadInput {
   filename: string;
   mimeType: string;
   byteSize: number;
   idempotencyKey: string;
-  guestName: string;
+  guestName?: string;
   caption?: string | null;
 }
 
@@ -57,24 +59,44 @@ export class UploadService {
   // Photo delivery has to be *open*, not merely permitted. Since 0010 an event
   // carries `uploads_enabled = 1` from creation and the schedule decides when it
   // opens, so testing the flag alone would accept a photo months before the day.
-  private assertCanUpload(auth: AuthenticatedSession, now = new Date()) {
-    if (auth.session.role !== 'guest') throw new ApiError('ROLE_FORBIDDEN', 'Only guests can add event photos.', 403);
-    if (!resolvePhotoIntake(auth.event, now).photosOpen) {
+  private assertCanUpload(authority: UploadAuthority, event: EventRecord, now: Date) {
+    if (event.deletedAt) {
+      throw new ApiError('EVENT_DELETED', 'This event has been deleted.', 410);
+    }
+    if (authority.kind === 'guest' && !resolvePhotoIntake(event, now).photosOpen) {
       throw new ApiError('UPLOADS_DISABLED', 'Photo uploads are paused for this event.', 409);
+    }
+    if (authority.kind !== 'guest'
+      && Date.parse(event.managementAccessExpiresAt) <= now.getTime()) {
+      throw new ApiError('EVENT_EXPIRED', 'This event access has expired.', 410);
     }
   }
 
-  private prepareReservation(
-    auth: AuthenticatedSession,
-    input: InitiateUploadInput,
-    now: Date,
-  ): ReserveMediaRecord {
-    const guestName = input.guestName.trim();
-    if (!guestName || guestName.length > 80) {
+  private attribution(authority: UploadAuthority, guestName: string | undefined): string {
+    if (authority.kind !== 'guest') return 'Host';
+    const attribution = guestName?.trim() ?? '';
+    if (!attribution || attribution.length > 80) {
       throw new ApiError('VALIDATION_FAILED', 'Enter your name before adding photos.', 422, {
         guestName: 'Your name is required.',
       });
     }
+    return attribution;
+  }
+
+  private uploadUrl(authority: UploadAuthority, event: EventRecord, mediaId: string): string {
+    if (authority.kind === 'guest') {
+      return `/api/event/${encodeURIComponent(event.slug)}/uploads/${encodeURIComponent(mediaId)}/content`;
+    }
+    return `/api/manage/events/${encodeURIComponent(event.id)}/uploads/${encodeURIComponent(mediaId)}/content`;
+  }
+
+  private prepareReservation(
+    authority: UploadAuthority,
+    event: EventRecord,
+    input: InitiateUploadInput,
+    attribution: string,
+    now: Date,
+  ): ReserveMediaRecord {
     const mimeType = resolveSupportedImageType(input.filename, input.mimeType);
     if (!Number.isInteger(input.byteSize) || input.byteSize < 1 || input.byteSize > MAX_IMAGE_BYTES) {
       throw new ApiError('FILE_TOO_LARGE', 'Choose a photo no larger than 20 MB.', 413);
@@ -86,13 +108,14 @@ export class UploadService {
     const mediaId = crypto.randomUUID();
     return {
       id: mediaId,
-      eventId: auth.event.id,
-      uploaderSessionId: auth.session.id,
-      objectKey: mediaReservationObjectKey(auth.event.id, mediaId),
+      eventId: event.id,
+      uploaderSessionId: authority.actorSessionId,
+      authority,
+      objectKey: mediaReservationObjectKey(event.id, mediaId),
       originalFilename: sanitizeFilename(input.filename),
       mimeType,
       declaredByteSize: input.byteSize,
-      guestName,
+      guestName: attribution,
       caption: input.caption?.trim().slice(0, 300) || null,
       idempotencyKey: input.idempotencyKey,
       reservationExpiresAt: new Date(now.getTime() + UPLOAD_RESERVATION_TTL_SECONDS * 1000).toISOString(),
@@ -100,35 +123,39 @@ export class UploadService {
     };
   }
 
-  async initiate(auth: AuthenticatedSession, input: InitiateUploadInput, now = new Date()) {
+  async initiate(
+    authority: UploadAuthority,
+    event: EventRecord,
+    input: InitiateUploadInput,
+    now = new Date(),
+  ) {
     assertWorkerIngressEnabled();
-    this.assertCanUpload(auth);
+    this.assertCanUpload(authority, event, now);
+    const attribution = this.attribution(authority, input.guestName);
     const repository = new MediaRepository(this.env.DB);
-    const media = await repository.reserve(this.prepareReservation(auth, input, now));
+    const media = await repository.reserve(
+      this.prepareReservation(authority, event, input, attribution, now),
+    );
     if (media.uploadState === 'stored') {
       return { media: uploadMediaView(media), alreadyDelivered: true as const };
     }
     return {
       media: uploadMediaView(media),
       alreadyDelivered: false as const,
-      uploadUrl: `/api/event/${encodeURIComponent(auth.event.slug)}/uploads/${encodeURIComponent(media.id)}/content`,
+      uploadUrl: this.uploadUrl(authority, event, media.id),
       uploadUrlExpiresAt: media.reservationExpiresAt,
     };
   }
 
   async initiateBatch(
-    auth: AuthenticatedSession,
-    input: { guestName: string; files: BatchUploadFile[] },
+    authority: UploadAuthority,
+    event: EventRecord,
+    input: { guestName?: string; files: BatchUploadFile[] },
     now = new Date(),
   ): Promise<{ items: BatchUploadResult[] }> {
     assertWorkerIngressEnabled();
-    this.assertCanUpload(auth);
-    const guestName = input.guestName.trim();
-    if (!guestName || guestName.length > 80) {
-      throw new ApiError('VALIDATION_FAILED', 'Enter your name before adding photos.', 422, {
-        guestName: 'Your name is required.',
-      });
-    }
+    this.assertCanUpload(authority, event, now);
+    const attribution = this.attribution(authority, input.guestName);
     if (input.files.length < 1 || input.files.length > UPLOAD_BATCH_SIZE) {
       throw new ApiError('VALIDATION_FAILED', `Choose between 1 and ${UPLOAD_BATCH_SIZE} photos.`, 422);
     }
@@ -139,7 +166,13 @@ export class UploadService {
       try {
         prepared.push({
           index,
-          reservation: this.prepareReservation(auth, { ...file, guestName }, now),
+          reservation: this.prepareReservation(
+            authority,
+            event,
+            { ...file, guestName: input.guestName },
+            attribution,
+            now,
+          ),
         });
       } catch (error) {
         if (!(error instanceof ApiError)) throw error;
@@ -178,7 +211,7 @@ export class UploadService {
         status: 'accepted',
         media: uploadMediaView(result.media),
         alreadyDelivered: false,
-        uploadUrl: `/api/event/${encodeURIComponent(auth.event.slug)}/uploads/${encodeURIComponent(result.media.id)}/content`,
+        uploadUrl: this.uploadUrl(authority, event, result.media.id),
         uploadUrlExpiresAt: result.media.reservationExpiresAt,
       };
     }));

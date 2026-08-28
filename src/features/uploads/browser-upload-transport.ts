@@ -1,8 +1,9 @@
-import { UPLOAD_BATCH_SIZE } from '../../../shared/constants';
 import type { UploadBatchItemView } from '../../../shared/contracts';
-import { api, ClientApiError } from '../../app/api';
+import type { ApiErrorBody } from '../../../shared/errors';
+import { api, attachCredentials, ClientApiError } from '../../app/api';
 import type {
   ReservationResult,
+  UploadQueueItem,
   UploadReservation,
   UploadTransport,
 } from './upload-queue';
@@ -22,14 +23,31 @@ const FINALIZE_REUPLOAD_CODES = new Set([
    sent is the client's; it is the one already in hand. */
 const RESERVATION_FAILED = 'This photo could not be reserved.';
 
+function managerReservationFailureStatus(code: ApiErrorBody['code']): number {
+  if (code === 'RESOURCE_FORBIDDEN') return 403;
+  if (code === 'FILE_TYPE_UNSUPPORTED') return 415;
+  if (code === 'FILE_TOO_LARGE') return 413;
+  if (code === 'VALIDATION_FAILED') return 422;
+  if (code === 'INTERNAL_ERROR') return 500;
+  return 409;
+}
+
 function cancellation() {
   return new DOMException('Sending was cancelled.', 'AbortError');
 }
 
-function eventCsrf(): string | undefined {
-  return document.cookie.split('; ')
-    .find((part) => part.startsWith('candidary_csrf='))
-    ?.split('=')[1];
+function flatApiError(responseText: string): ApiErrorBody | null {
+  try {
+    const value = JSON.parse(responseText) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const body = value as Partial<ApiErrorBody>;
+    if (typeof body.code !== 'string'
+      || typeof body.message !== 'string'
+      || typeof body.requestId !== 'string') return null;
+    return body as ApiErrorBody;
+  } catch {
+    return null;
+  }
 }
 
 function backoff(attempt: number, signal?: AbortSignal) {
@@ -69,8 +87,9 @@ export function xhrUpload(
     const target = new URL(reservation.uploadUrl, window.location.href);
     if (target.origin === window.location.origin) {
       request.withCredentials = true;
-      const csrf = eventCsrf();
-      if (csrf) request.setRequestHeader('x-candidary-csrf', decodeURIComponent(csrf));
+      attachCredentials(new Headers(), 'PUT').forEach((value, name) => {
+        request.setRequestHeader(name, value);
+      });
     }
     request.setRequestHeader('Content-Type', reservation.mimeType);
     request.upload.addEventListener('progress', (event) => {
@@ -78,7 +97,19 @@ export function xhrUpload(
     });
     request.addEventListener('load', () => settle(() => {
       if (request.status >= 200 && request.status < 300) resolve();
-      else reject(new Error('The transfer was interrupted. Try this photo again.'));
+      else {
+        const body = flatApiError(request.responseText);
+        reject(body
+          ? new ClientApiError(
+              body.code,
+              body.message,
+              body.fieldErrors,
+              body.details,
+              request.status,
+              body.requestId,
+            )
+          : new Error('The transfer was interrupted. Try this photo again.'));
+      }
     }));
     request.addEventListener('error', () => settle(() => reject(new Error('Reception dropped out. Try this photo again.'))));
     request.addEventListener('abort', () => settle(() => reject(cancellation())));
@@ -86,55 +117,80 @@ export function xhrUpload(
   });
 }
 
-export function createBrowserTransport(slug: string, guestName: string): UploadTransport {
-  return {
+export type BrowserUploadTransportOptions =
+  | { kind: 'guest'; slug: string; guestName: string }
+  | { kind: 'manager'; eventId: string };
+
+export interface BrowserUploadTransport extends UploadTransport {
+  cancelReservation?(
+    item: UploadQueueItem,
+    reservation: UploadReservation,
+    signal?: AbortSignal,
+  ): Promise<void>;
+}
+
+export function createBrowserTransport(
+  options: BrowserUploadTransportOptions,
+): BrowserUploadTransport {
+  const root = options.kind === 'guest'
+    ? `/api/event/${options.slug}/uploads`
+    : `/api/manage/events/${encodeURIComponent(options.eventId)}/uploads`;
+  const transport: BrowserUploadTransport = {
     async reserve(items, signal) {
-      const results: ReservationResult[] = [];
-      for (let offset = 0; offset < items.length; offset += UPLOAD_BATCH_SIZE) {
-        const chunk = items.slice(offset, offset + UPLOAD_BATCH_SIZE);
-        const response = await api<{ items: UploadBatchItemView[] }>(`/api/event/${slug}/uploads/batch`, {
-          method: 'POST',
-          signal,
-          body: JSON.stringify({
-            guestName,
-            files: chunk.map(({ id, file }) => ({
-              filename: file.name,
-              mimeType: file.type,
-              byteSize: file.size,
-              idempotencyKey: id,
-              caption: null,
-            })),
-          }),
-        });
-        results.push(...response.items.map((item): ReservationResult => {
-          if (item.status === 'rejected') {
-            return {
-              id: item.idempotencyKey,
-              status: 'rejected',
-              error: item.error?.message ?? RESERVATION_FAILED,
-            };
+      const files = items.map(({ id, file }) => ({
+        filename: file.name,
+        mimeType: file.type,
+        byteSize: file.size,
+        idempotencyKey: id,
+        caption: null,
+      }));
+      const response = await api<{ items: UploadBatchItemView[] }>(`${root}/batch`, {
+        method: 'POST',
+        signal,
+        body: JSON.stringify(options.kind === 'guest'
+          ? { guestName: options.guestName, files }
+          : { files }),
+      });
+      return response.items.map((item): ReservationResult => {
+        if (item.status === 'rejected') {
+          if (options.kind === 'manager'
+            && item.error?.code === 'UPLOAD_RESERVATION_CANCELED') {
+            return { id: item.idempotencyKey, status: 'canceled' };
           }
-          if (item.alreadyDelivered && item.media?.uploadState === 'stored') {
-            return { id: item.idempotencyKey, status: 'delivered' };
-          }
-          // An accepted reservation that still needs its bytes always carries both. Anything else is
-          // an answer this queue cannot act on, and a photo it cannot send is a photo it must not
-          // report as sent.
-          if (item.media && item.uploadUrl) {
-            return {
-              id: item.idempotencyKey,
-              status: 'accepted',
-              reservation: {
-                mediaId: item.media.id,
-                uploadUrl: item.uploadUrl,
-                mimeType: item.media.mimeType,
-              },
-            };
-          }
-          return { id: item.idempotencyKey, status: 'rejected', error: RESERVATION_FAILED };
-        }));
-      }
-      return results;
+          return {
+            id: item.idempotencyKey,
+            status: 'rejected',
+            error: item.error?.message ?? RESERVATION_FAILED,
+            ...(options.kind === 'manager' && item.error
+              ? {
+                  failure: {
+                    code: item.error.code,
+                    status: managerReservationFailureStatus(item.error.code),
+                    stage: 'reserve' as const,
+                  },
+                }
+              : {}),
+          };
+        }
+        if (item.alreadyDelivered && item.media?.uploadState === 'stored') {
+          return { id: item.idempotencyKey, status: 'delivered', mediaId: item.media.id };
+        }
+        // An accepted reservation that still needs its bytes always carries both. Anything else is
+        // an answer this queue cannot act on, and a photo it cannot send is a photo it must not
+        // report as sent.
+        if (item.media && item.uploadUrl) {
+          return {
+            id: item.idempotencyKey,
+            status: 'accepted',
+            reservation: {
+              mediaId: item.media.id,
+              uploadUrl: item.uploadUrl,
+              mimeType: item.media.mimeType,
+            },
+          };
+        }
+        return { id: item.idempotencyKey, status: 'rejected', error: RESERVATION_FAILED };
+      });
     },
     async upload(item, reservation, progress, signal) {
       let lastError: unknown;
@@ -154,7 +210,7 @@ export function createBrowserTransport(slug: string, guestName: string): UploadT
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          await api(`/api/event/${slug}/uploads/${reservation.mediaId}/finalize`, {
+          await api(`${root}/${encodeURIComponent(reservation.mediaId)}/finalize`, {
             method: 'POST',
             signal,
             body: '{}',
@@ -173,4 +229,14 @@ export function createBrowserTransport(slug: string, guestName: string): UploadT
       return error instanceof ClientApiError && FINALIZE_REUPLOAD_CODES.has(error.code);
     },
   };
+  if (options.kind === 'manager') {
+    transport.cancelReservation = async (_item, reservation, signal) => {
+      await api(`${root}/${encodeURIComponent(reservation.mediaId)}`, {
+        method: 'DELETE',
+        signal,
+        body: '{}',
+      });
+    };
+  }
+  return transport;
 }

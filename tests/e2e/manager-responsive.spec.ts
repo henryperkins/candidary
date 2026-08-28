@@ -93,6 +93,39 @@ test.beforeEach(async ({ page }) => {
   await installInertReactRefresh(page);
 });
 
+test('Manager upload cleanup retry at 320 stays contained and focuses its action', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+    uploads: {
+      contentFailure: 'network',
+      cancelFailure: 'network',
+    },
+  });
+  await page.goto(managerUrl);
+  await page.getByRole('button', { name: 'Add photos' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Add photos' });
+  await dialog.locator('input[data-photo-source="library"]').setInputFiles({
+    name: 'cleanup-retry.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from('cleanup-retry'),
+  });
+  await dialog.getByRole('button', { name: 'Send 1 photo' }).click();
+  await dialog.getByRole('button', { name: 'Cancel uploads' }).click();
+
+  const retry = dialog.getByRole('button', { name: 'Retry cleanup' });
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeFocused();
+  await expect(dialog).toContainText('1 temporary upload still needs cleanup.');
+  const target = await measureTarget(retry);
+  expect(target.width, 'Retry cleanup target width at 320').toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  expect(target.height, 'Retry cleanup target height at 320').toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  const documentSize = await measureDocument(page);
+  expect(documentSize.scrollWidth, 'Manager upload cleanup document at 320')
+    .toBeLessThanOrEqual(documentSize.clientWidth + GEOMETRY_TOLERANCE);
+  expect(await measureViewportEscapes(dialog), 'Manager upload cleanup dialog at 320').toEqual([]);
+});
+
 test('manager navigation keeps every destination labelled at the control-text floor', async ({ page }) => {
   await openManager(page);
 

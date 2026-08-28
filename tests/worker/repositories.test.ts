@@ -16,12 +16,13 @@ import {
 } from '../../worker/db/rsvp';
 import { RsvpRateLimitsRepository } from '../../worker/db/rsvp-rate-limits';
 import { RsvpSessionsRepository } from '../../worker/db/rsvp-sessions';
-import { SessionsRepository } from '../../worker/db/sessions';
+import { HostSessionsRepository, SessionsRepository } from '../../worker/db/sessions';
 import { TokensRepository } from '../../worker/db/tokens';
 import { finalizeStoredMedia, receiveMediaUpload } from '../../worker/storage/media';
 import { finalizedMediaObjectKey } from '../../worker/storage/media-keys';
 import type { AppEnv } from '../../worker/env';
 import { HostAuthService } from '../../worker/services/host-auth';
+import type { UploadAuthority } from '../../worker/services/upload-authority';
 import {
   DEFAULT_EVENT_THEME_CONFIG,
   serializeEventThemeConfig,
@@ -135,6 +136,226 @@ async function seedAccount(email: string) {
     createdAt: now,
   }))!;
 }
+
+type AuthorityKind = UploadAuthority['kind'];
+
+function guestUploadAuthority(sessionId: string): UploadAuthority {
+  return { kind: 'guest', actorSessionId: sessionId, eventSessionId: sessionId };
+}
+
+interface AuthorityFixture {
+  authority: UploadAuthority;
+  sessionId: string;
+  tokenId: string;
+  actorSessionId: string;
+  hostSessionId: string | null;
+  accountId: string | null;
+}
+
+async function seedAuthority(
+  kind: AuthorityKind,
+  eventId = 'event-a',
+  fixtureSuffix?: string,
+): Promise<AuthorityFixture> {
+  if (kind === 'guest') {
+    const suffix = fixtureSuffix ?? 'authority-guest';
+    const sessionId = await seedGuestSession(eventId, suffix);
+    return {
+      authority: guestUploadAuthority(sessionId),
+      sessionId,
+      tokenId: `token-${suffix}`,
+      actorSessionId: sessionId,
+      hostSessionId: null,
+      accountId: null,
+    };
+  }
+  if (kind === 'manager-link') {
+    const suffix = fixtureSuffix ?? 'authority-link';
+    const sessionId = await seedManagerSession(eventId, suffix, false);
+    return {
+      authority: { kind, actorSessionId: sessionId, eventSessionId: sessionId },
+      sessionId,
+      tokenId: `token-${suffix}`,
+      actorSessionId: sessionId,
+      hostSessionId: null,
+      accountId: null,
+    };
+  }
+
+  const suffix = fixtureSuffix ?? 'authority-account';
+  const tokenId = `token-${suffix}`;
+  await new TokensRepository(env.DB).create({
+    id: tokenId,
+    eventId,
+    role: 'manager',
+    secretDigest: `token-digest-${suffix}`,
+    secretCiphertext: null,
+    expiresAt: '2026-12-18T23:59:59.999Z',
+    createdAt: now,
+  });
+  const account = await seedAccount(`${suffix}@example.com`);
+  await new AccountsRepository(env.DB).addEventHost(eventId, account.id, 'owner', now);
+  const hostSessionId = `host-session-${suffix}`;
+  await new HostSessionsRepository(env.DB).create({
+    id: hostSessionId,
+    secretDigest: `host-session-digest-${suffix}`,
+    csrfDigest: `host-csrf-${suffix}`,
+    accountId: account.id,
+    authVersion: account.authVersion,
+    expiresAt: '2026-08-21T12:00:00.000Z',
+    createdAt: now,
+  });
+  const actorSessionId = `actor-session-${suffix}`;
+  const actor = await new SessionsRepository(env.DB).createManagerUploadActor({
+    id: actorSessionId,
+    secretDigest: `actor-session-digest-${suffix}`,
+    csrfDigest: `actor-csrf-${suffix}`,
+    hostSessionId,
+    accountId: account.id,
+    eventId,
+    createdAt: now,
+    nowIso: now,
+  });
+  if (!actor) throw new Error('Expected Manager account upload actor fixture.');
+  return {
+    authority: { kind, actorSessionId, hostSessionId, accountId: account.id },
+    sessionId: actorSessionId,
+    tokenId,
+    actorSessionId,
+    hostSessionId,
+    accountId: account.id,
+  };
+}
+
+function reserveInputForEvent(
+  authority: UploadAuthority,
+  key: string,
+  eventId: string,
+  byteSize = 64,
+) {
+  return {
+    id: `media-${key}`,
+    eventId,
+    uploaderSessionId: authority.actorSessionId,
+    authority,
+    objectKey: `events/${eventId}/uploads/media-${key}`,
+    originalFilename: `${key}.png`,
+    mimeType: 'image/png' as const,
+    declaredByteSize: byteSize,
+    guestName: authority.kind === 'guest' ? 'Avery' : 'Host',
+    caption: null,
+    idempotencyKey: key,
+    reservationExpiresAt: '2026-07-21T12:15:00.000Z',
+    createdAt: now,
+  };
+}
+
+function reserveInput(authority: UploadAuthority, key: string, byteSize = 64) {
+  return reserveInputForEvent(authority, key, 'event-a', byteSize);
+}
+
+type AuthorityRevocation = {
+  condition: string;
+  kind: AuthorityKind;
+  mutate(fixture: AuthorityFixture): Promise<void>;
+};
+
+const AUTHORITY_REVOCATIONS: AuthorityRevocation[] = [
+  {
+    condition: 'disabled account', kind: 'manager-account',
+    mutate: async ({ accountId }) => {
+      await env.DB.prepare('UPDATE host_accounts SET disabled_at = ? WHERE id = ?')
+        .bind('2026-07-21T12:01:30.000Z', accountId).run();
+    },
+  },
+  {
+    condition: 'removed membership', kind: 'manager-account',
+    mutate: async ({ accountId }) => {
+      await env.DB.prepare('DELETE FROM event_hosts WHERE event_id = ? AND account_id = ?')
+        .bind('event-a', accountId).run();
+    },
+  },
+  {
+    condition: 'advanced auth version', kind: 'manager-account',
+    mutate: async ({ accountId }) => {
+      await env.DB.prepare('UPDATE host_accounts SET auth_version = auth_version + 1 WHERE id = ?')
+        .bind(accountId).run();
+    },
+  },
+  {
+    condition: 'revoked host session', kind: 'manager-account',
+    mutate: async ({ hostSessionId }) => {
+      await new HostSessionsRepository(env.DB).revoke(
+        hostSessionId!, '2026-07-21T12:01:30.000Z',
+      );
+    },
+  },
+  {
+    condition: 'expired host session', kind: 'manager-account',
+    mutate: async ({ hostSessionId }) => {
+      await env.DB.prepare('UPDATE host_sessions SET expires_at = ? WHERE id = ?')
+        .bind('2026-07-21T12:01:30.000Z', hostSessionId).run();
+    },
+  },
+  {
+    condition: 'rotated management link', kind: 'manager-link',
+    mutate: async ({ tokenId }) => {
+      await new TokensRepository(env.DB).revokeRole(
+        'event-a', 'manager', '2026-07-21T12:01:30.000Z',
+      );
+      await new TokensRepository(env.DB).create({
+        id: `${tokenId}-replacement`, eventId: 'event-a', role: 'manager',
+        secretDigest: 'replacement-token-digest', secretCiphertext: null,
+        expiresAt: '2026-12-18T23:59:59.999Z', createdAt: '2026-07-21T12:01:31.000Z',
+      });
+    },
+  },
+  {
+    condition: 'revoked Manager event session', kind: 'manager-link',
+    mutate: async ({ sessionId }) => {
+      await new SessionsRepository(env.DB).revoke(sessionId, '2026-07-21T12:01:30.000Z');
+    },
+  },
+  {
+    condition: 'signed-out guest event session', kind: 'guest',
+    mutate: async ({ sessionId }) => {
+      await new SessionsRepository(env.DB).revoke(sessionId, '2026-07-21T12:01:30.000Z');
+    },
+  },
+  {
+    condition: 'revoked account actor', kind: 'manager-account',
+    mutate: async ({ actorSessionId }) => {
+      await new SessionsRepository(env.DB).revoke(
+        actorSessionId, '2026-07-21T12:01:30.000Z',
+      );
+    },
+  },
+  {
+    condition: 'expired account actor', kind: 'manager-account',
+    mutate: async ({ actorSessionId }) => {
+      await env.DB.prepare('UPDATE event_sessions SET expires_at = ? WHERE id = ?')
+        .bind('2026-07-21T12:01:30.000Z', actorSessionId).run();
+    },
+  },
+  {
+    condition: 'actor bound to a non-current Manager token', kind: 'manager-account',
+    mutate: async ({ tokenId }) => {
+      await new TokensRepository(env.DB).revoke(tokenId, '2026-07-21T12:01:30.000Z');
+      await new TokensRepository(env.DB).create({
+        id: `${tokenId}-replacement`, eventId: 'event-a', role: 'manager',
+        secretDigest: 'account-replacement-token-digest', secretCiphertext: null,
+        expiresAt: '2026-12-18T23:59:59.999Z', createdAt: '2026-07-21T12:01:31.000Z',
+      });
+    },
+  },
+  {
+    condition: 'expired management window', kind: 'manager-account',
+    mutate: async () => {
+      await env.DB.prepare('UPDATE events SET management_access_expires_at = ? WHERE id = ?')
+        .bind('2026-07-21T12:01:30.000Z', 'event-a').run();
+    },
+  },
+];
 
 beforeEach(async () => {
   await reset();
@@ -317,6 +538,118 @@ describe('event, token, and session repositories', () => {
     expect((await events.getBySlug('maya-theo'))?.id).toBe('event-a');
     expect((await new SessionsRepository(env.DB).getForEvent('session-a', 'event-a'))?.role).toBe('guest');
     expect(await new SessionsRepository(env.DB).getForEvent('session-a', 'event-b')).toBeNull();
+  });
+
+  it('atomically creates and narrowly maps a live Manager upload actor', async () => {
+    await seedEvent();
+    const account = await seedAccount('actor-owner@example.com');
+    await new AccountsRepository(env.DB).addEventHost('event-a', account.id, 'owner', now);
+    await new TokensRepository(env.DB).create({
+      id: 'actor-manager-token',
+      eventId: 'event-a',
+      role: 'manager',
+      secretDigest: 'actor-token-digest',
+      secretCiphertext: null,
+      expiresAt: '2026-12-18T23:59:59.999Z',
+      createdAt: now,
+    });
+    await new HostSessionsRepository(env.DB).create({
+      id: 'actor-host-session',
+      secretDigest: 'host-session-digest',
+      csrfDigest: 'host-csrf-digest',
+      accountId: account.id,
+      authVersion: account.authVersion,
+      expiresAt: '2026-08-21T12:00:00.000Z',
+      createdAt: now,
+    });
+    const sessions = new SessionsRepository(env.DB);
+
+    const actor = await sessions.createManagerUploadActor({
+      id: 'manager-upload-actor',
+      secretDigest: 'actor-secret-digest',
+      csrfDigest: 'actor-csrf-digest',
+      hostSessionId: 'actor-host-session',
+      accountId: account.id,
+      eventId: 'event-a',
+      createdAt: now,
+      nowIso: now,
+    });
+
+    expect(actor).toEqual({
+      id: 'manager-upload-actor',
+      eventId: 'event-a',
+      accessTokenId: 'actor-manager-token',
+      accountId: account.id,
+      expiresAt: '2026-12-18T23:59:59.999Z',
+    });
+    expect(Object.keys(actor!)).toEqual([
+      'id', 'eventId', 'accessTokenId', 'accountId', 'expiresAt',
+    ]);
+    expect(await sessions.getLiveManagerUploadActor('event-a', account.id, now))
+      .toEqual(actor);
+  });
+
+  it('returns null for failed actor proof and excludes revoked, expired, or non-current actors', async () => {
+    await seedEvent();
+    const account = await seedAccount('actor-liveness@example.com');
+    await new AccountsRepository(env.DB).addEventHost('event-a', account.id, 'cohost', now);
+    await new TokensRepository(env.DB).create({
+      id: 'actor-live-token', eventId: 'event-a', role: 'manager',
+      secretDigest: 'actor-live-token-digest', secretCiphertext: null,
+      expiresAt: '2026-12-18T23:59:59.999Z', createdAt: now,
+    });
+    await new HostSessionsRepository(env.DB).create({
+      id: 'actor-live-host', secretDigest: 'host-digest', csrfDigest: 'host-csrf',
+      accountId: account.id, authVersion: account.authVersion,
+      expiresAt: '2026-08-21T12:00:00.000Z', createdAt: now,
+    });
+    const sessions = new SessionsRepository(env.DB);
+    const input = {
+      id: 'actor-live', secretDigest: 'actor-digest', csrfDigest: 'actor-csrf',
+      hostSessionId: 'actor-live-host', accountId: account.id, eventId: 'event-a',
+      createdAt: now, nowIso: now,
+    };
+
+    expect(await sessions.createManagerUploadActor({
+      ...input,
+      id: 'wrong-host-proof',
+      hostSessionId: 'missing-host-session',
+    })).toBeNull();
+    expect(await sessions.createManagerUploadActor(input)).not.toBeNull();
+    expect(await sessions.getLiveManagerUploadActor(
+      'event-a', account.id, '2027-01-01T00:00:00.000Z',
+    )).toBeNull();
+
+    await env.DB.prepare('UPDATE event_access_tokens SET revoked_at = ? WHERE id = ?')
+      .bind('2026-07-21T12:00:01.000Z', 'actor-live-token').run();
+    await new TokensRepository(env.DB).create({
+      id: 'actor-replacement-token', eventId: 'event-a', role: 'manager',
+      secretDigest: 'actor-replacement-digest', secretCiphertext: null,
+      expiresAt: '2026-12-18T23:59:59.999Z', createdAt: '2026-07-21T12:00:01.000Z',
+    });
+    expect(await sessions.getLiveManagerUploadActor('event-a', account.id, now)).toBeNull();
+
+    expect(await sessions.revokeManagerUploadActors(
+      'event-a', account.id, '2026-07-21T12:00:02.000Z',
+    )).toBe(1);
+    expect(await sessions.getLiveManagerUploadActor('event-a', account.id, now)).toBeNull();
+
+    const secondAccount = await seedAccount('actor-event-revoke@example.com');
+    await new AccountsRepository(env.DB).addEventHost('event-a', secondAccount.id, 'cohost', now);
+    await new HostSessionsRepository(env.DB).create({
+      id: 'actor-second-host', secretDigest: 'second-host-digest', csrfDigest: 'second-host-csrf',
+      accountId: secondAccount.id, authVersion: secondAccount.authVersion,
+      expiresAt: '2026-08-21T12:00:00.000Z', createdAt: now,
+    });
+    expect(await sessions.createManagerUploadActor({
+      id: 'actor-second', secretDigest: 'second-actor-digest', csrfDigest: 'second-actor-csrf',
+      hostSessionId: 'actor-second-host', accountId: secondAccount.id, eventId: 'event-a',
+      createdAt: now, nowIso: now,
+    })).not.toBeNull();
+    expect(await sessions.revokeManagerUploadActors(
+      'event-a', null, '2026-07-21T12:00:03.000Z',
+    )).toBe(1);
+    expect(await sessions.getLiveManagerUploadActor('event-a', secondAccount.id, now)).toBeNull();
   });
 
   it('creates new events with the optional gallery hidden', async () => {
@@ -610,13 +943,726 @@ describe('atomic authentication budgets and ownership', () => {
   });
 });
 
+describe('upload authority repository and ingress fences', () => {
+  const authorityKinds = ['guest', 'manager-link', 'manager-account'] as const;
+
+  async function revokeReservationAuthority(fixture: AuthorityFixture) {
+    if (fixture.authority.kind === 'manager-account') {
+      await new HostSessionsRepository(env.DB).revoke(
+        fixture.hostSessionId!, '2026-07-21T12:00:30.000Z',
+      );
+      return;
+    }
+    await new SessionsRepository(env.DB).revoke(
+      fixture.sessionId, '2026-07-21T12:00:30.000Z',
+    );
+  }
+
+  async function uploadCounters(eventId: string) {
+    return env.DB.prepare(`
+      SELECT reserved_media_count, reserved_bytes, stored_media_count, stored_bytes
+      FROM events WHERE id = ?
+    `).bind(eventId).first<Record<string, number>>();
+  }
+
+  async function seedCrossEventReservation(
+    kind: AuthorityKind,
+    key: string,
+    byteSize = 64,
+  ) {
+    await seedEvent();
+    await seedEvent('event-b', `event-b-${key}`);
+    const fixture = await seedAuthority(kind, 'event-a', `${key}-source`);
+    const target = await seedAuthority('guest', 'event-b', `${key}-target`);
+    const repository = new MediaRepository(env.DB);
+    const reserved = await repository.reserve(
+      reserveInputForEvent(target.authority, key, 'event-b', byteSize),
+    );
+    await env.DB.prepare('UPDATE media SET uploader_session_id = ? WHERE id = ?')
+      .bind(fixture.authority.actorSessionId, reserved.id).run();
+    const crossScoped = await repository.getById(reserved.id);
+    if (!crossScoped) throw new Error('Expected cross-event reservation fixture.');
+    return { fixture, target, repository, reserved: crossScoped };
+  }
+
+  function commitInput(
+    mediaId: string,
+    eventId: string,
+    authority: UploadAuthority,
+    claimToken: string,
+    byteSize = 64,
+  ) {
+    return {
+      mediaId,
+      eventId,
+      authority,
+      claimToken,
+      finalObjectKey: finalizedMediaObjectKey(eventId, mediaId),
+      byteSize,
+      width: 800,
+      height: 600,
+      finalEtag: 'canonical-final-etag',
+      committedAt: '2026-07-21T12:02:00.000Z',
+      capturedAt: null,
+      timelineAt: '2026-07-21T12:02:00.000Z',
+    };
+  }
+
+  it.each(authorityKinds)(
+    'refuses a live %s authority for another event at single reserve',
+    async (kind) => {
+      await seedEvent();
+      await seedEvent('event-b', `cross-single-${kind}`);
+      const fixture = await seedAuthority(kind, 'event-a', `cross-single-${kind}`);
+      const repository = new MediaRepository(env.DB);
+      const input = reserveInputForEvent(
+        fixture.authority,
+        `cross-single-${kind}`,
+        'event-b',
+      );
+      const before = await uploadCounters('event-b');
+
+      await expect(repository.reserve(input)).rejects.toMatchObject({
+        code: 'RESOURCE_FORBIDDEN', status: 403,
+      });
+      expect(await repository.getById(input.id)).toBeNull();
+      expect(await repository.getPromotion(input.id)).toBeNull();
+      expect(await uploadCounters('event-b')).toEqual(before);
+    },
+  );
+
+  it.each(authorityKinds)(
+    'refuses a live %s authority for another event at batch reserve',
+    async (kind) => {
+      await seedEvent();
+      await seedEvent('event-b', `cross-batch-${kind}`);
+      const fixture = await seedAuthority(kind, 'event-a', `cross-batch-${kind}`);
+      const repository = new MediaRepository(env.DB);
+      const inputs = ['one', 'two'].map((suffix) => reserveInputForEvent(
+        fixture.authority,
+        `cross-batch-${kind}-${suffix}`,
+        'event-b',
+      ));
+      const before = await uploadCounters('event-b');
+
+      await expect(repository.reserveBatch(inputs)).rejects.toMatchObject({
+        code: 'RESOURCE_FORBIDDEN', status: 403,
+      });
+      for (const input of inputs) {
+        expect(await repository.getById(input.id)).toBeNull();
+        expect(await repository.getPromotion(input.id)).toBeNull();
+      }
+      expect(await uploadCounters('event-b')).toEqual(before);
+    },
+  );
+
+  it.each(authorityKinds)(
+    'refuses a live %s authority for another event at idempotent refresh',
+    async (kind) => {
+      const key = `cross-refresh-${kind}`;
+      const { fixture, repository, reserved } = await seedCrossEventReservation(kind, key);
+      const beforeMedia = await repository.getById(reserved.id);
+      const beforePromotion = await repository.getPromotion(reserved.id);
+      const beforeCounters = await uploadCounters('event-b');
+
+      await expect(repository.reserve({
+        ...reserveInputForEvent(fixture.authority, key, 'event-b'),
+        id: `ignored-${key}`,
+        objectKey: `events/event-b/uploads/ignored-${key}`,
+        reservationExpiresAt: '2026-07-21T12:30:00.000Z',
+        createdAt: '2026-07-21T12:01:00.000Z',
+      })).rejects.toMatchObject({ code: 'RESOURCE_FORBIDDEN', status: 403 });
+      expect(await repository.getById(reserved.id)).toEqual(beforeMedia);
+      expect(await repository.getPromotion(reserved.id)).toEqual(beforePromotion);
+      expect(await uploadCounters('event-b')).toEqual(beforeCounters);
+    },
+  );
+
+  it.each(authorityKinds)(
+    'refuses a live %s authority for another event at ingress claim',
+    async (kind) => {
+      const key = `cross-claim-${kind}`;
+      const bytes = png(800, 600);
+      const { fixture, repository, reserved } = await seedCrossEventReservation(
+        kind,
+        key,
+        bytes.byteLength,
+      );
+      const beforeMedia = await repository.getById(reserved.id);
+      const beforePromotion = await repository.getPromotion(reserved.id);
+      const beforeCounters = await uploadCounters('event-b');
+
+      await expect(receiveMediaUpload(
+        env.CANONICAL_MEDIA_BUCKET,
+        repository,
+        reserved,
+        timelineContext,
+        fixture.authority,
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+        'image/png',
+        new Date('2026-07-21T12:02:00.000Z'),
+      )).rejects.toMatchObject({ code: 'RESOURCE_FORBIDDEN', status: 403 });
+      expect(await repository.getById(reserved.id)).toEqual(beforeMedia);
+      expect(await repository.getPromotion(reserved.id)).toEqual(beforePromotion);
+      expect(await uploadCounters('event-b')).toEqual(beforeCounters);
+    },
+  );
+
+  it.each(authorityKinds)(
+    'refuses a live %s authority for another event at ingress commit',
+    async (kind) => {
+      const key = `cross-commit-${kind}`;
+      await seedEvent();
+      await seedEvent('event-b', key);
+      const fixture = await seedAuthority(kind, 'event-a', `${key}-source`);
+      const target = await seedAuthority('guest', 'event-b', `${key}-target`);
+      const repository = new MediaRepository(env.DB);
+      const reserved = await repository.reserve(
+        reserveInputForEvent(target.authority, key, 'event-b'),
+      );
+      const claimToken = `claim-${key}`;
+      await expect(repository.claimReservationIngress({
+        mediaId: reserved.id,
+        eventId: 'event-b',
+        authority: target.authority,
+        sourceObjectKey: reserved.objectKey,
+        mimeType: reserved.mimeType,
+        byteSize: reserved.declaredByteSize,
+        sha256: 'a'.repeat(64),
+        width: 800,
+        height: 600,
+        claimToken,
+        claimedAt: '2026-07-21T12:01:00.000Z',
+        leaseExpiresAt: '2026-07-21T12:21:00.000Z',
+      })).resolves.toMatchObject({ ok: true });
+      const beforeMedia = await repository.getById(reserved.id);
+      const beforePromotion = await repository.getPromotion(reserved.id);
+      const beforeCounters = await uploadCounters('event-b');
+
+      await expect(repository.commitReservationIngress(commitInput(
+        reserved.id,
+        'event-b',
+        fixture.authority,
+        claimToken,
+      ))).resolves.toEqual({ ok: false, reason: 'forbidden' });
+      expect(await repository.getById(reserved.id)).toEqual(beforeMedia);
+      expect(await repository.getPromotion(reserved.id)).toEqual(beforePromotion);
+      expect(await uploadCounters('event-b')).toEqual(beforeCounters);
+    },
+  );
+
+  it.each(authorityKinds)(
+    'does not commit a same-event reservation through a different %s actor',
+    async (alternateKind) => {
+      await seedEvent();
+      const owner = await seedAuthority('guest', 'event-a', `commit-owner-${alternateKind}`);
+      const alternate = await seedAuthority(
+        alternateKind,
+        'event-a',
+        `commit-alternate-${alternateKind}`,
+      );
+      const repository = new MediaRepository(env.DB);
+      const reserved = await repository.reserve(
+        reserveInput(owner.authority, `commit-actor-${alternateKind}`),
+      );
+      const claimToken = `claim-actor-${alternateKind}`;
+      await expect(repository.claimReservationIngress({
+        mediaId: reserved.id,
+        eventId: 'event-a',
+        authority: owner.authority,
+        sourceObjectKey: reserved.objectKey,
+        mimeType: reserved.mimeType,
+        byteSize: reserved.declaredByteSize,
+        sha256: 'b'.repeat(64),
+        width: 800,
+        height: 600,
+        claimToken,
+        claimedAt: '2026-07-21T12:01:00.000Z',
+        leaseExpiresAt: '2026-07-21T12:21:00.000Z',
+      })).resolves.toMatchObject({ ok: true });
+      const beforeMedia = await repository.getById(reserved.id);
+      const beforePromotion = await repository.getPromotion(reserved.id);
+      const beforeCounters = await uploadCounters('event-a');
+
+      await expect(repository.commitReservationIngress(commitInput(
+        reserved.id,
+        'event-a',
+        alternate.authority,
+        claimToken,
+      ))).resolves.toEqual({ ok: false, reason: 'conflict' });
+      expect(await repository.getById(reserved.id)).toEqual(beforeMedia);
+      expect(await repository.getPromotion(reserved.id)).toEqual(beforePromotion);
+      expect(await uploadCounters('event-a')).toEqual(beforeCounters);
+    },
+  );
+
+  it.each([
+    { rowState: 'missing', authorityState: 'live', expected: 'conflict' },
+    { rowState: 'missing', authorityState: 'dead', expected: 'forbidden' },
+    { rowState: 'failed', authorityState: 'live', expected: 'conflict' },
+    { rowState: 'failed', authorityState: 'dead', expected: 'forbidden' },
+    { rowState: 'deleted', authorityState: 'live', expected: 'conflict' },
+    { rowState: 'deleted', authorityState: 'dead', expected: 'forbidden' },
+  ] as const)(
+    'classifies a $authorityState authority after a failed commit to a $rowState row',
+    async ({ rowState, authorityState, expected }) => {
+      await seedEvent();
+      const fixture = await seedAuthority(
+        'guest',
+        'event-a',
+        `commit-${rowState}-${authorityState}`,
+      );
+      const repository = new MediaRepository(env.DB);
+      const mediaId = `media-commit-${rowState}-${authorityState}`;
+      if (rowState !== 'missing') {
+        const reserved = await repository.reserve(
+          reserveInput(fixture.authority, `commit-${rowState}-${authorityState}`),
+        );
+        if (rowState === 'failed') await repository.failReservation(reserved.id);
+        else await repository.delete(reserved.id, '2026-07-21T12:01:00.000Z');
+      }
+      const beforeMedia = await repository.getById(mediaId);
+      const beforePromotion = await repository.getPromotion(mediaId);
+      const beforeCounters = await uploadCounters('event-a');
+      if (authorityState === 'dead') await revokeReservationAuthority(fixture);
+
+      await expect(repository.commitReservationIngress(commitInput(
+        mediaId,
+        'event-a',
+        fixture.authority,
+        `claim-${rowState}-${authorityState}`,
+      ))).resolves.toEqual({ ok: false, reason: expected });
+      expect(await repository.getById(mediaId)).toEqual(beforeMedia);
+      expect(await repository.getPromotion(mediaId)).toEqual(beforePromotion);
+      expect(await uploadCounters('event-a')).toEqual(beforeCounters);
+    },
+  );
+
+  it.each([
+    ['guest', 'eventSessionId'],
+    ['manager-link', 'eventSessionId'],
+    ['manager-account', 'hostSessionId'],
+    ['manager-account', 'accountId'],
+  ] as const)(
+    'rejects a batch whose %s authority changes %s between items',
+    async (kind, field) => {
+      await seedEvent();
+      const fixture = await seedAuthority(kind, 'event-a', `mixed-${kind}-${field}`);
+      const altered = {
+        ...fixture.authority,
+        [field]: `${fixture.authority[field]}-different`,
+      } as UploadAuthority;
+      const repository = new MediaRepository(env.DB);
+      const inputs = [
+        reserveInput(fixture.authority, `mixed-${kind}-${field}-one`),
+        reserveInput(altered, `mixed-${kind}-${field}-two`),
+      ];
+      const before = await uploadCounters('event-a');
+
+      await expect(repository.reserveBatch(inputs)).rejects.toMatchObject({
+        code: 'VALIDATION_FAILED', status: 422,
+      });
+      for (const input of inputs) {
+        expect(await repository.getById(input.id)).toBeNull();
+        expect(await repository.getPromotion(input.id)).toBeNull();
+      }
+      expect(await uploadCounters('event-a')).toEqual(before);
+    },
+  );
+
+  it.each(['guest', 'manager-link', 'manager-account'] as const)(
+    're-proves a %s authority in the same statement that reserves quota',
+    async (kind) => {
+      await seedEvent();
+      const fixture = await seedAuthority(kind);
+      await revokeReservationAuthority(fixture);
+      const repository = new MediaRepository(env.DB);
+
+      await expect(repository.reserve(reserveInput(fixture.authority, `dead-reserve-${kind}`)))
+        .rejects.toMatchObject({ code: 'RESOURCE_FORBIDDEN', status: 403 });
+      expect(await repository.getById(`media-dead-reserve-${kind}`)).toBeNull();
+      expect(await new EventsRepository(env.DB).getById('event-a')).toMatchObject({
+        reservedMediaCount: 0, reservedBytes: 0,
+      });
+    },
+  );
+
+  it.each(['guest', 'manager-link', 'manager-account'] as const)(
+    'refuses a %s idempotent refresh after its credential dies',
+    async (kind) => {
+      await seedEvent();
+      const fixture = await seedAuthority(kind);
+      const repository = new MediaRepository(env.DB);
+      const input = reserveInput(fixture.authority, `dead-refresh-${kind}`);
+      const reserved = await repository.reserve(input);
+      await revokeReservationAuthority(fixture);
+
+      await expect(repository.reserve({
+        ...input,
+        id: `ignored-dead-refresh-${kind}`,
+        reservationExpiresAt: '2026-07-21T12:30:00.000Z',
+        createdAt: '2026-07-21T12:01:00.000Z',
+      })).rejects.toMatchObject({ code: 'RESOURCE_FORBIDDEN', status: 403 });
+      expect(await repository.getById(reserved.id)).toMatchObject({
+        uploadState: 'reserved', reservationExpiresAt: '2026-07-21T12:15:00.000Z',
+      });
+    },
+  );
+
+  it.each(['reserved', 'failed'] as const)(
+    'cancels one Manager %s reservation, releases only charged quota, and classifies replay',
+    async (state) => {
+      await seedEvent();
+      const fixture = await seedAuthority('manager-link');
+      const repository = new MediaRepository(env.DB);
+      const reserved = await repository.reserve(
+        reserveInput(fixture.authority, `cancel-${state}`, 128),
+      );
+      if (state === 'failed') await repository.failReservation(reserved.id);
+
+      const outcome = await repository.cancelReservation(
+        reserved.id,
+        fixture.authority,
+        '2026-07-21T12:02:00.000Z',
+      );
+
+      expect(outcome).toMatchObject({
+        kind: 'canceled',
+        claim: { mediaId: reserved.id, eventId: 'event-a' },
+      });
+      if (outcome.kind !== 'canceled') throw new Error('Expected cancellation claim.');
+      expect([...outcome.claim.legacyKeys].sort()).toEqual([
+        reserved.objectKey,
+        `events/event-a/previews/${reserved.id}.webp`,
+      ].sort());
+      expect(outcome.claim.canonicalKeys).toEqual([
+        finalizedMediaObjectKey('event-a', reserved.id),
+      ]);
+      expect(await repository.getById(reserved.id)).toMatchObject({
+        uploadState: 'deleted',
+        deletedAt: '2026-07-21T12:02:00.000Z',
+        trashedAt: null,
+        restoreUntil: null,
+      });
+      expect(await repository.getPromotion(reserved.id)).toBeNull();
+      expect(await uploadCounters('event-a')).toEqual({
+        reserved_media_count: 0,
+        reserved_bytes: 0,
+        stored_media_count: 0,
+        stored_bytes: 0,
+      });
+      await expect(repository.cancelReservation(
+        reserved.id,
+        fixture.authority,
+        '2026-07-21T12:02:00.000Z',
+      )).resolves.toEqual({ kind: 'already-canceled' });
+    },
+  );
+
+  it('refuses guest, cross-event, and dead-authority reservations without changing rows or quota', async () => {
+    await seedEvent();
+    await seedEvent('event-b', 'event-b-cancel');
+    const manager = await seedAuthority('manager-link', 'event-a', 'cancel-manager');
+    const guest = await seedAuthority('guest', 'event-a', 'cancel-guest');
+    const foreignGuest = await seedAuthority('guest', 'event-b', 'cancel-foreign-guest');
+    const repository = new MediaRepository(env.DB);
+    const guestRow = await repository.reserve(reserveInput(guest.authority, 'cancel-guest-row'));
+    const foreignRow = await repository.reserve(
+      reserveInputForEvent(foreignGuest.authority, 'cancel-foreign-row', 'event-b'),
+    );
+    const ownRow = await repository.reserve(reserveInput(manager.authority, 'cancel-dead-row'));
+
+    await expect(repository.cancelReservation(
+      guestRow.id, manager.authority, '2026-07-21T12:01:00.000Z',
+    )).resolves.toEqual({ kind: 'forbidden' });
+    await expect(repository.cancelReservation(
+      foreignRow.id, manager.authority, '2026-07-21T12:01:00.000Z',
+    )).resolves.toEqual({ kind: 'forbidden' });
+    await new SessionsRepository(env.DB).revoke(
+      manager.sessionId,
+      '2026-07-21T12:01:30.000Z',
+    );
+    await expect(repository.cancelReservation(
+      ownRow.id, manager.authority, '2026-07-21T12:02:00.000Z',
+    )).resolves.toEqual({ kind: 'forbidden' });
+
+    expect(await repository.getById(guestRow.id)).toMatchObject({ uploadState: 'reserved' });
+    expect(await repository.getById(foreignRow.id)).toMatchObject({ uploadState: 'reserved' });
+    expect(await repository.getById(ownRow.id)).toMatchObject({ uploadState: 'reserved' });
+    expect(await uploadCounters('event-a')).toMatchObject({
+      reserved_media_count: 2,
+      reserved_bytes: 128,
+    });
+    expect(await uploadCounters('event-b')).toMatchObject({
+      reserved_media_count: 1,
+      reserved_bytes: 64,
+    });
+  });
+
+  it('classifies delivered and Recently deleted Manager rows as conflicts without mutating them', async () => {
+    await seedEvent();
+    const fixture = await seedAuthority('manager-link');
+    const repository = new MediaRepository(env.DB);
+    const stored = await repository.reserve(reserveInput(fixture.authority, 'cancel-stored', 128));
+    await repository.finalize(
+      stored.id,
+      { byteSize: 128, width: 800, height: 600 },
+      '2026-07-21T12:01:00.000Z',
+      { capturedAt: null, timelineAt: '2026-07-21T12:01:00.000Z' },
+    );
+    const beforeStored = await repository.getById(stored.id);
+
+    await expect(repository.cancelReservation(
+      stored.id, fixture.authority, '2026-07-21T12:02:00.000Z',
+    )).resolves.toEqual({ kind: 'conflict' });
+    expect(await repository.getById(stored.id)).toEqual(beforeStored);
+
+    await repository.trashStored('event-a', stored.id, '2026-07-21T12:03:00.000Z');
+    const beforeTrashed = await repository.getById(stored.id);
+    await expect(repository.cancelReservation(
+      stored.id, fixture.authority, '2026-07-21T12:04:00.000Z',
+    )).resolves.toEqual({ kind: 'conflict' });
+    expect(await repository.getById(stored.id)).toEqual(beforeTrashed);
+    expect(await uploadCounters('event-a')).toMatchObject({
+      reserved_media_count: 0,
+      stored_media_count: 0,
+    });
+  });
+
+  it.each(['reserved', 'failed'] as const)(
+    'lets Manager cleanup cancel only a guest-owned %s row',
+    async (state) => {
+      await seedEvent();
+      const guest = await seedAuthority('guest', 'event-a', 'legacy-cancel-guest');
+      const manager = await seedAuthority('manager-link', 'event-a', 'legacy-cancel-manager');
+      const repository = new MediaRepository(env.DB);
+      const guestRow = await repository.reserve(
+        reserveInput(guest.authority, 'legacy-cancel-guest-row', 96),
+      );
+      const managerRow = await repository.reserve(
+        reserveInput(manager.authority, 'legacy-cancel-manager-row', 64),
+      );
+      if (state === 'failed') await repository.failReservation(guestRow.id);
+
+      await expect(repository.cancelGuestReservationFromManager(
+        managerRow.id, 'event-a', '2026-07-21T12:01:00.000Z',
+      )).resolves.toEqual({ kind: 'forbidden' });
+      const canceled = await repository.cancelGuestReservationFromManager(
+        guestRow.id, 'event-a', '2026-07-21T12:02:00.000Z',
+      );
+
+      expect(canceled).toMatchObject({
+        kind: 'canceled',
+        claim: { mediaId: guestRow.id, eventId: 'event-a' },
+      });
+      expect(await repository.getById(guestRow.id)).toMatchObject({ uploadState: 'deleted' });
+      expect(await repository.getById(managerRow.id)).toMatchObject({ uploadState: 'reserved' });
+      expect(await uploadCounters('event-a')).toMatchObject({
+        reserved_media_count: 1,
+        reserved_bytes: 64,
+      });
+      await expect(repository.cancelGuestReservationFromManager(
+        guestRow.id, 'event-a', '2026-07-21T12:02:00.000Z',
+      )).resolves.toEqual({ kind: 'already-canceled' });
+    },
+  );
+
+  it('never re-enters another actor row for the same event idempotency key', async () => {
+    await seedEvent();
+    const first = await seedAuthority('guest');
+    const secondSessionId = await seedGuestSession('event-a', 'authority-guest-second');
+    const second: UploadAuthority = {
+      kind: 'guest', actorSessionId: secondSessionId, eventSessionId: secondSessionId,
+    };
+    const repository = new MediaRepository(env.DB);
+
+    const firstMedia = await repository.reserve(reserveInput(first.authority, 'cross-actor'));
+    const secondMedia = await repository.reserve({
+      ...reserveInput(second, 'cross-actor'),
+      id: 'media-cross-actor-second',
+      objectKey: 'events/event-a/uploads/media-cross-actor-second',
+    });
+
+    expect(secondMedia.id).not.toBe(firstMedia.id);
+    expect([firstMedia.uploaderSessionId, secondMedia.uploaderSessionId])
+      .toEqual([first.authority.actorSessionId, second.actorSessionId]);
+  });
+
+  it('distinguishes a canceled Manager replay without resurrecting its row', async () => {
+    await seedEvent();
+    const fixture = await seedAuthority('manager-link');
+    const repository = new MediaRepository(env.DB);
+    const input = reserveInput(fixture.authority, 'manager-canceled-replay');
+    const reserved = await repository.reserve(input);
+    await repository.delete(reserved.id, '2026-07-21T12:01:00.000Z');
+
+    await expect(repository.reserve({ ...input, id: 'ignored-manager-canceled-replay' }))
+      .rejects.toMatchObject({ code: 'UPLOAD_RESERVATION_CANCELED', status: 409 });
+    expect(await repository.getById(reserved.id)).toMatchObject({ uploadState: 'deleted' });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media WHERE event_id = ?')
+      .bind('event-a').first<{ count: number }>())?.count).toBe(1);
+  });
+
+  it('keeps the canceled guest replay wire answer byte-identical', async () => {
+    await seedEvent();
+    const fixture = await seedAuthority('guest');
+    const repository = new MediaRepository(env.DB);
+    const input = reserveInput(fixture.authority, 'guest-canceled-replay');
+    const reserved = await repository.reserve(input);
+    await repository.delete(reserved.id, '2026-07-21T12:01:00.000Z');
+
+    await expect(repository.reserve({ ...input, id: 'ignored-guest-canceled-replay' }))
+      .rejects.toMatchObject({
+        code: 'UPLOAD_FINALIZE_CONFLICT',
+        status: 409,
+        message: 'This photo was removed. Choose it again.',
+      });
+    expect(await repository.getById(reserved.id)).toMatchObject({ uploadState: 'deleted' });
+  });
+
+  it.each(AUTHORITY_REVOCATIONS)(
+    'classifies $condition before claim as RESOURCE_FORBIDDEN and moves no promotion',
+    async ({ kind, mutate }) => {
+      await seedEvent();
+      const fixture = await seedAuthority(kind);
+      const repository = new MediaRepository(env.DB);
+      const bytes = png(800, 600);
+      const reserved = await repository.reserve(
+        reserveInput(fixture.authority, `claim-${kind}-${crypto.randomUUID()}`, bytes.byteLength),
+      );
+      await mutate(fixture);
+
+      await expect(receiveMediaUpload(
+        env.CANONICAL_MEDIA_BUCKET,
+        repository,
+        reserved,
+        timelineContext,
+        fixture.authority,
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+        'image/png',
+        new Date('2026-07-21T12:02:00.000Z'),
+      )).rejects.toMatchObject({ code: 'RESOURCE_FORBIDDEN', status: 403 });
+      expect(await repository.getById(reserved.id)).toMatchObject({ uploadState: 'reserved' });
+      expect(await repository.getPromotion(reserved.id)).toMatchObject({ state: 'pending' });
+      expect(await new EventsRepository(env.DB).getById('event-a')).toMatchObject({
+        reservedMediaCount: 1, storedMediaCount: 0,
+      });
+    },
+  );
+
+  it.each(AUTHORITY_REVOCATIONS)(
+    'classifies $condition after claim as RESOURCE_FORBIDDEN and commits no row or counter',
+    async ({ kind, mutate }) => {
+      await seedEvent();
+      const fixture = await seedAuthority(kind);
+      const repository = new MediaRepository(env.DB);
+      const bytes = png(800, 600);
+      const reserved = await repository.reserve(
+        reserveInput(fixture.authority, `commit-${kind}-${crypto.randomUUID()}`, bytes.byteLength),
+      );
+      const claimToken = `claim-${crypto.randomUUID()}`;
+      const claimed = await repository.claimReservationIngress({
+        mediaId: reserved.id,
+        eventId: reserved.eventId,
+        authority: fixture.authority,
+        sourceObjectKey: reserved.objectKey,
+        mimeType: reserved.mimeType,
+        byteSize: bytes.byteLength,
+        sha256: 'a'.repeat(64),
+        width: 800,
+        height: 600,
+        claimToken,
+        claimedAt: '2026-07-21T12:01:00.000Z',
+        leaseExpiresAt: '2026-07-21T12:21:00.000Z',
+      });
+      expect(claimed).toMatchObject({ ok: true, value: { claimToken } });
+      await mutate(fixture);
+
+      await expect(repository.commitReservationIngress({
+        mediaId: reserved.id,
+        eventId: reserved.eventId,
+        authority: fixture.authority,
+        claimToken,
+        finalObjectKey: finalizedMediaObjectKey('event-a', reserved.id),
+        byteSize: bytes.byteLength,
+        width: 800,
+        height: 600,
+        finalEtag: 'canonical-final-etag',
+        committedAt: '2026-07-21T12:02:00.000Z',
+        capturedAt: null,
+        timelineAt: '2026-07-21T12:02:00.000Z',
+      })).resolves.toEqual({ ok: false, reason: 'forbidden' });
+      expect(await repository.getById(reserved.id)).toMatchObject({ uploadState: 'reserved' });
+      expect(await repository.getPromotion(reserved.id)).toMatchObject({
+        state: 'copying', claimToken, finalPointerCommitted: false,
+      });
+      expect(await new EventsRepository(env.DB).getById('event-a')).toMatchObject({
+        reservedMediaCount: 1, storedMediaCount: 0,
+      });
+    },
+  );
+
+  it('returns an already-stored result before classifying a newly dead credential', async () => {
+    await seedEvent();
+    const fixture = await seedAuthority('guest');
+    const receivedAt = new Date();
+    const liveThrough = new Date(receivedAt.getTime() + 86_400_000).toISOString();
+    await env.DB.batch([
+      env.DB.prepare('UPDATE event_sessions SET expires_at = ? WHERE id = ?')
+        .bind(liveThrough, fixture.sessionId),
+      env.DB.prepare('UPDATE event_access_tokens SET expires_at = ? WHERE id = ?')
+        .bind(liveThrough, fixture.tokenId),
+      env.DB.prepare('UPDATE events SET guest_access_expires_at = ? WHERE id = ?')
+        .bind(liveThrough, 'event-a'),
+    ]);
+    const repository = new MediaRepository(env.DB);
+    const bytes = png(800, 600);
+    const reserved = await repository.reserve(
+      {
+        ...reserveInput(fixture.authority, 'stored-before-revocation', bytes.byteLength),
+        reservationExpiresAt: liveThrough,
+      },
+    );
+    const stored = await receiveMediaUpload(
+      env.CANONICAL_MEDIA_BUCKET,
+      repository,
+      reserved,
+      timelineContext,
+      fixture.authority,
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      'image/png',
+      receivedAt,
+    );
+    await new SessionsRepository(env.DB).revoke(
+      fixture.sessionId, new Date(receivedAt.getTime() + 1_000).toISOString(),
+    );
+    const beforeReplayMedia = await repository.getById(stored.id);
+    const beforeReplayPromotion = await repository.getPromotion(stored.id);
+    const beforeReplayCounters = await uploadCounters('event-a');
+
+    await expect(receiveMediaUpload(
+      env.CANONICAL_MEDIA_BUCKET,
+      repository,
+      stored,
+      timelineContext,
+      fixture.authority,
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      'image/png',
+      new Date(receivedAt.getTime() + 2_000),
+    )).resolves.toMatchObject({ id: stored.id, uploadState: 'stored' });
+    expect(await repository.getById(stored.id)).toEqual(beforeReplayMedia);
+    expect(await repository.getPromotion(stored.id)).toEqual(beforeReplayPromotion);
+    expect(await uploadCounters('event-a')).toEqual(beforeReplayCounters);
+  });
+});
+
 describe('media reservation and lifecycle', () => {
   it('leases durable legacy promotion work and atomically commits its pointer fence', async () => {
     await seedEvent();
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     const reserved = await repository.reserve({
-      id: 'media-durable-promotion', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-durable-promotion', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/media-durable-promotion', originalFilename: 'photo.png',
       mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-durable-promotion',
@@ -712,7 +1758,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     const reserved = await repository.reserve({
-      id: 'media-verified-trash-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-verified-trash-race', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/media-verified-trash-race', originalFilename: 'photo.png',
       mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-verified-trash-race',
@@ -805,7 +1851,7 @@ describe('media reservation and lifecycle', () => {
     const mediaId = 'media-canonical-delete';
     const finalKey = finalizedMediaObjectKey('event-a', mediaId);
     const reserved = await repository.reserve({
-      id: mediaId, eventId: 'event-a', uploaderSessionId: sessionId,
+      id: mediaId, eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: finalKey, originalFilename: 'photo.png', mimeType: 'image/png',
       declaredByteSize: 128, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-canonical-delete',
@@ -845,7 +1891,7 @@ describe('media reservation and lifecycle', () => {
     const repository = new MediaRepository(env.DB);
     const bytes = png(800, 600);
     const reserved = await repository.reserve({
-      id: 'media-pre-put-tombstone', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-pre-put-tombstone', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-pre-put-tombstone',
       originalFilename: 'photo.png', mimeType: 'image/png',
       declaredByteSize: bytes.byteLength, guestName: 'Avery', caption: null,
@@ -867,7 +1913,7 @@ describe('media reservation and lifecycle', () => {
       guardedRepository,
       reserved,
       timelineContext,
-      sessionId,
+      guestUploadAuthority(sessionId),
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
       'image/png',
       new Date('2026-07-21T12:01:00.000Z'),
@@ -886,7 +1932,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     const reserved = await repository.reserve({
-      id: 'media-inactive-promotion', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-inactive-promotion', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-inactive-promotion', originalFilename: 'photo.png',
       mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-inactive-promotion',
@@ -920,7 +1966,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     const reserved = await repository.reserve({
-      id: 'media-ingress-park-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-ingress-park-race', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-ingress-park-race',
       originalFilename: 'photo.png', mimeType: 'image/png', declaredByteSize: 128,
       guestName: 'Avery', caption: null, idempotencyKey: 'idem-ingress-park-race',
@@ -931,7 +1977,7 @@ describe('media reservation and lifecycle', () => {
     const claimed = await repository.claimReservationIngress({
       mediaId: reserved.id,
       eventId: reserved.eventId,
-      uploaderSessionId: sessionId,
+      authority: guestUploadAuthority(sessionId),
       sourceObjectKey: reserved.objectKey,
       mimeType: 'image/png',
       byteSize: 128,
@@ -942,12 +1988,14 @@ describe('media reservation and lifecycle', () => {
       claimedAt: '2026-07-21T12:01:00.000Z',
       leaseExpiresAt: '2026-07-21T12:21:00.000Z',
     });
-    expect(claimed).not.toBeNull();
+    expect(claimed).toMatchObject({ ok: true });
 
     // The scheduled pass selected the copying row. The HTTP writer commits
     // before its later inactive check/park CAS reaches D1.
     expect(await repository.commitReservationIngress({
       mediaId: reserved.id,
+      eventId: reserved.eventId,
+      authority: guestUploadAuthority(sessionId),
       claimToken,
       finalObjectKey: finalizedMediaObjectKey('event-a', reserved.id),
       byteSize: 128,
@@ -957,7 +2005,7 @@ describe('media reservation and lifecycle', () => {
       committedAt: '2026-07-21T12:02:00.000Z',
       capturedAt: null,
       timelineAt: '2026-07-21T12:02:00.000Z',
-    })).toBe(true);
+    })).toEqual({ ok: true, value: null });
     expect(await repository.ingressPromotionIsInactive(reserved.id)).toBe(true);
     expect(await repository.parkInactivePromotionCleanup(
       reserved.id,
@@ -985,7 +2033,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
 
     await expect(new MediaRepository(env.DB).reserve({
-      id: 'media-nameless', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-nameless', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/nameless', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg', declaredByteSize: 1024, guestName: null as never, caption: null,
       idempotencyKey: 'idem-nameless', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
@@ -1000,7 +2048,7 @@ describe('media reservation and lifecycle', () => {
     `).bind(300 * 1024 * 1024, 'event-a').run();
 
     const reserved = await new MediaRepository(env.DB).reserve({
-      id: 'media-scale', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-scale', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/scale', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg', declaredByteSize: 1024, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-scale', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
@@ -1014,7 +2062,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     const input = {
-      id: 'media-a', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-a', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/media-a', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
       guestName: 'Avery', caption: null, idempotencyKey: 'idem-a',
@@ -1036,7 +2084,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     const input = {
-      id: 'media-retry', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-retry', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/media-retry', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
       guestName: 'Avery', caption: null, idempotencyKey: 'idem-retry',
@@ -1067,7 +2115,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     const input = {
-      id: 'media-refresh', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-refresh', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/media-refresh', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
       guestName: 'Avery', caption: null, idempotencyKey: 'idem-refresh',
@@ -1104,7 +2152,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     const input = {
-      id: 'media-refresh-claimed', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-refresh-claimed', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-refresh-claimed', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
       guestName: 'Avery', caption: null, idempotencyKey: 'idem-refresh-claimed',
@@ -1137,7 +2185,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     const input = {
-      id: 'media-failed-claimed', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-failed-claimed', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-failed-claimed', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg' as const, declaredByteSize: 1024,
       guestName: 'Avery', caption: null, idempotencyKey: 'idem-failed-claimed',
@@ -1169,7 +2217,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     const reserved = await media.reserve({
-      id: 'media-delete-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-delete-race', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/media-delete-race', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg', declaredByteSize: 1024,
       guestName: 'Avery', caption: null, idempotencyKey: 'idem-delete-race',
@@ -1201,7 +2249,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     const makeInput = (suffix: string, bytes: number) => ({
-      id: `media-batch-${suffix}`, eventId: 'event-a', uploaderSessionId: sessionId,
+      id: `media-batch-${suffix}`, eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: `events/event-a/media/media-batch-${suffix}`, originalFilename: `${suffix}.jpg`,
       mimeType: 'image/jpeg' as const, declaredByteSize: bytes,
       guestName: 'Avery', caption: null, idempotencyKey: `idem-batch-${suffix}`,
@@ -1224,7 +2272,7 @@ describe('media reservation and lifecycle', () => {
     const media = new MediaRepository(env.DB);
 
     await expect(media.reserve({
-      id: 'media-over', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-over', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/over', originalFilename: 'over.jpg',
       mimeType: 'image/jpeg', declaredByteSize: 1024, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-over', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
@@ -1238,7 +2286,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     await media.reserve({
-      id: 'media-a', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-a', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/media-a', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg', declaredByteSize: 2048, guestName: 'Avery', caption: 'A quiet moment',
       idempotencyKey: 'idem-a', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
@@ -1282,7 +2330,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const base = new MediaRepository(env.DB);
     const reserved = await base.reserve({
-      id: 'media-delete-finalize-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-delete-finalize-race', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-delete-finalize-race',
       originalFilename: 'race.png', mimeType: 'image/png', declaredByteSize: 128,
       guestName: 'Avery', caption: null, idempotencyKey: 'delete-finalize-race',
@@ -1329,7 +2377,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const base = new MediaRepository(env.DB);
     const input = {
-      id: 'media-delete-refresh-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-delete-refresh-race', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-delete-refresh-race',
       originalFilename: 'race.png', mimeType: 'image/png' as const, declaredByteSize: 128,
       guestName: 'Avery', caption: null, idempotencyKey: 'delete-refresh-race',
@@ -1378,7 +2426,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const media = new MediaRepository(env.DB);
     await media.reserve({
-      id: 'media-stored-at', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-stored-at', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/stored-at', originalFilename: 'photo.jpg',
       mimeType: 'image/jpeg', declaredByteSize: 2048, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-stored-at', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,
@@ -1410,7 +2458,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     const reserved = await repository.reserve({
-      id: 'media-delayed-validation', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-delayed-validation', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/delayed-validation', originalFilename: 'photo.png',
       mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-delayed-validation',
@@ -1486,7 +2534,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     const reserved = await repository.reserve({
-      id: 'media-version-race', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-version-race', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-version-race', originalFilename: 'photo.png',
       mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-version-race',
@@ -1527,7 +2575,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     const reserved = await repository.reserve({
-      id: 'media-orphan-recovery', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-orphan-recovery', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-orphan-recovery', originalFilename: 'photo.png',
       mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-orphan-recovery',
@@ -1587,7 +2635,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     const reserved = await repository.reserve({
-      id: 'media-orphan-reject', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-orphan-reject', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/uploads/media-orphan-reject', originalFilename: 'photo.png',
       mimeType: 'image/png', declaredByteSize: 128, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-orphan-reject',
@@ -1616,7 +2664,7 @@ describe('media reservation and lifecycle', () => {
     const sessionId = await seedGuestSession();
     const repository = new MediaRepository(env.DB);
     await repository.reserve({
-      id: 'media-private', eventId: 'event-a', uploaderSessionId: sessionId,
+      id: 'media-private', eventId: 'event-a', uploaderSessionId: sessionId, authority: guestUploadAuthority(sessionId),
       objectKey: 'events/event-a/media/private', originalFilename: 'private.heic',
       mimeType: 'image/heic' as never, declaredByteSize: 2048, guestName: 'Avery', caption: null,
       idempotencyKey: 'idem-private', reservationExpiresAt: '2026-07-21T12:15:00.000Z', createdAt: now,

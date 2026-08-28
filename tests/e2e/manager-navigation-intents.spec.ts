@@ -5,6 +5,9 @@ import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 import { makeMedia } from './fixtures/ui-data';
 
 const managerGalleryUrl = `/manage/event/${EVENT_FIXTURE.id}?section=gallery`;
+const managerSettingsUrl = `/manage/event/${EVENT_FIXTURE.id}?section=settings`;
+const e2eOrigin = 'http://127.0.0.1:4173';
+const rotatedManagementLink = 'https://example.test/manage/replacement-id.replacement-secret';
 const libraryRows = makeMedia(96, 'unpublished');
 const guestRows = makeMedia(6, 'unpublished').map((row, index) => ({
   ...row,
@@ -50,6 +53,34 @@ async function installViteRefreshGlobals(page: Page) {
       $RefreshSig$: () => (type: unknown) => type,
     });
   });
+}
+
+async function installHostAccountSession(page: Page) {
+  await page.context().addCookies([
+    {
+      name: 'candidary_host',
+      value: 'host-session.fixture-secret',
+      url: e2eOrigin,
+      httpOnly: true,
+      sameSite: 'Lax',
+    },
+    {
+      name: 'candidary_host_csrf',
+      value: 'host-csrf-fixture',
+      url: e2eOrigin,
+      sameSite: 'Strict',
+    },
+  ]);
+  await page.route('**/api/host/session', (route) => route.fulfill({
+    headers: { 'cache-control': 'private, no-store' },
+    json: {
+      data: {
+        account: { email: 'host@example.test' },
+        events: [{ id: EVENT_FIXTURE.id }],
+      },
+      requestId: 'request-host-session',
+    },
+  }));
 }
 
 test('deep Library anchor survives Guest gallery and Back', async ({ page }) => {
@@ -258,4 +289,88 @@ test('Guest gallery Settings round trip restores Hidden and focus', async ({ pag
   await expect(filters.getByRole('button', { name: 'Hidden' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Open settings' })).toBeFocused();
   await expect(page.getByText('Selection cleared.')).toBeAttached();
+});
+
+test('rotation save gate refuses Back and reload until Copy releases account-session navigation', async ({ page }) => {
+  await installViteRefreshGlobals(page);
+  await installHostAccountSession(page);
+  await page.context().grantPermissions(
+    ['clipboard-read', 'clipboard-write'],
+    { origin: e2eOrigin },
+  );
+  const fixture = await stubManagerRoutes(page, {
+    mediaPages: { first: { media: [], nextCursor: null } },
+    event: {
+      managerLinkRevision: 4,
+      managerLinkRotationAvailability: { enabled: true, reason: null },
+    },
+    managerLinkRotation: { managementLink: rotatedManagementLink },
+  });
+  const mainFrameNavigations: string[] = [];
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) mainFrameNavigations.push(frame.url());
+  });
+
+  await page.goto('/privacy');
+  await page.goto(managerSettingsUrl);
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  const trigger = page.getByRole('button', { name: 'Rotate manager link' });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+
+  const confirmation = page.getByRole('dialog', { name: 'Rotate management link?' });
+  const keep = confirmation.getByRole('button', { name: 'Keep current link' });
+  await expect(keep).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(confirmation.getByRole('button', { name: 'Rotate link' })).toBeFocused();
+  await page.keyboard.press('Enter');
+
+  const result = page.getByRole('dialog', { name: 'Save your new management link' });
+  const copy = result.getByRole('button', { name: 'Copy management link' });
+  await expect(copy).toBeFocused();
+  await expect(result.getByRole('button', { name: 'Continue managing' })).toBeDisabled();
+
+  const blockedBack = page.goBack();
+  await expect(page).toHaveURL(managerSettingsUrl);
+  await expect(result).toBeVisible();
+  await blockedBack;
+
+  const dialogPromise = page.waitForEvent('dialog');
+  const reloadAttempt = page.reload().catch(() => null);
+  const beforeUnload = await dialogPromise;
+  expect(beforeUnload.type()).toBe('beforeunload');
+  await beforeUnload.dismiss();
+  await reloadAttempt;
+  await expect(page).toHaveURL(managerSettingsUrl);
+  await expect(result).toBeVisible();
+  await expect(copy).toBeFocused();
+  expect(await page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(true);
+
+  await page.keyboard.press('Enter');
+  await expect(result.getByRole('button', { name: 'Continue managing' })).toBeEnabled();
+  await expect(result.getByRole('button', { name: 'Continue managing' })).toBeFocused();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(rotatedManagementLink);
+  expect(await page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(false);
+
+  await page.goBack();
+  await expect(page).toHaveURL('/privacy');
+  expect(mainFrameNavigations.some((url) => url.includes('replacement-id.replacement-secret')))
+    .toBe(false);
+  expect(fixture.managerLinkRotation.requests).toHaveLength(1);
+  const [request] = fixture.managerLinkRotation.requests;
+  expect(request).toMatchObject({
+    body: { expectedManagerLinkRevision: 4 },
+    responseStatus: 200,
+  });
+  expect(request!.headers.cookie).toContain('candidary_host=host-session.fixture-secret');
+  expect(request!.headers['x-candidary-host-csrf']).toBe('host-csrf-fixture');
+  expect(request!.headers['x-candidary-csrf']).toBeUndefined();
 });

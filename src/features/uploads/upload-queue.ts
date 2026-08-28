@@ -1,3 +1,7 @@
+import { UPLOAD_BATCH_SIZE } from '../../../shared/constants';
+import type { ApiErrorCode } from '../../../shared/errors';
+import { ClientApiError } from '../../app/api';
+
 export type UploadQueueState =
   | 'selected'
   | 'reserving'
@@ -20,6 +24,7 @@ export interface UploadQueueItem {
   progress: number;
   isNewCapture: boolean;
   error?: string;
+  failure?: UploadFailure;
   validationError?: boolean;
   retryStage?: 'finalize';
   reservation?: UploadReservation;
@@ -28,8 +33,15 @@ export interface UploadQueueItem {
 
 export type ReservationResult =
   | { id: string; status: 'accepted'; reservation: UploadReservation }
-  | { id: string; status: 'delivered' }
-  | { id: string; status: 'rejected'; error: string };
+  | { id: string; status: 'delivered'; mediaId: string }
+  | { id: string; status: 'canceled' }
+  | { id: string; status: 'rejected'; error: string; failure?: UploadFailure };
+
+export interface UploadFailure {
+  code: ApiErrorCode;
+  status: number;
+  stage: 'reserve' | 'upload' | 'finalize';
+}
 
 export interface UploadTransport {
   reserve(items: readonly UploadQueueItem[], signal?: AbortSignal): Promise<readonly ReservationResult[]>;
@@ -47,6 +59,7 @@ export interface RunUploadQueueOptions {
   concurrency?: number;
   onChange?: (items: UploadQueueItem[]) => void;
   signal?: AbortSignal;
+  onFinalized?: (result: { itemId: string; mediaId: string }) => void;
 }
 
 const CANCELLED_MESSAGE = 'Sending was cancelled. Retry when you are ready.';
@@ -56,12 +69,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'This photo could not be sent.';
 }
 
+function failureFrom(error: unknown, stage: UploadFailure['stage']): UploadFailure | undefined {
+  if (!(error instanceof ClientApiError) || typeof error.status !== 'number') return undefined;
+  return { code: error.code, status: error.status, stage };
+}
+
 export async function runUploadQueue(
   items: readonly UploadQueueItem[],
   transport: UploadTransport,
   options: RunUploadQueueOptions = {},
 ): Promise<UploadQueueItem[]> {
-  const { concurrency = 2, onChange, signal } = options;
+  const { concurrency = 2, onChange, onFinalized, signal } = options;
   let current = items.map((item) => ({ ...item }));
   const finalizationRetries = current.filter(({ state, retryStage, reservation }) =>
     state === 'failed' && retryStage === 'finalize' && reservation);
@@ -69,56 +87,98 @@ export async function runUploadQueue(
     !validationError && (state === 'selected' || (state === 'failed' && retryStage !== 'finalize')));
   if (candidates.length === 0 && finalizationRetries.length === 0) return current;
 
-  const candidateIds = new Set(candidates.map(({ id }) => id));
-  const activeIds = new Set([...candidateIds, ...finalizationRetries.map(({ id }) => id)]);
+  const activeIds = new Set([...candidates, ...finalizationRetries].map(({ id }) => id));
   const emit = () => onChange?.(current.map((item) => ({ ...item })));
   const update = (id: string, patch: Partial<UploadQueueItem>) => {
     current = current.map((item) => item.id === id ? { ...item, ...patch } : item);
     emit();
   };
+  const markDelivered = (id: string, mediaId: string) => {
+    if (signal?.aborted) return;
+    const queued = current.find((item) => item.id === id);
+    if (!queued || queued.state === 'delivered') return;
+    update(id, {
+      state: 'delivered',
+      progress: 100,
+      reservation: undefined,
+      error: undefined,
+      failure: undefined,
+      retryStage: undefined,
+    });
+    if (signal?.aborted) return;
+    onFinalized?.({ itemId: id, mediaId });
+  };
 
-  current = current.map((item) => candidateIds.has(item.id)
-    ? { ...item, state: 'reserving', progress: 0, error: undefined, retryStage: undefined }
-    : item);
-  emit();
-
-  let reservations: readonly ReservationResult[] = [];
-  let reservationRequestFailed = false;
-  if (candidates.length > 0 && !signal?.aborted) {
-    try {
-      reservations = await transport.reserve(candidates, signal);
-    } catch (error) {
-      reservationRequestFailed = true;
-      const message = signal?.aborted ? CANCELLED_MESSAGE : errorMessage(error);
-      current = current.map((item) => candidateIds.has(item.id)
-        ? { ...item, state: 'failed', error: message }
-        : item);
-      emit();
-    }
-  }
-
-  const resultsById = new Map(reservations.map((result) => [result.id, result]));
   const ready: Array<{ id: string; stage: 'upload' | 'finalize' }> = finalizationRetries
     .map(({ id }) => ({ id, stage: 'finalize' }));
-  for (const candidate of candidates) {
-    if (reservationRequestFailed || signal?.aborted) continue;
-    const result = resultsById.get(candidate.id);
-    if (result?.status === 'delivered') {
-      current = current.map((item) => item.id === candidate.id
-        ? { ...item, state: 'delivered', progress: 100, reservation: undefined, error: undefined }
+
+  for (let offset = 0; offset < candidates.length; offset += UPLOAD_BATCH_SIZE) {
+    if (signal?.aborted) break;
+    const chunk = candidates.slice(offset, offset + UPLOAD_BATCH_SIZE);
+    const chunkIds = new Set(chunk.map(({ id }) => id));
+    current = current.map((item) => chunkIds.has(item.id)
+      ? {
+          ...item,
+          state: 'reserving',
+          progress: 0,
+          error: undefined,
+          failure: undefined,
+          retryStage: undefined,
+        }
+      : item);
+    emit();
+    if (signal?.aborted) break;
+
+    const dispatched = chunk.map(({ id }) => current.find((item) => item.id === id)!)
+      .filter(Boolean);
+    let reservations: readonly ReservationResult[];
+    try {
+      reservations = await transport.reserve(dispatched, signal);
+    } catch (error) {
+      if (signal?.aborted) break;
+      current = current.map((item) => chunkIds.has(item.id)
+        ? {
+            ...item,
+            state: 'failed',
+            error: errorMessage(error),
+            failure: failureFrom(error, 'reserve'),
+            retryStage: undefined,
+          }
         : item);
-    } else if (result?.status === 'accepted') {
-      current = current.map((item) => item.id === candidate.id
-        ? { ...item, state: 'queued', reservation: result.reservation, error: undefined }
-        : item);
-      ready.push({ id: candidate.id, stage: 'upload' });
-    } else {
-      current = current.map((item) => item.id === candidate.id
-        ? { ...item, state: 'failed', error: result?.error ?? 'This photo could not be reserved.' }
-        : item);
+      emit();
+      break;
+    }
+    if (signal?.aborted) break;
+
+    const resultsById = new Map(reservations.map((result) => [result.id, result]));
+    for (const candidate of chunk) {
+      if (signal?.aborted) break;
+      const result = resultsById.get(candidate.id);
+      if (result?.status === 'delivered') {
+        markDelivered(candidate.id, result.mediaId);
+      } else if (result?.status === 'accepted') {
+        update(candidate.id, {
+          state: 'queued',
+          reservation: result.reservation,
+          error: undefined,
+          failure: undefined,
+          retryStage: undefined,
+        });
+        if (!signal?.aborted) ready.push({ id: candidate.id, stage: 'upload' });
+      } else if (result?.status === 'canceled') {
+        current = current.filter((item) => item.id !== candidate.id);
+        emit();
+      } else {
+        update(candidate.id, {
+          state: 'failed',
+          reservation: undefined,
+          error: result?.error ?? 'This photo could not be reserved.',
+          failure: result?.failure,
+          retryStage: undefined,
+        });
+      }
     }
   }
-  emit();
 
   let cursor = 0;
   const worker = async () => {
@@ -131,24 +191,38 @@ export async function runUploadQueue(
       let stage = task.stage;
       try {
         if (stage === 'upload') {
+          if (signal?.aborted) return;
           update(task.id, { state: 'uploading', progress: 0 });
+          if (signal?.aborted) return;
           await transport.upload(queued, queued.reservation, (progress) => {
+            if (signal?.aborted) return;
             update(task.id, { progress: Math.max(0, Math.min(100, Math.round(progress))) });
           }, signal);
+          if (signal?.aborted) return;
           stage = 'finalize';
         }
-        update(task.id, { state: 'finalizing', progress: 100, retryStage: 'finalize' });
+        if (signal?.aborted) return;
+        update(task.id, {
+          state: 'finalizing',
+          progress: 100,
+          failure: undefined,
+          retryStage: 'finalize',
+        });
+        if (signal?.aborted) return;
         await transport.finalize(queued, queued.reservation, signal);
-        update(task.id, { state: 'delivered', progress: 100, error: undefined, retryStage: undefined });
+        if (signal?.aborted) return;
+        markDelivered(task.id, queued.reservation.mediaId);
       } catch (error) {
-        if (signal?.aborted) {
-          update(task.id, { state: 'failed', error: CANCELLED_MESSAGE, retryStage: undefined });
-          continue;
-        }
+        if (signal?.aborted) return;
         const retryStage = stage === 'finalize' && !transport.retryUploadAfterFinalizeError?.(error)
           ? 'finalize'
           : undefined;
-        update(task.id, { state: 'failed', error: errorMessage(error), retryStage });
+        update(task.id, {
+          state: 'failed',
+          error: errorMessage(error),
+          failure: failureFrom(error, stage),
+          retryStage,
+        });
       }
     }
   };
@@ -158,7 +232,13 @@ export async function runUploadQueue(
 
   if (signal?.aborted) {
     current = current.map((item) => activeIds.has(item.id) && IN_FLIGHT_STATES.has(item.state)
-      ? { ...item, state: 'failed', error: CANCELLED_MESSAGE, retryStage: undefined }
+      ? {
+          ...item,
+          state: 'failed',
+          error: CANCELLED_MESSAGE,
+          failure: undefined,
+          retryStage: undefined,
+        }
       : item);
     emit();
   }

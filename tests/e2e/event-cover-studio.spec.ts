@@ -584,6 +584,7 @@ async function openGuestProfile(
         phase: 'rsvp-primary',
         rsvpState: 'open',
         rsvpAccess: 'editable',
+        guestReadSurfaces: { available: false, reason: 'before-photo-open' },
         rsvpDeadlineAt: '2026-09-05T23:59:59.999Z',
         rsvpDeadlineDate: '2026-09-05',
       }

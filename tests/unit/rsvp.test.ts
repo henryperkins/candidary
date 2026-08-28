@@ -133,12 +133,19 @@ function msBetween(from: string, to: string): number {
   return Date.parse(to) - Date.parse(from);
 }
 
-function phaseAt(override: Partial<GuestLifecycleInput>, now: string): GuestPhaseView {
-  return resolveGuestEventPhase({ ...scheduled, ...override }, new Date(now));
+type PrimaryGuestPhaseView = Omit<GuestPhaseView, 'guestReadSurfaces'>;
+
+function phaseAt(override: Partial<GuestLifecycleInput>, now: string): PrimaryGuestPhaseView {
+  const { guestReadSurfaces, ...phase } = resolveGuestEventPhase(
+    { ...scheduled, ...override },
+    new Date(now),
+  );
+  void guestReadSurfaces;
+  return phase;
 }
 
 describe('guest event phase', () => {
-  it.each<[string, Partial<GuestLifecycleInput>, string, GuestPhaseView]>([
+  it.each<[string, Partial<GuestLifecycleInput>, string, PrimaryGuestPhaseView]>([
     [
       'an open RSVP before the start is the whole page',
       {}, BEFORE_DEADLINE,
@@ -386,11 +393,13 @@ describe('migration-sentinel events', () => {
     expect(resolveGuestEventPhase({ ...legacy, uploadsEnabled: false }, new Date(AFTER_START)))
       .toEqual({
         phase: 'waiting', rsvpState: 'closed', rsvpAccess: 'read-only',
+        guestReadSurfaces: { available: true, reason: null },
         lifecycleRecheckAfterMs: null,
       });
     expect(resolveGuestEventPhase({ ...legacy, uploadsEnabled: false }, new Date(BEFORE_DEADLINE)))
       .toEqual({
         phase: 'rsvp-primary', rsvpState: 'open', rsvpAccess: 'editable',
+        guestReadSurfaces: { available: false, reason: 'before-photo-open' },
         lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
       });
   });
@@ -403,6 +412,7 @@ describe('migration-sentinel events', () => {
       rsvpConfigured: false,
     }, new Date(BEFORE_DEADLINE))).toEqual({
       phase: 'waiting', rsvpState: 'paused', rsvpAccess: 'read-only',
+      guestReadSurfaces: { available: true, reason: null },
       lifecycleRecheckAfterMs: msBetween(BEFORE_DEADLINE, RSVP_CLOSES_AT),
     });
   });

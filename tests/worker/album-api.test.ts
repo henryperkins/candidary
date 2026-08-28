@@ -8,8 +8,11 @@ import {
   ALBUM_TITLE_MAX_LENGTH,
 } from '../../shared/constants';
 import type { AlbumEntryView, AlbumView, PublicAlbumView } from '../../shared/contracts';
+import { AlbumRepository } from '../../worker/db/album';
 import {
   eventAccess,
+  hostAccess,
+  hostWriteHeaders,
   origin,
   resetDatabase,
   testEnv,
@@ -22,6 +25,8 @@ beforeEach(resetDatabase);
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
 const NOW = '2026-08-23T00:00:00.000Z';
+const RECONCILIATION_RESTORE_UNTIL = '2026-09-01T00:00:00.000Z';
+const RECONCILIATION_EXPIRED_RESTORE_UNTIL = '2026-08-24T00:00:00.000Z';
 
 function mediaId(index: number) {
   return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
@@ -113,6 +118,87 @@ async function seedLegacyFavorites(access: Access, count: number) {
   `).bind(first, last, access.event.id, session.id, NOW).run();
 }
 
+interface ReconciliationPickSegment {
+  count: number;
+  version: 1 | null;
+  retention?: 'recoverable' | 'expired-cleanup-pending';
+}
+
+/**
+ * Builds provenance fixtures without giving timestamp ordering any information:
+ * every created, stored, captured, timeline, and favorite instant is identical.
+ */
+async function seedReconciliationFixture(
+  access: Access,
+  options: {
+    pickGeneration: number;
+    segments?: ReconciliationPickSegment[];
+    saved?: boolean;
+  },
+) {
+  const session = await env.DB
+    .prepare("SELECT id FROM event_sessions WHERE event_id = ? AND role = 'guest' LIMIT 1")
+    .bind(access.event.id)
+    .first<{ id: string }>();
+  if (!session) throw new Error('Expected a guest session for the reconciliation fixture.');
+
+  let firstIndex = 20_000;
+  for (const segment of options.segments ?? []) {
+    if (segment.count === 0) continue;
+    const trashedAt = segment.retention ? NOW : null;
+    const restoreUntil = segment.retention === 'expired-cleanup-pending'
+      ? RECONCILIATION_EXPIRED_RESTORE_UNTIL
+      : segment.retention === 'recoverable'
+        ? RECONCILIATION_RESTORE_UNTIL
+        : null;
+    await env.DB.prepare(`
+      WITH RECURSIVE seq(i) AS (
+        SELECT 0
+        UNION ALL
+        SELECT i + 1 FROM seq WHERE i + 1 < ?1
+      )
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, object_bucket_generation,
+        original_filename, mime_type, declared_byte_size, byte_size, width, height,
+        guest_name, caption, upload_state, publication_status, idempotency_key,
+        reservation_expires_at, created_at, stored_at, captured_at, timeline_at,
+        favorited_at, deleted_at, trashed_at, restore_until, album_pick_version
+      )
+      SELECT
+        printf('00000000-0000-4000-8000-%012d', ?2 + i), ?3, ?4,
+        'events/' || ?3 || '/media/final/'
+          || printf('00000000-0000-4000-8000-%012d', ?2 + i),
+        'canonical', 'reconciliation-' || (?2 + i) || '.jpg', 'image/jpeg',
+        1024, 1024, 800, 600, 'Avery Stone', NULL, 'stored', 'unpublished',
+        'reconciliation-' || (?2 + i), ?5, ?5, ?5, ?5, ?5, ?5, ?6, ?6, ?7, ?8
+      FROM seq
+    `).bind(
+      segment.count,
+      firstIndex,
+      access.event.id,
+      session.id,
+      NOW,
+      trashedAt,
+      restoreUntil,
+      segment.version,
+    ).run();
+    firstIndex += segment.count;
+  }
+
+  await env.DB.prepare('UPDATE events SET album_pick_generation = ? WHERE id = ?')
+    .bind(options.pickGeneration, access.event.id)
+    .run();
+
+  if (options.saved) {
+    await env.DB.prepare(`
+      INSERT INTO event_albums (
+        event_id, entries, saved_at, revision, title, description,
+        cover_media_id, created_at, updated_at
+      ) VALUES (?, '[]', ?, 0, 'Album', '', NULL, ?, ?)
+    `).bind(access.event.id, NOW, NOW, NOW).run();
+  }
+}
+
 function getAlbum(access: Access) {
   return createApp().request(`/api/manage/events/${access.event.id}/album`, {
     headers: { cookie: access.manager.cookie },
@@ -130,11 +216,82 @@ function write(access: Access, suffix: string, body: unknown, method = 'POST') {
 async function albumOf(access: Access): Promise<AlbumView> {
   const response = await getAlbum(access);
   expect(response.status).toBe(200);
-  const body = await response.json() as { data: { album: AlbumView } };
+  const raw = await response.text();
+  expect(raw).not.toContain('album_pick_version');
+  expect(raw).not.toContain('albumPickVersion');
+  const body = JSON.parse(raw) as { data: { album: AlbumView } };
   return body.data.album;
 }
 
+type AlbumStartChoice = 'from-picks' | 'empty';
+type ExpectedReconciliation = NonNullable<AlbumView['reconciliation']>['kind'];
+
+function expectedStartBody(
+  choice: AlbumStartChoice,
+  album: AlbumView,
+  expectedReconciliation: ExpectedReconciliation,
+) {
+  return {
+    start: choice,
+    expectedReconciliation,
+    expectedPickGeneration: album.pickGeneration,
+    expectedRevision: album.revision,
+  } as const;
+}
+
+function writeAsHost(
+  access: Access,
+  host: { cookie: string; csrf: string },
+  body: unknown,
+) {
+  return createApp().request(`/api/manage/events/${access.event.id}/album/start`, {
+    method: 'POST',
+    headers: hostWriteHeaders(host),
+    body: JSON.stringify(body),
+  }, testEnv);
+}
+
+/** The four durable facts a refused Start must leave byte-for-byte unchanged. */
+async function albumStartMutationState(access: Access) {
+  const album = await env.DB.prepare(`
+    SELECT entries, saved_at, revision
+    FROM event_albums
+    WHERE event_id = ?
+  `).bind(access.event.id).first<{
+    entries: string;
+    saved_at: string | null;
+    revision: number;
+  }>();
+  const favorites = await env.DB.prepare(`
+    SELECT id, favorited_at, album_pick_version, deleted_at, trashed_at
+    FROM media
+    WHERE event_id = ? AND favorited_at IS NOT NULL
+    ORDER BY id ASC
+  `).bind(access.event.id).all<{
+    id: string;
+    favorited_at: string;
+    album_pick_version: number | null;
+    deleted_at: string | null;
+    trashed_at: string | null;
+  }>();
+  return { album: album ?? null, favorites: favorites.results };
+}
+
 describe('album read', () => {
+  it('uses the event name as a new Album title and preserves a customized title', async () => {
+    const access = await eventAccess('Maya & Theo');
+
+    expect((await albumOf(access)).title).toBe('Maya & Theo');
+
+    const saved = await write(access, '', {
+      revision: 0,
+      entries: [],
+      metadata: { title: 'The evening', description: '', coverMediaId: null },
+    }, 'PUT');
+    expect(saved.status).toBe(200);
+    expect((await albumOf(access)).title).toBe('The evening');
+  });
+
   it('is empty and unsaved before anything is picked', async () => {
     const access = await eventAccess();
     const album = await albumOf(access);
@@ -143,7 +300,9 @@ describe('album read', () => {
     expect(album).toEqual({
       revision: 0,
       saved: false,
-      title: 'Album',
+      pickGeneration: 0,
+      reconciliation: null,
+      title: 'Maya & Theo',
       description: '',
       coverMediaId: null,
       effectiveCoverMediaId: null,
@@ -186,6 +345,191 @@ describe('album read', () => {
     expect(album.photoCount).toBe(1);
     expect(album.entries).toHaveLength(1);
     expect(album.entries[0]).toMatchObject({ kind: 'photo' });
+  });
+});
+
+describe('album reconciliation', () => {
+  const cases: Array<{
+    name: string;
+    pickGeneration: number;
+    segments?: ReconciliationPickSegment[];
+    saved?: boolean;
+    reconciliation:
+      | { kind: 'initialize' }
+      | { kind: 'historical'; historicalPickCount: number }
+      | { kind: 'over-capacity'; pickCount: number; historicalPickCount: number }
+      | null;
+    retainedCount?: number;
+    retainedState?: 'recoverable' | 'expired-cleanup-pending';
+  }> = [
+    {
+      name: 'a saved album',
+      pickGeneration: 31,
+      segments: [{ count: 1, version: 1 }],
+      saved: true,
+      reconciliation: null,
+    },
+    {
+      name: 'an unsaved album with zero picks',
+      pickGeneration: 32,
+      reconciliation: null,
+    },
+    {
+      name: 'one unversioned pick',
+      pickGeneration: 33,
+      segments: [{ count: 1, version: null }],
+      reconciliation: { kind: 'historical', historicalPickCount: 1 },
+    },
+    {
+      name: 'an under-cap cohort containing only version 1 picks',
+      pickGeneration: 34,
+      segments: [{ count: 2, version: 1 }],
+      reconciliation: { kind: 'initialize' },
+    },
+    {
+      name: 'an under-cap mixed cohort',
+      pickGeneration: 35,
+      segments: [{ count: 1, version: 1 }, { count: 1, version: null }],
+      reconciliation: { kind: 'historical', historicalPickCount: 1 },
+    },
+    {
+      name: 'exactly 500 version 1 picks',
+      pickGeneration: 36,
+      segments: [{ count: ALBUM_MAX_ENTRIES, version: 1 }],
+      reconciliation: { kind: 'initialize' },
+    },
+    {
+      name: '501 version 1 picks',
+      pickGeneration: 37,
+      segments: [{ count: ALBUM_MAX_ENTRIES + 1, version: 1 }],
+      reconciliation: {
+        kind: 'over-capacity',
+        pickCount: ALBUM_MAX_ENTRIES + 1,
+        historicalPickCount: 0,
+      },
+    },
+    {
+      name: '501 mixed picks',
+      pickGeneration: 38,
+      segments: [
+        { count: ALBUM_MAX_ENTRIES, version: 1 },
+        { count: 1, version: null },
+      ],
+      reconciliation: {
+        kind: 'over-capacity',
+        pickCount: ALBUM_MAX_ENTRIES + 1,
+        historicalPickCount: 1,
+      },
+    },
+    {
+      name: 'a cohort that reaches 500 only with a retained historical pick',
+      pickGeneration: 39,
+      segments: [
+        { count: ALBUM_MAX_ENTRIES - 1, version: 1 },
+        { count: 1, version: null, retention: 'recoverable' },
+      ],
+      reconciliation: { kind: 'historical', historicalPickCount: 1 },
+      retainedCount: 1,
+      retainedState: 'recoverable',
+    },
+    {
+      name: 'an expired cleanup-pending retained version 1 pick',
+      pickGeneration: 40,
+      segments: [{ count: 1, version: 1, retention: 'expired-cleanup-pending' }],
+      reconciliation: { kind: 'initialize' },
+      retainedCount: 1,
+      retainedState: 'expired-cleanup-pending',
+    },
+  ];
+
+  it.each(cases)('projects reconciliation for $name', async (fixture) => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, fixture);
+
+    const album = await albumOf(access);
+
+    expect(album).toMatchObject({
+      pickGeneration: fixture.pickGeneration,
+      reconciliation: fixture.reconciliation,
+    });
+    if (fixture.retainedCount !== undefined) {
+      expect(album.retainedCount).toBe(fixture.retainedCount);
+      expect(album.entries).toContainEqual({
+        kind: 'photo-retained',
+        slot: expect.objectContaining({ state: fixture.retainedState }),
+      });
+    }
+  });
+
+  it('keeps one coherent reconciliation observation across a concurrent unpick', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 0,
+      segments: [{ count: 1, version: 1 }],
+    });
+
+    let finishMutation!: () => void;
+    const mutationFinished = new Promise<void>((resolve) => { finishMutation = resolve; });
+    let interleaved = false;
+    const mutateAfterSnapshot = async () => {
+      if (interleaved) return;
+      interleaved = true;
+      await env.DB.prepare(`
+        UPDATE media
+        SET favorited_at = NULL, album_pick_version = NULL
+        WHERE id = ? AND event_id = ?
+      `).bind(mediaId(20_000), access.event.id).run();
+      finishMutation();
+    };
+    const interleavingDb = new Proxy(env.DB, {
+      get(target, property) {
+        if (property !== 'prepare') {
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          const observesGeneration = sql.includes('album_pick_generation');
+          const observesPicks = sql.includes('historical_pick_count');
+          const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+            get(statementTarget, statementProperty) {
+              if (statementProperty === 'bind') {
+                return (...values: unknown[]) => wrap(statementTarget.bind(...values));
+              }
+              if (statementProperty === 'all' && observesPicks) {
+                return async (...args: unknown[]) => {
+                  const result = await Reflect.apply(statementTarget.all, statementTarget, args);
+                  await mutateAfterSnapshot();
+                  return result;
+                };
+              }
+              if (statementProperty === 'first' && observesGeneration && !observesPicks) {
+                return async (...args: unknown[]) => {
+                  await mutationFinished;
+                  return Reflect.apply(statementTarget.first, statementTarget, args);
+                };
+              }
+              const value = Reflect.get(statementTarget, statementProperty, statementTarget) as unknown;
+              return typeof value === 'function' ? value.bind(statementTarget) : value;
+            },
+          });
+          return wrap(target.prepare(sql));
+        };
+      },
+    });
+
+    const album = await new AlbumRepository(interleavingDb).get(access.event.id, NOW);
+
+    expect(interleaved).toBe(true);
+    expect(album).toMatchObject({
+      pickGeneration: 0,
+      reconciliation: { kind: 'initialize' },
+      photoCount: 1,
+    });
+    expect(await env.DB.prepare(`
+      SELECT album_pick_generation FROM events WHERE id = ?
+    `).bind(access.event.id).first<number>('album_pick_generation')).toBe(1);
+    expect(await env.DB.prepare('SELECT favorited_at FROM media WHERE id = ?')
+      .bind(mediaId(20_000)).first<string>('favorited_at')).toBeNull();
   });
 });
 
@@ -826,6 +1170,365 @@ describe('album start', () => {
   });
 });
 
+describe('album start expectedPickGeneration expectation triple', () => {
+  it('requires all three new-client expectations rather than widening the legacy shape', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 10,
+      segments: [{ count: 1, version: 1 }],
+    });
+    const album = await albumOf(access);
+    const complete = expectedStartBody('from-picks', album, 'initialize');
+
+    for (const omitted of [
+      'expectedReconciliation',
+      'expectedPickGeneration',
+      'expectedRevision',
+    ] as const) {
+      const partial: Record<string, unknown> = { ...complete };
+      delete partial[omitted];
+      expect((await write(access, '/start', partial)).status).toBe(422);
+    }
+    expect(await albumStartMutationState(access)).toEqual({
+      album: null,
+      favorites: [expect.objectContaining({ id: mediaId(20_000) })],
+    });
+  });
+
+  it.each(['from-picks', 'empty'] as const)(
+    'a matching %s Start advances revision once, blocks the pre-Start PUT, then an ordinary save advances it once more',
+    async (choice) => {
+      const access = await eventAccess();
+      await seedReconciliationFixture(access, {
+        pickGeneration: 11,
+        segments: [{ count: 1, version: 1 }],
+      });
+      const before = await albumOf(access);
+
+      const response = await write(
+        access,
+        '/start',
+        expectedStartBody(choice, before, 'initialize'),
+      );
+
+      expect(response.status).toBe(200);
+      const result = (await response.json() as {
+        data: { started: boolean; cleared: string[]; album: AlbumView };
+      }).data;
+      expect(result.started).toBe(true);
+      expect(result.album).toMatchObject({ saved: true, revision: before.revision + 1 });
+      expect(result.album.revision).toBeGreaterThan(before.revision);
+      expect(result.cleared).toHaveLength(choice === 'empty' ? 1 : 0);
+
+      const preStartEntries = result.album.entries;
+      const staleSave = await write(access, '', {
+        revision: before.revision,
+        entries: [{ kind: 'section', id: 'stale-section', heading: 'Stale section' }],
+      }, 'PUT');
+      expect(staleSave.status).toBe(409);
+      expect(await staleSave.json() as { code: string }).toMatchObject({
+        code: 'REVISION_CONFLICT',
+      });
+      expect(await albumOf(access)).toMatchObject({
+        revision: before.revision + 1,
+        entries: preStartEntries,
+      });
+
+      const ordinarySave = await write(access, '', {
+        revision: before.revision + 1,
+        entries: [],
+        metadata: { title: 'After Start', description: '', coverMediaId: null },
+      }, 'PUT');
+      expect(ordinarySave.status).toBe(200);
+      expect(await albumOf(access)).toMatchObject({
+        revision: before.revision + 2,
+        title: 'After Start',
+      });
+    },
+  );
+
+  it.each([
+    { mismatch: 'category', choice: 'from-picks' },
+    { mismatch: 'category', choice: 'empty' },
+    { mismatch: 'generation', choice: 'from-picks' },
+    { mismatch: 'generation', choice: 'empty' },
+    { mismatch: 'revision', choice: 'from-picks' },
+    { mismatch: 'revision', choice: 'empty' },
+  ] as const)(
+    'a stale $mismatch on $choice returns the canonical conflict without changing favorites, entries, saved state, or revision',
+    async ({ mismatch, choice }) => {
+      const access = await eventAccess();
+      await seedReconciliationFixture(access, {
+        pickGeneration: 20,
+        segments: [{ count: 1, version: mismatch === 'category' ? null : 1 }],
+      });
+      const observed = await albumOf(access);
+      const body = expectedStartBody(choice, observed, 'initialize');
+
+      if (mismatch === 'generation') {
+        await env.DB.prepare(`
+          UPDATE events
+          SET album_pick_generation = album_pick_generation + 1
+          WHERE id = ?
+        `).bind(access.event.id).run();
+      } else if (mismatch === 'revision') {
+        const concurrentSave = await write(access, '', {
+          revision: observed.revision,
+          entries: [{ kind: 'photo', mediaId: mediaId(20_000) }],
+          metadata: { title: 'Cohost save', description: '', coverMediaId: null },
+        }, 'PUT');
+        expect(concurrentSave.status).toBe(200);
+      }
+
+      const beforeRequest = await albumStartMutationState(access);
+      const response = await write(access, '/start', body);
+
+      expect(response.status).toBe(409);
+      expect(await response.json() as { code: string }).toMatchObject({
+        code: 'REVISION_CONFLICT',
+      });
+      expect(await albumStartMutationState(access)).toEqual(beforeRequest);
+    },
+  );
+
+  it('conflicts on a same-count substitution even though the category and count are unchanged', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 30,
+      segments: [{ count: 2, version: 1 }],
+    });
+    // Arrange the second identically-timestamped row as the unpicked replacement.
+    await env.DB.prepare(`
+      UPDATE media
+      SET favorited_at = NULL, album_pick_version = NULL
+      WHERE id = ? AND event_id = ?
+    `).bind(mediaId(20_001), access.event.id).run();
+    await env.DB.prepare('UPDATE events SET album_pick_generation = 30 WHERE id = ?')
+      .bind(access.event.id)
+      .run();
+    const observed = await albumOf(access);
+    expect(observed).toMatchObject({
+      pickGeneration: 30,
+      reconciliation: { kind: 'initialize' },
+      photoCount: 1,
+    });
+
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE media
+        SET favorited_at = NULL, album_pick_version = NULL
+        WHERE id = ? AND event_id = ?
+      `).bind(mediaId(20_000), access.event.id),
+      env.DB.prepare(`
+        UPDATE media
+        SET favorited_at = ?, album_pick_version = 1
+        WHERE id = ? AND event_id = ?
+      `).bind(NOW, mediaId(20_001), access.event.id),
+    ]);
+    expect(await albumOf(access)).toMatchObject({
+      pickGeneration: 32,
+      reconciliation: { kind: 'initialize' },
+      photoCount: 1,
+    });
+    const beforeRequest = await albumStartMutationState(access);
+
+    const response = await write(
+      access,
+      '/start',
+      expectedStartBody('from-picks', observed, 'initialize'),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json() as { code: string }).toMatchObject({
+      code: 'REVISION_CONFLICT',
+    });
+    expect(await albumStartMutationState(access)).toEqual(beforeRequest);
+  });
+
+  it('conflicts when an identically-timestamped retained historical pick is restored after the read', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 40,
+      segments: [{ count: 1, version: null, retention: 'recoverable' }],
+    });
+    const observed = await albumOf(access);
+    expect(observed).toMatchObject({
+      pickGeneration: 40,
+      reconciliation: { kind: 'historical', historicalPickCount: 1 },
+      retainedCount: 1,
+    });
+    await env.DB.prepare(`
+      UPDATE media
+      SET deleted_at = NULL, trashed_at = NULL, restore_until = NULL
+      WHERE id = ? AND event_id = ?
+    `).bind(mediaId(20_000), access.event.id).run();
+    const beforeRequest = await albumStartMutationState(access);
+
+    const response = await write(
+      access,
+      '/start',
+      expectedStartBody('from-picks', observed, 'historical'),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json() as { code: string }).toMatchObject({
+      code: 'REVISION_CONFLICT',
+    });
+    expect(await albumStartMutationState(access)).toEqual(beforeRequest);
+  });
+
+  it('allows exactly one concurrent first-save winner across opposite choices', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 50,
+      segments: [{ count: 1, version: 1 }],
+    });
+    const observed = await albumOf(access);
+
+    const responses = await Promise.all([
+      write(access, '/start', expectedStartBody('from-picks', observed, 'initialize')),
+      write(access, '/start', expectedStartBody('empty', observed, 'initialize')),
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const loser = responses.find((response) => response.status === 409);
+    expect(loser).toBeDefined();
+    expect(await loser!.json() as { code: string }).toMatchObject({ code: 'REVISION_CONFLICT' });
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS saved_count, MAX(revision) AS revision
+      FROM event_albums
+      WHERE event_id = ? AND saved_at IS NOT NULL
+    `).bind(access.event.id).first()).toEqual({ saved_count: 1, revision: 1 });
+  });
+
+  it('allows exactly one winner when two account cohosts Start from the same Album view', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 60,
+      segments: [{ count: 1, version: 1 }],
+    });
+    const owner = await hostAccess([access]);
+    const cohost = await hostAccess();
+    await env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES (?, ?, 'cohost', ?)
+    `).bind(access.event.id, cohost.account.id, NOW).run();
+    const observed = await albumOf(access);
+    const body = expectedStartBody('from-picks', observed, 'initialize');
+
+    const responses = await Promise.all([
+      writeAsHost(access, owner, body),
+      writeAsHost(access, cohost, body),
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const loser = responses.find((response) => response.status === 409);
+    expect(loser).toBeDefined();
+    expect(await loser!.json() as { code: string }).toMatchObject({ code: 'REVISION_CONFLICT' });
+    expect(await albumOf(access)).toMatchObject({ saved: true, revision: 1, photoCount: 1 });
+  });
+
+  it('refuses Start from picks at 501 while preserving the complete cohort', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 70,
+      segments: [{ count: ALBUM_MAX_ENTRIES + 1, version: 1 }],
+    });
+    const observed = await albumOf(access);
+    const beforeRequest = await albumStartMutationState(access);
+
+    const response = await write(
+      access,
+      '/start',
+      expectedStartBody('from-picks', observed, 'over-capacity'),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json() as { code: string }).toMatchObject({ code: 'ALBUM_FULL' });
+    expect(await albumStartMutationState(access)).toEqual(beforeRequest);
+  });
+
+  it('lets Start empty at 501 clear every active and retained favorite', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 80,
+      segments: [
+        { count: ALBUM_MAX_ENTRIES, version: 1 },
+        { count: 1, version: null, retention: 'recoverable' },
+      ],
+    });
+    const observed = await albumOf(access);
+
+    const response = await write(
+      access,
+      '/start',
+      expectedStartBody('empty', observed, 'over-capacity'),
+    );
+
+    expect(response.status).toBe(200);
+    const result = (await response.json() as {
+      data: { started: boolean; cleared: string[]; album: AlbumView };
+    }).data;
+    expect(result).toMatchObject({
+      started: true,
+      album: { saved: true, revision: 1, entries: [], retainedCount: 0 },
+    });
+    expect(result.cleared).toHaveLength(ALBUM_MAX_ENTRIES + 1);
+    expect(result.cleared).toContain(mediaId(20_500));
+    expect((await albumStartMutationState(access)).favorites).toEqual([]);
+  });
+
+  it('materializes active and retained picks together in deterministic timeline order', async () => {
+    const access = await eventAccess();
+    await seedReconciliationFixture(access, {
+      pickGeneration: 90,
+      segments: [
+        { count: 1, version: 1 },
+        { count: 1, version: 1, retention: 'recoverable' },
+      ],
+    });
+    const observed = await albumOf(access);
+
+    const response = await write(
+      access,
+      '/start',
+      expectedStartBody('from-picks', observed, 'initialize'),
+    );
+
+    expect(response.status).toBe(200);
+    const album = (await response.json() as { data: { album: AlbumView } }).data.album;
+    expect(album.entries.map(entryId)).toEqual([mediaId(20_000), mediaId(20_001)]);
+    expect(album.entries[1]).toMatchObject({
+      kind: 'photo-retained',
+      slot: { mediaId: mediaId(20_001) },
+    });
+  });
+
+  it.each(['from-picks', 'empty'] as const)(
+    'keeps the one-release legacy %s body explicitly unguarded and revision-stable for removal',
+    async (choice) => {
+      const access = await eventAccess();
+      await seedLegacyFavorites(access, 1);
+      const before = await albumOf(access);
+
+      const response = await write(access, '/start', { start: choice });
+
+      expect(response.status).toBe(200);
+      const result = (await response.json() as {
+        data: { started: boolean; album: AlbumView };
+      }).data;
+      expect(result.started).toBe(true);
+      expect(result.album).toMatchObject({ saved: true, revision: before.revision });
+
+      const unguardedRetry = await write(access, '/start', { start: choice });
+      expect(unguardedRetry.status).toBe(200);
+      expect((await unguardedRetry.json() as {
+        data: { started: boolean; album: AlbumView };
+      }).data).toMatchObject({ started: false, album: { revision: before.revision } });
+    },
+  );
+});
+
 // Recently deleted, read from the album. A trashed pick keeps its place as an
 // opaque marker: closing the arrangement up around a photograph that is still
 // recoverable would quietly rewrite the album, and Restore would have nowhere
@@ -892,6 +1595,69 @@ describe('album retained slots', () => {
     );
   }
 
+  it.each([
+    {
+      edge: 'one below the cap',
+      used: ALBUM_MAX_ENTRIES - 1,
+      expectedStatus: 200,
+    },
+    {
+      edge: 'at the exact cap',
+      used: ALBUM_MAX_ENTRIES,
+      expectedStatus: 409,
+    },
+    {
+      edge: 'one above the cap',
+      used: ALBUM_MAX_ENTRIES + 1,
+      expectedStatus: 409,
+    },
+  ] as const)(
+    'enforces album capacity $edge with sections and a retained slot while timely restore stays unconditional',
+    async ({ used, expectedStatus }) => {
+      const access = await eventAccess();
+      const sectionCount = 2;
+      const retainedCount = 1;
+      await seedReconciliationFixture(access, {
+        pickGeneration: 0,
+        segments: [{ count: used - sectionCount - retainedCount, version: 1 }],
+      });
+      const retained = await pickedUpload(access, 20);
+      const sections = Array.from({ length: sectionCount }, (_, index) => ({
+        kind: 'section' as const,
+        id: `capacity-section-${index}`,
+        heading: `Capacity section ${index + 1}`,
+      }));
+      await env.DB.prepare(`
+        INSERT INTO event_albums (
+          event_id, entries, saved_at, revision, created_at, updated_at
+        ) VALUES (?, ?, ?, 0, ?, ?)
+      `).bind(access.event.id, JSON.stringify(sections), NOW, NOW, NOW).run();
+      await trashMedia(access, retained);
+      const candidate = await uploadPending(access, `capacity-candidate-${used}`, null);
+
+      const picked = await write(access, '/picks', { mediaIds: [candidate.id], picked: true });
+
+      expect(picked.status).toBe(expectedStatus);
+      if (expectedStatus === 409) {
+        expect((await picked.json() as { code: string }).code).toBe('ALBUM_FULL');
+      }
+      const album = await albumOf(access);
+      expect(album).toMatchObject({ retainedCount: 1, sectionCount });
+      expect(album.entries).toHaveLength(used + (expectedStatus === 200 ? 1 : 0));
+
+      if (used === ALBUM_MAX_ENTRIES) {
+        expect((await restore(access, retained)).status).toBe(200);
+        const restored = await albumOf(access);
+        expect(restored).toMatchObject({
+          photoCount: ALBUM_MAX_ENTRIES - sectionCount,
+          retainedCount: 0,
+          sectionCount,
+        });
+        expect(restored.entries).toHaveLength(ALBUM_MAX_ENTRIES);
+      }
+    },
+  );
+
   /**
    * A save that omits a retained slot is refused rather than accepted.
    *
@@ -929,26 +1695,38 @@ describe('album retained slots', () => {
     expect(after.entries.map(entryId)).toEqual([retained, kept]);
   });
 
-  it('accepts a save that keeps the retained slot while reordering around it', async () => {
+  it('accepts an ordinary save that removes sections without moving or clearing a retained slot', async () => {
     const access = await eventAccess();
-    const kept = await pickedUpload(access, 10, 'Kept caption');
+    const first = await pickedUpload(access, 10, 'First caption');
     const retained = await pickedUpload(access, 11, 'Trashed caption');
+    const last = await pickedUpload(access, 12, 'Last caption');
     expect((await write(access, '', {
       revision: 0,
-      entries: [{ kind: 'photo', mediaId: retained }, { kind: 'photo', mediaId: kept }],
-      metadata: { title: 'The evening', description: '', coverMediaId: kept },
+      entries: [
+        { kind: 'photo', mediaId: last },
+        { kind: 'section', id: 'reset-section', heading: 'Reception' },
+        { kind: 'photo', mediaId: retained },
+        { kind: 'photo', mediaId: first },
+      ],
+      metadata: { title: 'The evening', description: '', coverMediaId: last },
     }, 'PUT')).status).toBe(200);
     await trashMedia(access, retained);
     const before = await albumOf(access);
 
-    const reordered = await write(access, '', {
+    const saved = await write(access, '', {
       revision: before.revision,
-      entries: [{ kind: 'photo', mediaId: kept }, { kind: 'photo', mediaId: retained }],
-      metadata: { title: 'The evening', description: '', coverMediaId: kept },
+      entries: [
+        { kind: 'photo', mediaId: first },
+        { kind: 'photo', mediaId: retained },
+        { kind: 'photo', mediaId: last },
+      ],
+      metadata: { title: 'The evening', description: '', coverMediaId: last },
     }, 'PUT');
 
-    expect(reordered.status).toBe(200);
-    expect((await albumOf(access)).entries.map(entryId)).toEqual([kept, retained]);
+    expect(saved.status).toBe(200);
+    const album = await albumOf(access);
+    expect(album).toMatchObject({ photoCount: 2, retainedCount: 1, sectionCount: 0 });
+    expect(album.entries.map(entryId)).toEqual([first, retained, last]);
   });
 
   it('stands an opaque marker in for a trashed pick and shows it to neither public audience', async () => {
@@ -973,15 +1751,22 @@ describe('album retained slots', () => {
       coverRetained: null,
     });
     expect(album.entries.map(entryId)).toEqual([kept, retained]);
-    // Exactly the marker contract — an id, a deadline, a state. No caption,
-    // guest, filename, or preview flag: the point of trashing the photograph
-    // was to stop showing it, and the album editor is no exception.
+    // Exactly the marker contract — identity, recovery, and ordering facts. No
+    // caption, guest, filename, preview flag, or pick provenance crosses this
+    // Manager-only boundary.
     expect(album.entries[1]).toEqual({
       kind: 'photo-retained',
-      slot: { mediaId: retained, restoreUntil: trashed.restoreUntil, state: 'recoverable' },
+      slot: {
+        mediaId: retained,
+        restoreUntil: trashed.restoreUntil,
+        state: 'recoverable',
+        timelineAt: '2026-09-19T11:00:00.000Z',
+      },
     });
     expect(JSON.stringify(album.entries[1]))
-      .not.toMatch(/Trashed caption|Avery Stone|retained-|previewAvailable|publicationStatus/u);
+      .not.toMatch(
+        /Trashed caption|Avery Stone|retained-|previewAvailable|publicationStatus|album_pick_version/u,
+      );
 
     const preview = await publicAlbumOf(await managerPreview(access));
     const recipient = await publicAlbumOf(await recipientAlbum(access));
@@ -1068,7 +1853,7 @@ describe('album retained slots', () => {
     expect(album).toMatchObject({ photoCount: 3, retainedCount: 0, coverRetained: null });
   });
 
-  it('retains a trashed cover, falls the effective cover through, and lets a new choice replace it', async () => {
+  it('converges repeated trash, replacement cover, and restore without duplicating the retained slot', async () => {
     const access = await eventAccess();
     const fallback = await pickedUpload(access, 10);
     const cover = await pickedUpload(access, 11);
@@ -1108,6 +1893,39 @@ describe('album retained slots', () => {
       coverRetained: null,
       photoCount: 1,
       retainedCount: 1,
+    });
+
+    expect((await restore(access, cover)).status).toBe(200);
+    expect(await albumOf(access)).toMatchObject({
+      coverMediaId: fallback,
+      effectiveCoverMediaId: fallback,
+      coverRetained: null,
+      photoCount: 2,
+      retainedCount: 0,
+    });
+
+    await trashMedia(access, cover);
+    const repeatedTrash = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${cover}/trash`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(repeatedTrash.status).toBe(409);
+    expect((await repeatedTrash.json() as { code: string }).code).toBe('MEDIA_STATE_CONFLICT');
+    expect((await restore(access, cover)).status).toBe(200);
+    const repeatedRestore = await restore(access, cover);
+    expect(repeatedRestore.status).toBe(409);
+    expect((await repeatedRestore.json() as { code: string }).code).toBe('MEDIA_STATE_CONFLICT');
+
+    const converged = await albumOf(access);
+    expect(converged.entries.map(entryId)).toEqual([fallback, cover]);
+    expect(new Set(converged.entries.map(entryId)).size).toBe(2);
+    expect(converged).toMatchObject({
+      coverMediaId: fallback,
+      effectiveCoverMediaId: fallback,
+      coverRetained: null,
+      photoCount: 2,
+      retainedCount: 0,
     });
   });
 });

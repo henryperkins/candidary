@@ -3,6 +3,7 @@ import type {
   AlbumEntryInput,
   AlbumEntryView,
   AlbumMetadataInput,
+  AlbumReconciliation,
   AlbumSaveRequest,
   AlbumView,
   ManagerGalleryMediaView,
@@ -81,13 +82,20 @@ export type AlbumInversePayload =
     readonly restored: AlbumInverseState;
   };
 
+export interface AlbumStartRequest {
+  start: 'from-picks' | 'empty';
+  expectedReconciliation: Exclude<AlbumReconciliation, null>['kind'];
+  expectedPickGeneration: number;
+  expectedRevision: number;
+}
+
 export function startAlbum(
   eventId: string,
-  start: 'from-picks' | 'empty',
+  request: AlbumStartRequest,
 ): Promise<{ album: AlbumView; started: boolean; cleared: string[] }> {
   return api<{ album: AlbumView; started: boolean; cleared: string[] }>(albumPath(eventId, '/start'), {
     method: 'POST',
-    body: JSON.stringify({ start }),
+    body: JSON.stringify(request),
   });
 }
 

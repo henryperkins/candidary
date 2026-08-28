@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { UPLOAD_BATCH_SIZE } from '../../shared/constants';
+import { ClientApiError } from '../../src/app/api';
 import {
   createBrowserTransport,
   xhrUpload,
 } from '../../src/features/uploads/browser-upload-transport';
+import { createManagerUploadCleanup } from '../../src/features/uploads/manager-upload-cleanup';
 import type {
   UploadQueueItem,
   UploadReservation,
 } from '../../src/features/uploads/upload-queue';
+import { MANAGER_UPLOAD_RESOURCE_FORBIDDEN_ERROR } from '../fixtures/manager-upload-errors';
 
 type Listener = EventListenerOrEventListenerObject;
 
@@ -15,6 +19,7 @@ class ControlledXMLHttpRequest {
   static instances: ControlledXMLHttpRequest[] = [];
 
   status = 0;
+  responseText = '';
   withCredentials = false;
   readonly upload = { addEventListener: vi.fn() };
   readonly open = vi.fn();
@@ -108,10 +113,10 @@ afterEach(() => {
 });
 
 describe('browser upload transport cancellation', () => {
-  it('sends same-origin ingress with guest credentials and scoped CSRF', async () => {
+  it('sends same-origin ingress with both event and host credential pairs', async () => {
     Object.defineProperty(document, 'cookie', {
       configurable: true,
-      value: 'candidary_csrf=csrf-token',
+      value: 'candidary_csrf=event-token; candidary_host_csrf=host-token',
     });
     const sameOrigin = {
       ...reservation,
@@ -124,8 +129,64 @@ describe('browser upload transport cancellation', () => {
     await upload;
 
     expect(request.withCredentials).toBe(true);
-    expect(request.setRequestHeader).toHaveBeenCalledWith('x-candidary-csrf', 'csrf-token');
+    expect(request.setRequestHeader).toHaveBeenCalledWith('x-candidary-csrf', 'event-token');
+    expect(request.setRequestHeader).toHaveBeenCalledWith('x-candidary-host-csrf', 'host-token');
     expect(request.setRequestHeader).toHaveBeenCalledWith('Content-Type', reservation.mimeType);
+  });
+
+  it.each([
+    [403, MANAGER_UPLOAD_RESOURCE_FORBIDDEN_ERROR],
+    [409, {
+      code: 'UPLOAD_FINALIZE_CONFLICT',
+      message: 'This upload can no longer receive bytes.',
+      requestId: 'request-finalize-conflict',
+    }],
+  ] as const)('preserves a flat API error body from a %i content response', async (status, body) => {
+    const upload = xhrUpload(item().file, {
+      ...reservation,
+      uploadUrl: `${window.location.origin}/api/manage/events/event-a/uploads/media-a/content`,
+    }, vi.fn());
+    const request = ControlledXMLHttpRequest.instances[0]!;
+    request.status = status;
+    request.responseText = JSON.stringify(body);
+    request.dispatch('load');
+
+    const error = await upload.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ClientApiError);
+    expect(error).toMatchObject({
+      code: body.code,
+      message: body.message,
+      status,
+      requestId: body.requestId,
+    });
+  });
+
+  it.each([
+    ['nested batch error', JSON.stringify({ error: MANAGER_UPLOAD_RESOURCE_FORBIDDEN_ERROR })],
+    ['empty body', ''],
+    ['non-JSON body', '<html>upstream error</html>'],
+  ])('keeps the exact interrupted-transfer fallback for a %s', async (_label, responseText) => {
+    const upload = xhrUpload(item().file, reservation, vi.fn());
+    const request = ControlledXMLHttpRequest.instances[0]!;
+    request.status = 403;
+    request.responseText = responseText;
+    request.dispatch('load');
+
+    const error = await upload.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ClientApiError);
+    expect(error).toMatchObject({
+      message: 'The transfer was interrupted. Try this photo again.',
+    });
+  });
+
+  it('keeps the exact network-error fallback', async () => {
+    const upload = xhrUpload(item().file, reservation, vi.fn());
+    ControlledXMLHttpRequest.instances[0]!.dispatch('error');
+
+    await expect(upload).rejects.toMatchObject({
+      message: 'Reception dropped out. Try this photo again.',
+    });
   });
 
   it('maps a stored idempotent batch replay to an already-delivered queue result', async () => {
@@ -138,10 +199,50 @@ describe('browser upload transport cancellation', () => {
       }],
     })));
 
-    const results = await createBrowserTransport('alex-jordan', 'Taylor').reserve([item()]);
+    const results = await createBrowserTransport({
+      kind: 'guest',
+      slug: 'alex-jordan',
+      guestName: 'Taylor',
+    }).reserve([item()]);
 
-    expect(results).toEqual([{ id: 'item-a', status: 'delivered' }]);
+    expect(results).toEqual([{
+      id: 'item-a',
+      status: 'delivered',
+      mediaId: reservation.mediaId,
+    }]);
     expect(ControlledXMLHttpRequest.instances).toHaveLength(0);
+  });
+
+  it('sends exactly the reservation items it receives without a nested chunk loop', async () => {
+    const selected = Array.from(
+      { length: UPLOAD_BATCH_SIZE + 3 },
+      (_, index) => item(`item-${index}`),
+    );
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { files: Array<{ idempotencyKey: string }> };
+      return response({
+        items: body.files.map(({ idempotencyKey }) => ({
+          idempotencyKey,
+          status: 'rejected',
+          error: { code: 'EVENT_MEDIA_LIMIT', message: 'The event has reached its photo limit.' },
+        })),
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const results = await createBrowserTransport({
+      kind: 'guest',
+      slug: 'alex-jordan',
+      guestName: 'Taylor',
+    }).reserve(selected);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse(String(init?.body)) as { guestName: string; files: Array<{ idempotencyKey: string }> };
+    expect(body.guestName).toBe('Taylor');
+    expect(body.files.map(({ idempotencyKey }) => idempotencyKey))
+      .toEqual(selected.map(({ id }) => id));
+    expect(results).toHaveLength(selected.length);
   });
 
   /* The reservation answer is an allowlist: three fields about the media row and a relative
@@ -163,7 +264,11 @@ describe('browser upload transport cancellation', () => {
       }],
     })));
 
-    const results = await createBrowserTransport('alex-jordan', 'Taylor').reserve([item()]);
+    const results = await createBrowserTransport({
+      kind: 'guest',
+      slug: 'alex-jordan',
+      guestName: 'Taylor',
+    }).reserve([item()]);
 
     expect(results).toEqual([{
       id: 'item-a',
@@ -195,7 +300,11 @@ describe('browser upload transport cancellation', () => {
       ],
     })));
 
-    const results = await createBrowserTransport('alex-jordan', 'Taylor')
+    const results = await createBrowserTransport({
+      kind: 'guest',
+      slug: 'alex-jordan',
+      guestName: 'Taylor',
+    })
       .reserve([item('refused'), item('unaddressable')]);
 
     expect(results).toEqual([
@@ -245,7 +354,11 @@ describe('browser upload transport cancellation', () => {
     }, 500));
     vi.stubGlobal('fetch', fetchMock);
     const controller = new AbortController();
-    const finalize = createBrowserTransport('alex-jordan', 'Taylor')
+    const finalize = createBrowserTransport({
+      kind: 'guest',
+      slug: 'alex-jordan',
+      guestName: 'Taylor',
+    })
       .finalize(item(), reservation, controller.signal);
 
     // Spin until the backoff timer is armed. The number of microtask turns the
@@ -288,7 +401,11 @@ describe('browser upload transport cancellation', () => {
     }));
     const controller = new AbortController();
     const addListener = vi.spyOn(controller.signal, 'addEventListener');
-    const transport = createBrowserTransport('alex-jordan', 'Taylor');
+    const transport = createBrowserTransport({
+      kind: 'guest',
+      slug: 'alex-jordan',
+      guestName: 'Taylor',
+    });
 
     const reserved = await transport.reserve([item()], controller.signal);
     expect(reserved[0]?.status).toBe('accepted');
@@ -301,5 +418,140 @@ describe('browser upload transport cancellation', () => {
 
     expect(fetchSignals).toEqual([controller.signal, controller.signal]);
     expect(addListener).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
+  });
+
+  it('uses exact Manager paths and bodies, maps canceled replay, and alone exposes cancel', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.endsWith('/uploads/batch')) {
+        return response({
+          items: [{
+            idempotencyKey: 'item-a',
+            status: 'rejected',
+            error: {
+              code: 'UPLOAD_RESERVATION_CANCELED',
+              message: 'This upload reservation was canceled.',
+            },
+          }],
+        });
+      }
+      return response({ media: { id: 'media-a', mimeType: 'image/jpeg', uploadState: 'deleted' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const manager = createBrowserTransport({ kind: 'manager', eventId: 'event-a' });
+    const guest = createBrowserTransport({
+      kind: 'guest',
+      slug: 'alex-jordan',
+      guestName: 'Taylor',
+    });
+
+    await expect(manager.reserve([item()])).resolves.toEqual([{
+      id: 'item-a',
+      status: 'canceled',
+    }]);
+    await manager.finalize(item(), reservation);
+    expect(manager.cancelReservation).toBeTypeOf('function');
+    await manager.cancelReservation!(item(), reservation);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/manage/events/event-a/uploads/batch',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          files: [{
+            filename: 'item-a.jpg',
+            mimeType: 'image/jpeg',
+            byteSize: 5,
+            idempotencyKey: 'item-a',
+            caption: null,
+          }],
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/manage/events/event-a/uploads/media-a/finalize',
+      expect.objectContaining({ method: 'POST', body: '{}' }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/manage/events/event-a/uploads/media-a',
+      expect.objectContaining({ method: 'DELETE', body: '{}' }),
+    );
+    expect(guest.cancelReservation).toBeUndefined();
+  });
+
+  it('carries a nested Manager authority refusal through reserve into terminal cleanup', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => response({
+      items: [{
+        idempotencyKey: 'item-a',
+        status: 'rejected',
+        error: {
+          code: MANAGER_UPLOAD_RESOURCE_FORBIDDEN_ERROR.code,
+          message: MANAGER_UPLOAD_RESOURCE_FORBIDDEN_ERROR.message,
+        },
+      }],
+    })));
+    const queueItem = item();
+    const transport = createBrowserTransport({ kind: 'manager', eventId: 'event-a' });
+    const replay = await transport.reserve([queueItem]);
+    const cleanup = createManagerUploadCleanup({
+      reserve: vi.fn(async () => replay[0]!),
+      cancel: vi.fn(async () => undefined),
+    });
+
+    expect(replay).toEqual([{
+      id: 'item-a',
+      status: 'rejected',
+      error: MANAGER_UPLOAD_RESOURCE_FORBIDDEN_ERROR.message,
+      failure: { code: 'RESOURCE_FORBIDDEN', status: 403, stage: 'reserve' },
+    }]);
+    await expect(cleanup.run([{
+      itemId: queueItem.id,
+      idempotencyKey: queueItem.id,
+      queueItem,
+      reservation: null,
+      disposition: 'ambiguous',
+    }])).resolves.toEqual({
+      kind: 'terminal',
+      reason: 'authorization',
+      unresolvedCount: 1,
+      deliveredIds: [],
+    });
+  });
+
+  it('keeps the exact guest reservation path and guestName body', async () => {
+    const fetchMock = vi.fn(() => response({
+      items: [{
+        idempotencyKey: 'item-a',
+        status: 'rejected',
+        error: { code: 'EVENT_MEDIA_LIMIT', message: 'The event is full.' },
+      }],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createBrowserTransport({
+      kind: 'guest',
+      slug: 'alex-jordan',
+      guestName: 'Taylor',
+    }).reserve([item()]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/event/alex-jordan/uploads/batch',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          guestName: 'Taylor',
+          files: [{
+            filename: 'item-a.jpg',
+            mimeType: 'image/jpeg',
+            byteSize: 5,
+            idempotencyKey: 'item-a',
+            caption: null,
+          }],
+        }),
+      }),
+    );
   });
 });

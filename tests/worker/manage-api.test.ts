@@ -5,6 +5,8 @@ import {
   ALBUM_MAX_ENTRIES,
   DEFAULT_GUESTBOOK_PROMPT,
   MANAGER_BULK_SELECTION_MAX,
+  MAX_EVENT_BYTES,
+  MAX_EVENT_MEDIA,
   MAX_GUESTBOOK_PROMPT_LENGTH,
 } from '../../shared/constants';
 import { createApp } from '../../worker/app';
@@ -12,6 +14,8 @@ import { EventEntriesRepository } from '../../worker/db/event-entries';
 import { EventsRepository } from '../../worker/db/events';
 import { MediaRepository } from '../../worker/db/media';
 import { MediaObjectWriteTombstoneRepository } from '../../worker/db/media-write-tombstones';
+import type { AppEnv } from '../../worker/env';
+import { LinkService } from '../../worker/services/links';
 import {
   cleanupExpiredRecoverableMedia,
   cleanupMediaObjectWriteTombstones,
@@ -20,8 +24,9 @@ import {
 } from '../../worker/workflows/cleanup';
 import {
   applySettings,
-  cookiesFrom,
   eventAccess,
+  hostAccess,
+  hostWriteHeaders,
   importRoster,
   png,
   resetDatabase,
@@ -41,6 +46,85 @@ type Access = Awaited<ReturnType<typeof eventAccess>>;
 type SeededMedia = { id: string; storedAt: string };
 
 const SEED_EPOCH_MS = Date.UTC(2026, 6, 20, 9, 0, 0);
+
+function withDatabase(base: AppEnv, db: D1Database): AppEnv {
+  const fixture = Object.create(base) as AppEnv;
+  Object.defineProperty(fixture, 'DB', { value: db });
+  return fixture;
+}
+
+function managerSessionId(cookie: string): string {
+  const id = /candidary_session=([^;.]+)/u.exec(cookie)?.[1];
+  if (!id) throw new Error('Expected a Manager session cookie.');
+  return id;
+}
+
+function rotateManagementLink(
+  eventId: string,
+  host: { cookie: string; csrf: string },
+  body: unknown = { expectedManagerLinkRevision: 0 },
+) {
+  return createApp().request(`/api/manage/events/${eventId}/links/manager/rotate`, {
+    method: 'POST',
+    headers: hostWriteHeaders(host),
+    body: JSON.stringify(body),
+  }, testEnv);
+}
+
+async function seedLinkReservation(access: Access, id: string, declaredByteSize = 64) {
+  const sessionId = managerSessionId(access.manager.cookie);
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE events
+      SET reserved_media_count = reserved_media_count + 1,
+          reserved_bytes = reserved_bytes + ?
+      WHERE id = ?
+    `).bind(declaredByteSize, access.event.id),
+    env.DB.prepare(`
+      INSERT INTO media (
+        id, event_id, uploader_session_id, object_key, object_bucket_generation,
+        original_filename, mime_type, declared_byte_size, guest_name, caption,
+        upload_state, publication_status, idempotency_key, reservation_expires_at,
+        created_at
+      ) VALUES (?, ?, ?, ?, 'legacy', ?, 'image/png', ?, 'Host', NULL,
+        'reserved', 'unpublished', ?, '2026-08-28T12:00:00.000Z',
+        '2026-08-27T12:00:00.000Z')
+    `).bind(
+      id,
+      access.event.id,
+      sessionId,
+      `events/${access.event.id}/uploads/${id}`,
+      `${id}.png`,
+      declaredByteSize,
+      id,
+    ),
+  ]);
+  return sessionId;
+}
+
+async function seedAccountActor(access: Access, accountId: string, id: string) {
+  const predecessor = await env.DB.prepare(`
+    SELECT id FROM event_access_tokens
+    WHERE event_id = ? AND role = 'manager' AND revoked_at IS NULL
+  `).bind(access.event.id).first<string>('id');
+  if (!predecessor) throw new Error('Expected a live Manager token.');
+  await env.DB.prepare(`
+    INSERT INTO event_sessions (
+      id, secret_digest, csrf_digest, event_id, access_token_id, role,
+      can_claim_owner, manager_upload_account_id, expires_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'manager', 0, ?, ?, ?)
+  `).bind(
+    id,
+    `secret-${id}`,
+    `csrf-${id}`,
+    access.event.id,
+    predecessor,
+    accountId,
+    access.event.managementAccessExpiresAt,
+    '2026-08-27T12:00:00.000Z',
+  ).run();
+  return predecessor;
+}
 
 function seedId(index: number, group = 0) {
   return `${String(group).padStart(8, '0')}-0000-4000-8000-${String(index).padStart(12, '0')}`;
@@ -106,6 +190,98 @@ function managerMedia(access: Access, query = '') {
     headers: { cookie: access.manager.cookie },
   }, testEnv);
 }
+
+async function managerEvent(access: Access) {
+  const response = await createApp().request(`/api/manage/events/${access.event.id}`, {
+    headers: { cookie: access.manager.cookie },
+  }, testEnv);
+  return { response, body: await response.json<any>() };
+}
+
+describe('hostUploadAvailability Manager projection', () => {
+  it('stays available across guest intake state and accounts for every retained cohort', async () => {
+    const open = await eventAccess('Open event');
+    expect((await managerEvent(open)).body.data.event.hostUploadAvailability).toEqual({
+      enabled: true,
+      reason: null,
+    });
+
+    await env.DB.prepare(`
+      UPDATE events SET uploads_enabled = 0, photos_open_from = NULL WHERE id = ?
+    `).bind(open.event.id).run();
+    expect((await managerEvent(open)).body.data.event.hostUploadAvailability).toEqual({
+      enabled: true,
+      reason: null,
+    });
+
+    const preStart = await eventAccess('Pre-start event', false);
+    expect((await managerEvent(preStart)).body.data.event.hostUploadAvailability).toEqual({
+      enabled: true,
+      reason: null,
+    });
+
+    const mediaFull = await eventAccess('Media-full event');
+    await env.DB.prepare(`
+      UPDATE events
+      SET stored_media_count = ?, reserved_media_count = 1, recoverable_media_count = 1,
+          stored_bytes = ?, reserved_bytes = 1, recoverable_bytes = 1
+      WHERE id = ?
+    `).bind(
+      MAX_EVENT_MEDIA - 2,
+      MAX_EVENT_BYTES - 2,
+      mediaFull.event.id,
+    ).run();
+    expect((await managerEvent(mediaFull)).body.data.event.hostUploadAvailability).toEqual({
+      enabled: false,
+      reason: 'media-cap',
+    });
+
+    const storageFull = await eventAccess('Storage-full event');
+    await env.DB.prepare(`
+      UPDATE events
+      SET stored_media_count = 0, reserved_media_count = 0, recoverable_media_count = 0,
+          stored_bytes = ?, reserved_bytes = 1, recoverable_bytes = 1
+      WHERE id = ?
+    `).bind(MAX_EVENT_BYTES - 2, storageFull.event.id).run();
+    expect((await managerEvent(storageFull)).body.data.event.hostUploadAvailability).toEqual({
+      enabled: false,
+      reason: 'storage-cap',
+    });
+
+    const guest = await createApp().request(`/api/event/${open.event.slug}`, {
+      headers: { cookie: open.guest.cookie },
+    }, testEnv);
+    expect(guest.status).toBe(200);
+    expect((await guest.json<any>()).data.event).not.toHaveProperty('hostUploadAvailability');
+  });
+
+  it('keeps lifecycle failures out of the successful projection', async () => {
+    const expired = await eventAccess('Expired event');
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE events SET management_access_expires_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?
+      `).bind(expired.event.id),
+      env.DB.prepare(`
+        UPDATE event_access_tokens SET expires_at = '2000-01-01T00:00:00.000Z'
+        WHERE event_id = ? AND role = 'manager'
+      `).bind(expired.event.id),
+    ]);
+    const expiredResult = await managerEvent(expired);
+    expect(expiredResult.response.status).toBe(410);
+    expect(expiredResult.body).toMatchObject({ code: 'EVENT_EXPIRED' });
+    expect(expiredResult.body).not.toHaveProperty('data');
+
+    const deleted = await eventAccess('Deleted event');
+    await env.DB.prepare(`
+      UPDATE events SET deleted_at = '2026-08-27T12:00:00.000Z' WHERE id = ?
+    `).bind(deleted.event.id).run();
+    const deletedResult = await managerEvent(deleted);
+    expect(deletedResult.response.status).toBe(410);
+    expect(deletedResult.body).toMatchObject({ code: 'EVENT_DELETED' });
+    expect(deletedResult.body).not.toHaveProperty('data');
+  });
+});
 
 async function managerMediaPage(access: Access, query = '') {
   const response = await managerMedia(access, query);
@@ -1050,151 +1226,396 @@ describe('access link rotation', () => {
     expect(newShell.status).toBe(200);
   });
 
-  it('returns a one-time replacement management link and revokes the current manager session', async () => {
+  it('managerLinkRotationAvailability follows the accepted owner, cohost, or link authority', async () => {
     const access = await eventAccess();
-    await env.DB.prepare(`
-      INSERT INTO host_accounts (id, email, password_hash, created_at)
-      VALUES ('owner-rotation', 'owner-rotation@example.com', 'password-hash', '2026-07-28T00:00:00.000Z')
-    `).run();
+    const owner = await hostAccess([access]);
+    const cohost = await hostAccess();
     await env.DB.prepare(`
       INSERT INTO event_hosts (event_id, account_id, role, created_at)
-      VALUES (?, 'owner-rotation', 'owner', '2026-07-28T00:00:00.000Z')
-    `).bind(access.event.id).run();
-    const rotated = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
-      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
-    }, testEnv);
-    const body = await rotated.json<any>();
-    expect(body.data.managementLink).not.toBe(access.managementLink);
+      VALUES (?, ?, 'cohost', '2026-08-27T12:00:00.000Z')
+    `).bind(access.event.id, cohost.account.id).run();
 
+    const projections = await Promise.all([
+      createApp().request(`/api/manage/events/${access.event.id}`, {
+        headers: { cookie: owner.cookie },
+      }, testEnv),
+      createApp().request(`/api/manage/events/${access.event.id}`, {
+        headers: { cookie: cohost.cookie },
+      }, testEnv),
+      createApp().request(`/api/manage/events/${access.event.id}`, {
+        headers: { cookie: `${owner.cookie}; ${access.manager.cookie}` },
+      }, testEnv),
+      createApp().request(`/api/manage/events/${access.event.id}`, {
+        headers: { cookie: access.manager.cookie },
+      }, testEnv),
+    ]);
+    expect(projections.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+
+    const [ownerEvent, cohostEvent, bothEvent, linkEvent] = await Promise.all(
+      projections.map(async (response) => (await response.json<any>()).data.event),
+    );
+    for (const event of [ownerEvent, cohostEvent, bothEvent]) {
+      expect(event.managerLinkRotationAvailability).toEqual({ enabled: true, reason: null });
+      expect(event.managerLinkRevision).toBe(0);
+    }
+    expect(linkEvent.managerLinkRotationAvailability).toEqual({
+      enabled: false,
+      reason: 'account-required',
+    });
+    expect(linkEvent.managerLinkRevision).toBeNull();
+  });
+
+  it('managerLinkRotationAvailability is invalidated with disabled accounts and removed memberships', async () => {
+    const removedAccess = await eventAccess();
+    const removedOwner = await hostAccess([removedAccess]);
+    const removedCookies = `${removedOwner.cookie}; ${removedAccess.manager.cookie}`;
+    const beforeRemoval = await createApp().request(
+      `/api/manage/events/${removedAccess.event.id}`,
+      { headers: { cookie: removedCookies } },
+      testEnv,
+    );
+    expect((await beforeRemoval.json<any>()).data.event.managerLinkRotationAvailability)
+      .toEqual({ enabled: true, reason: null });
+
+    await env.DB.prepare('DELETE FROM event_hosts WHERE event_id = ? AND account_id = ?')
+      .bind(removedAccess.event.id, removedOwner.account.id).run();
+    const afterRemoval = await createApp().request(
+      `/api/manage/events/${removedAccess.event.id}`,
+      { headers: { cookie: removedCookies } },
+      testEnv,
+    );
+    const removedEvent = (await afterRemoval.json<any>()).data.event;
+    expect(removedEvent.managerLinkRotationAvailability).toEqual({
+      enabled: false,
+      reason: 'account-required',
+    });
+    expect(removedEvent.managerLinkRevision).toBeNull();
+
+    const disabledAccess = await eventAccess();
+    const disabledOwner = await hostAccess([disabledAccess]);
+    await env.DB.prepare('UPDATE host_accounts SET disabled_at = ? WHERE id = ?')
+      .bind('2026-08-27T12:00:00.000Z', disabledOwner.account.id).run();
+    const disabledView = await createApp().request(
+      `/api/manage/events/${disabledAccess.event.id}`,
+      { headers: { cookie: `${disabledOwner.cookie}; ${disabledAccess.manager.cookie}` } },
+      testEnv,
+    );
+    const disabledEvent = (await disabledView.json<any>()).data.event;
+    expect(disabledEvent.managerLinkRotationAvailability).toEqual({
+      enabled: false,
+      reason: 'account-required',
+    });
+    expect(disabledEvent.managerLinkRevision).toBeNull();
+  });
+
+  it('rotate projects the client revision only through account authority and validates bodies strictly', async () => {
+    const access = await eventAccess();
+    const owner = await hostAccess([access]);
+
+    const linkView = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    const accountView = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: owner.cookie },
+    }, testEnv);
+    const bothView = await createApp().request(`/api/manage/events/${access.event.id}`, {
+      headers: { cookie: `${owner.cookie}; ${access.manager.cookie}` },
+    }, testEnv);
+    expect((await linkView.json<any>()).data.event.managerLinkRevision).toBeNull();
+    expect((await accountView.json<any>()).data.event.managerLinkRevision).toBe(0);
+    const bothEvent = (await bothView.json<any>()).data.event;
+    expect(bothEvent.managerLinkRevision).toBe(0);
+    expect(JSON.stringify(bothEvent)).not.toMatch(/accessTokenId|access_token_id|managerTokenId/u);
+
+    for (const body of [
+      {},
+      { unknown: 0 },
+      { expectedManagerLinkRevision: -1 },
+      { expectedManagerLinkRevision: '0' },
+      { expectedManagerLinkRevision: 0.5 },
+      { expectedManagerLinkRevision: 0, accessTokenId: 'must-not-be-accepted' },
+    ]) {
+      const refused = await rotateManagementLink(access.event.id, owner, body);
+      expect([body, refused.status]).toEqual([body, 422]);
+      const failure = await refused.json<any>();
+      expect(failure.code).toBe('VALIDATION_FAILED');
+      expect(JSON.stringify(failure)).not.toMatch(/accessTokenId|access_token_id|managerTokenId/u);
+    }
+    expect(await env.DB.prepare('SELECT manager_link_revision FROM events WHERE id = ?')
+      .bind(access.event.id).first('manager_link_revision')).toBe(0);
+
+    const linkOnly = await createApp().request(
+      `/api/manage/events/${access.event.id}/links/manager/rotate`,
+      {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ expectedManagerLinkRevision: 0 }),
+      },
+      testEnv,
+    );
+    expect(linkOnly.status).toBe(403);
+    expect((await linkOnly.json<any>()).code).toBe('ROLE_FORBIDDEN');
+  });
+
+  it('rotate admits one concurrent revision winner and a delayed stale request cannot replace it', async () => {
+    const access = await eventAccess();
+    const owner = await hostAccess([access]);
+
+    const responses = await Promise.all([
+      rotateManagementLink(access.event.id, owner),
+      rotateManagementLink(access.event.id, owner),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const winner = responses.find((response) => response.status === 200)!;
+    const loser = responses.find((response) => response.status === 409)!;
+    const winnerBody = await winner.json<any>();
+    expect(Object.keys(winnerBody.data).sort()).toEqual(['managementLink', 'managerLinkRevision']);
+    expect(winnerBody.data).toMatchObject({
+      managementLink: expect.not.stringContaining(access.managementLink),
+      managerLinkRevision: 1,
+    });
+    expect((await loser.json<any>()).code).toBe('REVISION_CONFLICT');
+    expect(winner.headers.get('cache-control')).toBe('private, no-store');
+    expect(winner.headers.get('vary')).toBe('Cookie');
+
+    const tokens = await env.DB.prepare(`
+      SELECT id, revoked_at FROM event_access_tokens
+      WHERE event_id = ? AND role = 'manager' ORDER BY created_at, id
+    `).bind(access.event.id).all<{ id: string; revoked_at: string | null }>();
+    expect(tokens.results).toHaveLength(2);
+    expect(tokens.results.filter((token) => token.revoked_at === null)).toHaveLength(1);
+    const replacementId = tokens.results.find((token) => token.revoked_at === null)!.id;
+
+    const delayed = await rotateManagementLink(access.event.id, owner);
+    expect(delayed.status).toBe(409);
+    expect((await delayed.json<any>()).code).toBe('REVISION_CONFLICT');
+    expect(await env.DB.prepare(`
+      SELECT id FROM event_access_tokens
+      WHERE event_id = ? AND role = 'manager' AND revoked_at IS NULL
+    `).bind(access.event.id).first('id')).toBe(replacementId);
+
+    const exchanged = await createApp().request(new URL(winnerBody.data.managementLink).pathname, {
+      redirect: 'manual',
+    }, testEnv);
+    expect(exchanged.status).toBe(302);
     const oldManager = await createApp().request(`/api/manage/events/${access.event.id}`, {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
     expect((await oldManager.json<any>()).code).toBe('TOKEN_REVOKED');
   });
 
-  it('keeps a live creator recovery path intact instead of rotating its manager link', async () => {
+  it('rotate fails closed when the observed predecessor is revoked before its guarded batch', async () => {
     const access = await eventAccess();
+    const mediaId = 'predecessor-race-media';
+    const sessionId = await seedLinkReservation(access, mediaId);
+    const event = await new EventsRepository(env.DB).getById(access.event.id);
+    if (!event) throw new Error('Expected the event fixture.');
+    const predecessorId = await env.DB.prepare(`
+      SELECT id FROM event_access_tokens
+      WHERE event_id = ? AND role = 'manager' AND revoked_at IS NULL
+    `).bind(access.event.id).first<string>('id');
+    let injected = false;
+    const db = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!injected) {
+              injected = true;
+              await target.prepare('UPDATE event_access_tokens SET revoked_at = ? WHERE id = ?')
+                .bind('2026-08-27T12:00:00.000Z', predecessorId).run();
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
 
-    const blocked = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
-      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
-    }, testEnv);
+    await expect(new LinkService(withDatabase(testEnv, db)).rotateManagementLink(
+      event,
+      0,
+      new Date('2026-08-27T12:00:01.000Z'),
+    )).rejects.toMatchObject({ code: 'REVISION_CONFLICT', status: 409 });
+    expect(injected).toBe(true);
+    expect(await env.DB.prepare('SELECT manager_link_revision FROM events WHERE id = ?')
+      .bind(access.event.id).first('manager_link_revision')).toBe(0);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM event_access_tokens
+      WHERE event_id = ? AND role = 'manager'
+    `).bind(access.event.id).first('count')).toBe(1);
+    expect(await env.DB.prepare('SELECT revoked_at FROM event_sessions WHERE id = ?')
+      .bind(sessionId).first('revoked_at')).toBeNull();
+    expect(await env.DB.prepare('SELECT upload_state FROM media WHERE id = ?')
+      .bind(mediaId).first('upload_state')).toBe('reserved');
+  });
 
-    expect(blocked.status).toBe(409);
-    expect((await blocked.json<any>()).code).toBe('OWNER_CLAIM_REQUIRED');
+  it('rotate rolls every credential, actor, and reservation write back on an in-batch constraint failure', async () => {
+    const access = await eventAccess();
+    const owner = await hostAccess([access]);
+    const mediaId = 'rollback-link-media';
+    const sessionId = await seedLinkReservation(access, mediaId);
+    const actorId = 'rollback-account-actor';
+    const predecessorId = await seedAccountActor(access, owner.account.id, actorId);
+    const event = await new EventsRepository(env.DB).getById(access.event.id);
+    if (!event) throw new Error('Expected the event fixture.');
+    let injected = false;
+    const db = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === 'batch') {
+          return (statements: D1PreparedStatement[]) => {
+            injected = true;
+            return target.batch([
+              ...statements,
+              target.prepare('UPDATE events SET reserved_media_count = -1 WHERE id = ?')
+                .bind(access.event.id),
+            ]);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
 
-    const originalSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
+    await expect(new LinkService(withDatabase(testEnv, db)).rotateManagementLink(
+      event,
+      0,
+      new Date('2026-08-27T12:00:01.000Z'),
+    )).rejects.toThrow();
+    expect(injected).toBe(true);
+    expect(await env.DB.prepare('SELECT manager_link_revision FROM events WHERE id = ?')
+      .bind(access.event.id).first('manager_link_revision')).toBe(0);
+    expect(await env.DB.prepare('SELECT revoked_at FROM event_access_tokens WHERE id = ?')
+      .bind(predecessorId).first('revoked_at')).toBeNull();
+    expect(await env.DB.prepare('SELECT revoked_at FROM event_sessions WHERE id = ?')
+      .bind(sessionId).first('revoked_at')).toBeNull();
+    expect(await env.DB.prepare('SELECT access_token_id FROM event_sessions WHERE id = ?')
+      .bind(actorId).first('access_token_id')).toBe(predecessorId);
+    expect(await env.DB.prepare('SELECT upload_state FROM media WHERE id = ?')
+      .bind(mediaId).first('upload_state')).toBe('reserved');
+    const stillUsable = await createApp().request(`/api/manage/events/${access.event.id}`, {
       headers: { cookie: access.manager.cookie },
     }, testEnv);
-    expect(originalSession.status).toBe(200);
-
-    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
-      redirect: 'manual',
-    }, testEnv);
-    const exchangedSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
-      headers: { cookie: cookiesFrom(exchanged).cookie },
-    }, testEnv);
-    expect(exchangedSession.status).toBe(200);
+    expect(stillUsable.status).toBe(200);
   });
 
-  it('allows rotation after the creator session expires and no legacy claim remains', async () => {
+  it('rotate does not roll credentials back when post-commit object deletion fails', async () => {
     const access = await eventAccess();
-    await env.DB.prepare(`
-      UPDATE event_sessions SET expires_at = ?
-      WHERE event_id = ? AND role = 'manager' AND can_claim_owner = 1
-    `).bind(new Date(Date.now() - 1_000).toISOString(), access.event.id).run();
-    await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 0 WHERE id = ?')
-      .bind(access.event.id).run();
+    await seedLinkReservation(access, 'delete-failure-media');
+    const event = await new EventsRepository(env.DB).getById(access.event.id);
+    if (!event) throw new Error('Expected the event fixture.');
+    const failingBucket = (bucket: R2Bucket) => new Proxy(bucket, {
+      get(target, property) {
+        if (property === 'delete') return () => Promise.reject(new Error('simulated R2 deletion failure'));
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const appEnv = Object.create(testEnv) as AppEnv;
+    Object.defineProperties(appEnv, {
+      MEDIA_BUCKET: { value: failingBucket(testEnv.MEDIA_BUCKET) },
+      CANONICAL_MEDIA_BUCKET: { value: failingBucket(testEnv.CANONICAL_MEDIA_BUCKET) },
+    });
 
-    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
-      redirect: 'manual',
-    }, testEnv);
-    const freshManager = cookiesFrom(exchanged);
-    const rotated = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
-      method: 'POST', headers: writeHeaders(freshManager), body: '{}',
-    }, testEnv);
-
-    expect(rotated.status).toBe(200);
-    expect((await rotated.json<any>()).data.managementLink).not.toBe(access.managementLink);
+    const result = await new LinkService(appEnv).rotateManagementLink(
+      event,
+      0,
+      new Date('2026-08-27T12:00:01.000Z'),
+    );
+    expect(result.managerLinkRevision).toBe(1);
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM event_access_tokens
+      WHERE event_id = ? AND role = 'manager' AND revoked_at IS NULL
+    `).bind(access.event.id).first('count')).toBe(1);
+    expect(await env.DB.prepare('SELECT upload_state FROM media WHERE id = ?')
+      .bind('delete-failure-media').first('upload_state')).toBe('deleted');
+    expect(await env.DB.prepare(`
+      SELECT COUNT(*) AS count FROM media_object_write_tombstones
+      WHERE media_id = ? AND suppression_started_at IS NOT NULL
+    `).bind('delete-failure-media').first('count')).toBeGreaterThan(0);
   });
 
-  it('continues rotating an event that already has a durable owner', async () => {
+  it.each([
+    ['no live sessions', false, true, true],
+    ['no live account actor', true, false, true],
+    ['no link reservations', true, true, false],
+    ['none of the optional cohorts', false, false, false],
+    ['all optional cohorts', true, true, true],
+  ] as const)(
+    'rotate guards optional cohorts independently: %s',
+    async (_label, hasLiveSession, hasAccountActor, hasLinkMedia) => {
+      const access = await eventAccess();
+      const owner = await hostAccess([access]);
+      const predecessorId = await env.DB.prepare(`
+        SELECT id FROM event_access_tokens
+        WHERE event_id = ? AND role = 'manager' AND revoked_at IS NULL
+      `).bind(access.event.id).first<string>('id');
+      if (!predecessorId) throw new Error('Expected the predecessor token.');
+      const actorId = `actor-${hasLiveSession}-${hasAccountActor}-${hasLinkMedia}`;
+      const mediaId = `media-${hasLiveSession}-${hasAccountActor}-${hasLinkMedia}`;
+      if (hasAccountActor) await seedAccountActor(access, owner.account.id, actorId);
+      if (hasLinkMedia) await seedLinkReservation(access, mediaId, 71);
+      if (!hasLiveSession) {
+        await env.DB.prepare(`
+          UPDATE event_sessions SET revoked_at = '2026-08-27T11:59:59.000Z'
+          WHERE access_token_id = ? AND manager_upload_account_id IS NULL
+        `).bind(predecessorId).run();
+      }
+
+      const response = await rotateManagementLink(access.event.id, owner);
+      expect(response.status).toBe(200);
+      expect((await response.json<any>()).data.managerLinkRevision).toBe(1);
+      const replacementId = await env.DB.prepare(`
+        SELECT id FROM event_access_tokens
+        WHERE event_id = ? AND role = 'manager' AND revoked_at IS NULL
+      `).bind(access.event.id).first<string>('id');
+      expect(replacementId).toEqual(expect.any(String));
+      expect(replacementId).not.toBe(predecessorId);
+      expect(await env.DB.prepare(`
+        SELECT COUNT(*) AS count FROM event_sessions
+        WHERE access_token_id = ? AND manager_upload_account_id IS NULL AND revoked_at IS NULL
+      `).bind(predecessorId).first('count')).toBe(0);
+      if (hasAccountActor) {
+        expect(await env.DB.prepare('SELECT access_token_id FROM event_sessions WHERE id = ?')
+          .bind(actorId).first('access_token_id')).toBe(replacementId);
+      }
+      if (hasLinkMedia) {
+        expect(await env.DB.prepare('SELECT upload_state FROM media WHERE id = ?')
+          .bind(mediaId).first('upload_state')).toBe('deleted');
+      }
+      expect(await env.DB.prepare(`
+        SELECT reserved_media_count, reserved_bytes FROM events WHERE id = ?
+      `).bind(access.event.id).first()).toEqual({
+        reserved_media_count: 0,
+        reserved_bytes: 0,
+      });
+    },
+  );
+
+  it('rotate preserves the owner-claim precondition and refuses link-only access', async () => {
     const access = await eventAccess();
-    await env.DB.prepare(`
-      INSERT INTO host_accounts (id, email, password_hash, created_at)
-      VALUES ('owner-a', 'owner@example.com', 'password-hash', '2026-07-28T00:00:00.000Z')
-    `).run();
+    const cohost = await hostAccess();
     await env.DB.prepare(`
       INSERT INTO event_hosts (event_id, account_id, role, created_at)
-      VALUES (?, 'owner-a', 'owner', '2026-07-28T00:00:00.000Z')
-    `).bind(access.event.id).run();
+      VALUES (?, ?, 'cohost', '2026-08-27T12:00:00.000Z')
+    `).bind(access.event.id, cohost.account.id).run();
 
-    const rotated = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
-      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
-    }, testEnv);
-
-    expect(rotated.status).toBe(200);
-  });
-
-  it('keeps legacy ownerless events recoverable instead of rotating their manager links', async () => {
-    const access = await eventAccess();
-    await env.DB.prepare(`
-      UPDATE event_sessions SET expires_at = ?
-      WHERE event_id = ? AND role = 'manager' AND can_claim_owner = 1
-    `).bind(new Date(Date.now() - 1_000).toISOString(), access.event.id).run();
-    await env.DB.prepare('UPDATE events SET legacy_owner_claim_open = 1 WHERE id = ?')
-      .bind(access.event.id).run();
-    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
-      redirect: 'manual',
-    }, testEnv);
-    const freshManager = cookiesFrom(exchanged);
-    const freshSessionId = /candidary_session=([^;]+)/u.exec(freshManager.cookie)?.[1]?.split('.')[0];
-    if (!freshSessionId) throw new Error('Expected a fresh manager session.');
-    expect(await env.DB.prepare(`
-      SELECT can_claim_owner FROM event_sessions WHERE id = ?
-    `).bind(freshSessionId).first('can_claim_owner')).toBe(0);
-    expect(await env.DB.prepare(`
-      SELECT COUNT(*) AS count FROM event_sessions
-      WHERE event_id = ? AND can_claim_owner = 1
-        AND revoked_at IS NULL AND expires_at > ?
-    `).bind(access.event.id, new Date().toISOString()).first('count')).toBe(0);
-
-    const blocked = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
-      method: 'POST', headers: writeHeaders(freshManager), body: '{}',
-    }, testEnv);
-
+    const blocked = await rotateManagementLink(access.event.id, cohost);
     expect(blocked.status).toBe(409);
     expect((await blocked.json<any>()).code).toBe('OWNER_CLAIM_REQUIRED');
-  });
-
-  it('does not treat a cohost as durable ownership while creator recovery remains live', async () => {
-    const access = await eventAccess();
-    await env.DB.prepare(`
-      INSERT INTO host_accounts (id, email, password_hash, created_at)
-      VALUES ('cohost-a', 'cohost@example.com', 'password-hash', '2026-07-28T00:00:00.000Z')
-    `).run();
-    await env.DB.prepare(`
-      INSERT INTO event_hosts (event_id, account_id, role, created_at)
-      VALUES (?, 'cohost-a', 'cohost', '2026-07-28T00:00:00.000Z')
-    `).bind(access.event.id).run();
-
-    const blocked = await createApp().request(`/api/manage/events/${access.event.id}/links/manager/rotate`, {
-      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
-    }, testEnv);
-
-    expect(blocked.status).toBe(409);
-    expect((await blocked.json<any>()).code).toBe('OWNER_CLAIM_REQUIRED');
-
-    const originalSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
-      headers: { cookie: access.manager.cookie },
-    }, testEnv);
-    expect(originalSession.status).toBe(200);
-    const exchanged = await createApp().request(new URL(access.managementLink).pathname, {
-      redirect: 'manual',
-    }, testEnv);
-    const exchangedSession = await createApp().request(`/api/manage/events/${access.event.id}`, {
-      headers: { cookie: cookiesFrom(exchanged).cookie },
-    }, testEnv);
-    expect(exchangedSession.status).toBe(200);
+    const linkOnly = await createApp().request(
+      `/api/manage/events/${access.event.id}/links/manager/rotate`,
+      {
+        method: 'POST',
+        headers: writeHeaders(access.manager),
+        body: JSON.stringify({ expectedManagerLinkRevision: 0 }),
+      },
+      testEnv,
+    );
+    expect(linkOnly.status).toBe(403);
+    expect((await linkOnly.json<any>()).code).toBe('ROLE_FORBIDDEN');
+    expect(await env.DB.prepare('SELECT manager_link_revision FROM events WHERE id = ?')
+      .bind(access.event.id).first('manager_link_revision')).toBe(0);
   });
 });
 

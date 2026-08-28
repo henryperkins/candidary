@@ -6,9 +6,34 @@ import {
   MAX_GUEST_NOTES_PER_SESSION_WINDOW,
 } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
+import {
+  EVENT_START_MIGRATION_SENTINEL,
+  GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE,
+} from '../../shared/rsvp';
 import type { MessageCursor } from '../http/message-cursor';
 import { constantTimeEqual } from '../security/crypto';
 import type { FeedItem, MessageRecord } from './types';
+
+// Mirrors `resolveGuestEventPhase` at the write fence. The route supplies the
+// user-facing refusal, while this predicate keeps a boundary/settings race from
+// admitting a note after that projection became unavailable.
+const GUEST_READ_SURFACES_AVAILABLE_SQL = `(
+  (
+    (e.event_start_at = ? OR julianday(e.event_start_at) IS NULL)
+    AND NOT (
+      e.uploads_enabled = 0
+      AND e.rsvp_enabled = 1
+      AND e.rsvp_deadline_at IS NOT NULL
+      AND julianday(e.rsvp_deadline_at) IS NOT NULL
+      AND e.rsvp_deadline_at >= ?
+    )
+  )
+  OR (
+    e.event_start_at <> ?
+    AND julianday(e.event_start_at) IS NOT NULL
+    AND COALESCE(e.photos_open_from, e.event_start_at) <= ?
+  )
+)`;
 
 interface MessageRow {
   id: string;
@@ -120,8 +145,7 @@ export class MessagesRepository {
         ?, ?, CASE WHEN e.moderation_required = 1 THEN NULL ELSE ? END
       FROM events e
       WHERE e.id = ? AND e.deleted_at IS NULL
-        AND e.uploads_enabled = 1
-        AND COALESCE(e.photos_open_from, e.event_start_at) <= ?
+        AND ${GUEST_READ_SURFACES_AVAILABLE_SQL}
         AND NOT EXISTS (
           SELECT 1 FROM guest_message_purge_receipts r
           WHERE r.event_id = e.id AND r.guest_session_id = ? AND r.idempotency_key = ?
@@ -145,6 +169,9 @@ export class MessagesRepository {
       input.createdAt,
       input.createdAt,
       input.eventId,
+      EVENT_START_MIGRATION_SENTINEL,
+      input.createdAt,
+      EVENT_START_MIGRATION_SENTINEL,
       input.createdAt,
       input.guestSessionId,
       input.idempotencyKey,
@@ -176,6 +203,39 @@ export class MessagesRepository {
     if (!inserted) throw new Error('Guest note reservation batch returned no insert result.');
     if ((inserted.meta.changes ?? 0) === 1) {
       return { message: (await this.getById(input.id))!, replayed: false };
+    }
+
+    const guards = await this.db.prepare(`
+      SELECT
+        EXISTS (
+          SELECT 1 FROM events e WHERE e.id = ? AND e.deleted_at IS NULL
+            AND ${GUEST_READ_SURFACES_AVAILABLE_SQL}
+        ) AS phase_open,
+        (SELECT COUNT(*) FROM guest_message_rate_events
+          WHERE event_id = ? AND session_scope_digest = ? AND window_started_at = ?) AS session_count,
+        (SELECT COUNT(*) FROM guest_message_rate_events
+          WHERE event_id = ? AND ip_scope_digest = ? AND window_started_at = ?) AS ip_count,
+        (SELECT COUNT(*) FROM guest_messages WHERE event_id = ?) AS event_count
+    `).bind(
+      input.eventId,
+      EVENT_START_MIGRATION_SENTINEL,
+      input.createdAt,
+      EVENT_START_MIGRATION_SENTINEL,
+      input.createdAt,
+      input.eventId, input.sessionScopeDigest, input.windowStartedAt,
+      input.eventId, input.ipScopeDigest, input.windowStartedAt,
+      input.eventId,
+    ).first<{
+      phase_open: number;
+      session_count: number;
+      ip_count: number;
+      event_count: number;
+    }>();
+    // The current lifecycle owns every idempotency outcome. A route snapshot
+    // cannot replay either a retained note or its purge tombstone after the
+    // Manager has returned photo sharing to a future boundary.
+    if (guards?.phase_open !== 1) {
+      throw new ApiError('EVENT_PHASE_CONFLICT', GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE, 409);
     }
 
     const existing = await this.db.prepare(`
@@ -210,32 +270,6 @@ export class MessagesRepository {
       throw new ApiError('MESSAGE_PURGED', 'This note was permanently deleted and cannot be restored.', 410);
     }
 
-    const guards = await this.db.prepare(`
-      SELECT
-        EXISTS (
-          SELECT 1 FROM events e WHERE e.id = ? AND e.deleted_at IS NULL
-            AND e.uploads_enabled = 1
-            AND COALESCE(e.photos_open_from, e.event_start_at) <= ?
-        ) AS phase_open,
-        (SELECT COUNT(*) FROM guest_message_rate_events
-          WHERE event_id = ? AND session_scope_digest = ? AND window_started_at = ?) AS session_count,
-        (SELECT COUNT(*) FROM guest_message_rate_events
-          WHERE event_id = ? AND ip_scope_digest = ? AND window_started_at = ?) AS ip_count,
-        (SELECT COUNT(*) FROM guest_messages WHERE event_id = ?) AS event_count
-    `).bind(
-      input.eventId, input.createdAt,
-      input.eventId, input.sessionScopeDigest, input.windowStartedAt,
-      input.eventId, input.ipScopeDigest, input.windowStartedAt,
-      input.eventId,
-    ).first<{
-      phase_open: number;
-      session_count: number;
-      ip_count: number;
-      event_count: number;
-    }>();
-    if (guards?.phase_open !== 1) {
-      throw new ApiError('EVENT_PHASE_CONFLICT', 'This event is not accepting new guestbook notes.', 409);
-    }
     if ((guards.session_count ?? 0) >= MAX_GUEST_NOTES_PER_SESSION_WINDOW
       || (guards.ip_count ?? 0) >= MAX_GUEST_NOTES_PER_IP_WINDOW) {
       throw new ApiError('RATE_LIMITED', 'Too many notes were sent in this window. Try again later.', 429);

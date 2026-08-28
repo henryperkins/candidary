@@ -2,39 +2,27 @@ import { CalendarDays, Images, MailWarning } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
+import type { HostSessionResponse } from '../../shared/contracts';
 import { api, ClientApiError } from '../app/api';
+import {
+  DATE_UNAVAILABLE,
+  TIME_UNAVAILABLE,
+  formatEventDate,
+  formatRetentionDate,
+} from '../app/event-date-time';
 import { PageHeader } from '../components/Brand';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
 
-interface HostSession {
-  account: {
-    id: string;
-    email: string;
-    displayName: string | null;
-    emailVerified: boolean;
-    notificationsEnabled: boolean;
-  };
-  events: {
-    id: string;
-    name: string;
-    slug: string;
-    eventDate: string;
-    storedMediaCount: number;
-    managementAccessExpiresAt: string;
-  }[];
-}
-
-function formatDate(value: string): string {
-  return new Date(value.length === 10 ? `${value}T00:00:00.000Z` : value)
-    .toLocaleDateString(undefined, { timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric' });
-}
+type EventSortOrder = 'newest' | 'oldest';
 
 export function HostEventsPage() {
   const navigate = useNavigate();
-  const [session, setSession] = useState<HostSession | null>(null);
+  const [session, setSession] = useState<HostSessionResponse | null>(null);
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [busy, setBusy] = useState(false);
+  const [eventSearch, setEventSearch] = useState('');
+  const [eventSort, setEventSort] = useState<EventSortOrder>('newest');
   // Kept apart from `failure`: these are refused actions on a page that loaded fine,
   // so they must not replace the events with an error screen.
   const [actionError, setActionError] = useState('');
@@ -42,7 +30,7 @@ export function HostEventsPage() {
   const load = useCallback(async () => {
     setFailure(null);
     try {
-      setSession(await api<HostSession>('/api/host/session'));
+      setSession(await api<HostSessionResponse>('/api/host/session'));
     } catch (caught) {
       // A missing or expired account session is not an error page — it is the
       // sign-in page, which is the only thing that resolves it.
@@ -99,12 +87,24 @@ export function HostEventsPage() {
   if (failure) return <ErrorState {...failure} onRetry={failure.retryable ? () => void load() : undefined} />;
   if (!session) return <LoadingState label="Loading your events" />;
 
+  const normalizedSearch = eventSearch.trim().toLocaleLowerCase('en-US');
+  const visibleEvents = session.events
+    .map((event, loadedIndex) => ({ event, loadedIndex }))
+    .filter(({ event }) => event.name.toLocaleLowerCase('en-US').includes(normalizedSearch))
+    .sort((left, right) => {
+      const byDate = left.event.eventDate.localeCompare(right.event.eventDate);
+      if (byDate !== 0) return eventSort === 'newest' ? -byDate : byDate;
+      return left.loadedIndex - right.loadedIndex;
+    })
+    .map(({ event }) => event);
+
   return <div className="public-shell">
     <PageHeader action={<button type="button" className="text-link" onClick={signOut} disabled={busy}>Sign out</button>} />
     <main className="host-layout">
       <section className="host-panel">
         <p className="section-label">{session.account.email}</p>
         <h1>Your events</h1>
+        <Link className="button button--primary" to="/create">Create event</Link>
 
         {actionError && <p className="form-error" role="alert">{actionError}</p>}
 
@@ -127,20 +127,57 @@ export function HostEventsPage() {
           </p>
         </div>}
 
+        {session.events.length > 0 && <div className="create-form">
+          <label>
+            Search events
+            <input
+              type="search"
+              value={eventSearch}
+              onChange={(changed) => setEventSearch(changed.target.value)}
+            />
+          </label>
+          <label>
+            Sort events
+            <select
+              value={eventSort}
+              onChange={(changed) => setEventSort(changed.target.value as EventSortOrder)}
+            >
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+            </select>
+          </label>
+          <p role="status" aria-live="polite">
+            {visibleEvents.length} {visibleEvents.length === 1 ? 'event' : 'events'}
+          </p>
+        </div>}
+
         {session.events.length === 0
           ? <p>No events are saved to this account yet. Open an event’s management link and
               choose <strong>Add to my account</strong>, or <Link className="text-link" to="/create">create a new event</Link>.</p>
-          : <ul className="host-event-list">
-            {session.events.map((event) => <li key={event.id}>
-              <Link to={`/manage/event/${event.id}`}>
-                <strong>{event.name}</strong>
-                <span><CalendarDays aria-hidden="true" /> {formatDate(event.eventDate)}</span>
-                <span><Images aria-hidden="true" /> {event.storedMediaCount.toLocaleString()} photos</span>
-              </Link>
-              {/* The date that actually costs the host something if missed. */}
-              <small>Manage and export until {formatDate(event.managementAccessExpiresAt)}</small>
-            </li>)}
-          </ul>}
+          : visibleEvents.length === 0
+            ? <p>No events match your search.</p>
+            : <ul className="host-event-list">
+              {visibleEvents.map((event) => {
+                const eventDate = formatEventDate(event.eventDate);
+                const managementExpiry = formatRetentionDate(
+                  event.managementAccessExpiresAt,
+                  event.eventTimezone,
+                );
+                return <li key={event.id}>
+                  <Link to={`/manage/event/${event.id}`}>
+                    <strong>{event.name}</strong>
+                    <span><CalendarDays aria-hidden="true" /> {eventDate === null
+                      ? DATE_UNAVAILABLE
+                      : <time dateTime={event.eventDate}>{eventDate}</time>}</span>
+                    <span><Images aria-hidden="true" /> {event.storedMediaCount.toLocaleString()} photos</span>
+                  </Link>
+                  {/* The date that actually costs the host something if missed. */}
+                  <small>Manage and export until {managementExpiry === null
+                    ? TIME_UNAVAILABLE
+                    : <time dateTime={event.managementAccessExpiresAt}>{managementExpiry}</time>}</small>
+                </li>;
+              })}
+            </ul>}
       </section>
     </main>
   </div>;

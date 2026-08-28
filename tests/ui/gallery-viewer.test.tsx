@@ -91,6 +91,36 @@ function UnmountingViewerHarness({
 afterEach(() => cleanup());
 
 describe('GalleryViewer continuation', () => {
+  it('retains its modal label, focus, containment boundary, scroll lock, Escape, and return focus', async () => {
+    // Mutations caught: losing Gallery-only behavior while adopting the shared modal mechanics.
+    const origin = document.createElement('button');
+    origin.textContent = 'Open first dance';
+    document.body.append(origin);
+    origin.focus();
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+
+    render(<UnmountingViewerHarness
+      loadNextAfter={vi.fn(async () => ({ status: 'exhausted' }))}
+      onClose={onClose}
+      onPhotoChange={vi.fn()}
+    />);
+
+    const dialog = screen.getByRole('dialog', { name: 'First dance' });
+    expect(within(dialog).getByRole('button', { name: 'Close viewer' })).toHaveFocus();
+    expect(origin).toHaveAttribute('inert');
+    expect(document.body.style.overflow).toBe('hidden');
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(origin).not.toHaveAttribute('inert');
+    expect(origin).toHaveFocus();
+    expect(document.body.style.overflow).toBe('');
+    origin.remove();
+  });
+
   it('requests the next page from the last loaded photo while keeping that photo visible', async () => {
     // Mutation caught: disabling the last-row Next control when hasMore is true.
     const continuation = deferred<ViewerContinuationOutcome>();

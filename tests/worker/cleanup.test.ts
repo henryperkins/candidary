@@ -32,6 +32,7 @@ import {
 } from '../../worker/workflows/cleanup';
 import type { CoverWorkflowLookup } from '../../worker/workflows/cover-platform';
 import { restartCoverPublication } from '../../worker/services/event-cover-publication';
+import type { UploadAuthority } from '../../worker/services/upload-authority';
 import { finalizedMediaObjectKey } from '../../worker/storage/media-keys';
 import worker from '../../worker/index';
 import {
@@ -58,6 +59,10 @@ const ROSTER = [
 ].join('\n');
 
 type Access = Awaited<ReturnType<typeof eventAccess>>;
+
+function guestUploadAuthority(sessionId: string): UploadAuthority {
+  return { kind: 'guest', actorSessionId: sessionId, eventSessionId: sessionId };
+}
 
 // Opens a real household session so a sweep or a purge is measured against the
 // rows the product actually creates rather than hand-written fixtures.
@@ -1675,6 +1680,7 @@ describe('lifecycle cleanup', () => {
       id: crypto.randomUUID(),
       eventId: access.event.id,
       uploaderSessionId: session.session.id,
+      authority: guestUploadAuthority(session.session.id),
       objectKey: `events/${access.event.id}/uploads/suppression-wins`,
       originalFilename: 'suppression.png',
       mimeType: 'image/png',
@@ -2191,6 +2197,7 @@ describe('lifecycle cleanup', () => {
         id: mediaId,
         eventId: access.event.id,
         uploaderSessionId: sessionId,
+        authority: guestUploadAuthority(sessionId),
         objectKey: `events/${access.event.id}/uploads/${mediaId}`,
         originalFilename: `${mediaId}.png`,
         mimeType: 'image/png',
@@ -2250,6 +2257,7 @@ describe('lifecycle cleanup', () => {
     const media = await repository.reserve({
       id: 'ambiguous-present-ingress', eventId: access.event.id,
       uploaderSessionId: sessionId,
+      authority: guestUploadAuthority(sessionId),
       objectKey: `events/${access.event.id}/uploads/ambiguous-present-ingress`,
       originalFilename: 'ambiguous.png', mimeType: 'image/png',
       declaredByteSize: bytes.byteLength, guestName: 'Avery', caption: null,
@@ -2310,6 +2318,7 @@ describe('lifecycle cleanup', () => {
     const media = await repository.reserve({
       id: 'copy-only-present-ingress', eventId: access.event.id,
       uploaderSessionId: sessionId,
+      authority: guestUploadAuthority(sessionId),
       objectKey: `events/${access.event.id}/uploads/copy-only-present-ingress`,
       originalFilename: 'copy-only.png', mimeType: 'image/png',
       declaredByteSize: bytes.byteLength, guestName: 'Avery', caption: null,
@@ -2367,6 +2376,7 @@ describe('lifecycle cleanup', () => {
     const media = await repository.reserve({
       id: 'ambiguous-inactive-ingress', eventId: access.event.id,
       uploaderSessionId: sessionId,
+      authority: guestUploadAuthority(sessionId),
       objectKey: `events/${access.event.id}/uploads/ambiguous-inactive-ingress`,
       originalFilename: 'ambiguous.png', mimeType: 'image/png',
       declaredByteSize: png().byteLength, guestName: 'Avery', caption: null,
@@ -2413,8 +2423,11 @@ describe('lifecycle cleanup', () => {
     await testEnv.DB.prepare('UPDATE events SET photos_open_from = ? WHERE id = ?')
       .bind('2026-07-21T11:00:00.000Z', access.event.id).run();
     const repository = new MediaRepository(testEnv.DB);
+    const sessionId = (await new AuthService(testEnv)
+      .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id;
     const media = await repository.reserve({
-      id: crypto.randomUUID(), eventId: access.event.id, uploaderSessionId: (await new AuthService(testEnv).resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id,
+      id: crypto.randomUUID(), eventId: access.event.id, uploaderSessionId: sessionId,
+      authority: guestUploadAuthority(sessionId),
       objectKey: `events/${access.event.id}/media/stale`, originalFilename: 'stale.png', mimeType: 'image/png',
       declaredByteSize: 64, guestName: 'Avery', caption: null, idempotencyKey: 'stale',
       reservationExpiresAt: '2026-07-21T12:00:00.000Z', createdAt: '2026-07-21T11:45:00.000Z',
@@ -2433,11 +2446,13 @@ describe('lifecycle cleanup', () => {
     await testEnv.DB.prepare('UPDATE events SET photos_open_from = ? WHERE id = ?')
       .bind('2026-07-21T11:00:00.000Z', access.event.id).run();
     const repository = new MediaRepository(testEnv.DB);
+    const sessionId = (await new AuthService(testEnv)
+      .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id;
     const media = await repository.reserve({
       id: crypto.randomUUID(),
       eventId: access.event.id,
-      uploaderSessionId: (await new AuthService(testEnv)
-        .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id,
+      uploaderSessionId: sessionId,
+      authority: guestUploadAuthority(sessionId),
       objectKey: `events/${access.event.id}/uploads/expiry-finalize-race`,
       originalFilename: 'race.png', mimeType: 'image/png', declaredByteSize: 64,
       guestName: 'Avery', caption: null, idempotencyKey: 'expiry-finalize-race',
@@ -2481,11 +2496,13 @@ describe('lifecycle cleanup', () => {
     await testEnv.DB.prepare('UPDATE events SET photos_open_from = ? WHERE id = ?')
       .bind('2026-07-21T11:00:00.000Z', access.event.id).run();
     const repository = new MediaRepository(testEnv.DB);
+    const sessionId = (await new AuthService(testEnv)
+      .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id;
     const media = await repository.reserve({
       id: crypto.randomUUID(),
       eventId: access.event.id,
-      uploaderSessionId: (await new AuthService(testEnv)
-        .resolve(access.guest.cookie.split('=')[1]!.split(';')[0])).session.id,
+      uploaderSessionId: sessionId,
+      authority: guestUploadAuthority(sessionId),
       objectKey: `events/${access.event.id}/uploads/candidate-a-expired`,
       originalFilename: 'held.png', mimeType: 'image/png', declaredByteSize: 64,
       guestName: 'Avery', caption: null, idempotencyKey: 'candidate-a-expired',

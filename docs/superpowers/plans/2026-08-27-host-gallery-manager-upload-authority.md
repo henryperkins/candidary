@@ -1,10 +1,10 @@
 # Host Gallery Manager Upload Authority Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use test-driven development, preserve all existing Slice 1–4 work, and do not commit unless the user asks.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan one task at a time. Use strict focused RED, minimal implementation, focused GREEN, then a fresh implementer handoff and independent review for every task. Do not commit this task or checkpoint: all five Slice 5 plans receive exactly one final commit only after every task and final Slice review gate passes.
 
 **Goal:** Let an authorized host add photos through the existing canonical upload pipeline, make Pause mean *guest uploads only*, and give the Album a durable provenance and generation contract — all on the server, without a second upload implementation.
 
-**Architecture:** `0021_manager_upload_and_album_era.sql` is the one additive migration this slice may create; it carries both the server-only upload actor and the Album era columns because a migration is immutable once written and both halves must reach D1 together. `UploadService` gains a server-created `UploadAuthority` discriminant so guest schedule enforcement and Manager allowance are two branches of one pipeline rather than two pipelines. `ManagerUploadActorService` resolves a role-aware `uploader_session_id` and never mints a cookie. One `authorityLivenessSql`/`authorityLivenessBindings` pair is the single re-proof of that authority, `AND`-ed into reserve, idempotent refresh, ingress claim, and commit alongside the intake predicate, and the two ingress methods answer with a tagged outcome so a lost credential refuses as `RESOURCE_FORBIDDEN` rather than masquerading as a retryable conflict. Four Manager routes mirror the guest reserve/content/finalize/cancel paths and drive the one `receiveMediaUpload`, the one `retireMediaObjects`, the one `MediaRepository.reserve*`, and every existing promotion fence — those gain the authority as a parameter and are not forked. Because the guest pause and schedule are encoded in the repository's own SQL, the authority also selects the intake predicate; a route-level guard alone would leave a paused Manager upload writing bytes it could never commit.
+**Architecture:** `0021_manager_upload_and_album_era.sql` is the one additive migration this slice may create; it carries both the server-only upload actor and the Album era columns so both halves are reviewed in the one Slice change set and reach D1 together. It remains editable and reviewable until the single final Slice commit/deployment, after which normal migration immutability applies. `UploadService` gains a server-created `UploadAuthority` discriminant so guest schedule enforcement and Manager allowance are two branches of one pipeline rather than two pipelines. `ManagerUploadActorService` resolves a role-aware `uploader_session_id` and never mints a cookie. One `authorityLivenessSql`/`authorityLivenessBindings` pair is the single re-proof of that authority, `AND`-ed into reserve, idempotent refresh, ingress claim, and commit alongside the intake predicate, and the two ingress methods answer with a tagged outcome so a lost credential refuses as `RESOURCE_FORBIDDEN` rather than masquerading as a retryable conflict. Four Manager routes mirror the guest reserve/content/finalize/cancel paths and drive the one `receiveMediaUpload`, the one `retireMediaObjects`, the one `MediaRepository.reserve*`, and every existing promotion fence — those gain the authority as a parameter and are not forked. Because the guest pause and schedule are encoded in the repository's own SQL, the authority also selects the intake predicate; a route-level guard alone would leave a paused Manager upload writing bytes it could never commit.
 
 **Tech Stack:** TypeScript, Hono on Cloudflare Workers, D1, R2, Zod, Vitest with `vitest-pool-workers`.
 
@@ -13,7 +13,11 @@
 ## Global constraints and preflight rulings
 
 - Work only in `/home/henry/candidary/.worktrees/gallery-roadmap-remediation` on branch `codex/gallery-roadmap-remediation`. Do not push, deploy, merge, migrate a remote database, mutate a pull request, or change secrets.
-- **Compatibility-target ruling.** The slice specification says migration 0021 must be safe "while the 0018 Worker is still serving." That sentence was written against the pre-Slice-1 baseline. Slices 1 and 3 have since shipped `0019_media_recovery.sql` and `0020_export_progress.sql`, so the real migration-first predecessor for this release is the **0020 Worker**. Read every "0018 Worker" sentence in the slice spec as "the currently deployed predecessor Worker," and prove compatibility against a populated 0020 fixture. Record this ruling in the checkpoint report; do not silently reinterpret any other spec sentence.
+- Preserve unrelated and untracked files plus all authored/custom content. Keep Slice 6 findings C-34, C-38, and C-62 out of scope.
+- Every task is independently testable and receives a fresh implementer handoff plus an independent task review. Record focused RED/GREEN evidence; resolve every P1/P2 before advancing.
+- Do not run repository-wide verification, full builds, full lint/typecheck, full E2E, `npm test`, or `ci:migrations`. Use only the named test files/spec filters, changed-file lint where applicable, the matrix parser, and `git diff --check`.
+- Do not make task-level or checkpoint commits. The release owner creates exactly one final Slice 5 commit only after all five plans, focused gates, and final independent Slice review are complete.
+- **Compatibility target.** The canonical Slice design names the currently deployed **0020 Worker** as 0021's migration-first predecessor. Prove compatibility against a populated 0020 fixture; no plan-local reinterpretation is permitted.
 - Existing migrations `0001`–`0020` are immutable. This slice creates exactly `0021_manager_upload_and_album_era.sql`. It must pass fresh-D1 and populated-0020 upgrade tests.
 - The migration writes **both** halves — upload actor and Album era — in one file. The Album-era half is consumed by a later checkpoint (`2026-08-27-host-gallery-album-era-reconciliation.md`); authoring it here is deliberate and is not scope creep. Its triggers must be correct and tested here even though no route reads them yet.
 - Do not add a second upload pipeline, a Manager-only queue, a presigned URL, or a new R2 write path. `receiveMediaUpload`, `retireMediaObjects`, `assertWorkerIngressEnabled`, `MediaRepository.reserve`/`reserveBatch`/`refreshIdempotent`, and the tombstone/promotion fences are reuse boundaries. **A reuse boundary means one implementation, not a frozen signature.** `receiveMediaUpload` and the repository statements it drives take the authority as a new parameter in Task 4; what may not be duplicated is the buffering, validation, create-only write, re-read, and commit sequence itself.
@@ -32,7 +36,7 @@
   | --- | --- |
   | `guest` | the `event_sessions` row for `eventSessionId` — same event, `role = 'guest'`, `revoked_at IS NULL`, `expires_at >` now — and its `event_access_tokens` row unrevoked and unexpired |
   | `manager-link` | the same, with `role = 'manager'` and `manager_upload_account_id IS NULL`, plus its access token unrevoked and unexpired |
-  | `manager-account` | the `host_sessions` row for `hostSessionId` — `account_id = accountId`, `revoked_at IS NULL`, `expires_at >` now, `auth_version` equal to the account's current `auth_version` — plus `host_accounts.disabled_at IS NULL` and an `event_hosts` row for `(eventId, accountId)` |
+  | `manager-account` | the `host_sessions` row for `hostSessionId` — `account_id = accountId`, `revoked_at IS NULL`, `expires_at >` now, `auth_version` equal to the account's current `auth_version` — plus `host_accounts.disabled_at IS NULL`, an owner/cohost `event_hosts` row for `(eventId, accountId)`, and the actor `event_sessions` row for `actorSessionId` — same event/account, `role = 'manager'`, `manager_upload_account_id = accountId`, non-revoked/non-expired, with `access_token_id` equal to the event's current unrevoked/unexpired Manager token |
 
   The `host_sessions.auth_version = host_accounts.auth_version` comparison is not decoration: a password reset or a sign-out-everywhere bumps the account version and is the *only* signal that distinguishes a still-unexpired session row from a credential the host has already invalidated. Omitting it makes "account disablement loses the write" true and "credential revocation loses the write" false.
 
@@ -45,8 +49,8 @@
 - Manager upload responses use the Slice 1 `UploadMediaView` allowlist and batch envelopes. No route may return a session ID, object key, bucket generation, access-token ID, reservation internals, or account identity.
 - The server always stores `guest_name = 'Host'` for a Manager upload. The batch body accepts no guest name, account ID, actor ID, event ID, upload URL, or object key.
 - Manager actors deliberately ignore the guest schedule and the guest pause, but still require a live event management window, Worker ingress, reservation/media/storage caps, and the full type/size/signature/dimension validation.
-- Every behavior change follows RED → GREEN → REFACTOR. The test must fail for the intended missing behavior before production code changes.
-- Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-manager-upload-authority/`, then take an independent spec and code review. Fix every P1/P2 before advancing.
+- Every behavior change follows RED → minimal GREEN → scoped refactor. The test must fail for the intended missing behavior before production code changes.
+- Record RED/GREEN evidence and exact files in `.superpowers/sdd/2026-08-27-host-gallery-manager-upload-authority/`; the task review checkpoint records the fresh implementer and independent reviewer outcome without committing.
 
 ## Checkpoint boundary
 
@@ -74,6 +78,8 @@ ALTER TABLE media ADD COLUMN album_pick_version INTEGER
   CHECK (album_pick_version IS NULL OR album_pick_version = 1);
 ALTER TABLE events ADD COLUMN album_pick_generation INTEGER NOT NULL DEFAULT 0
   CHECK (album_pick_generation >= 0);
+ALTER TABLE events ADD COLUMN manager_link_revision INTEGER NOT NULL DEFAULT 0
+  CHECK (manager_link_revision >= 0);
 ```
 
 - [ ] **Step 1: Write the failing migration suite**
@@ -81,13 +87,16 @@ ALTER TABLE events ADD COLUMN album_pick_generation INTEGER NOT NULL DEFAULT 0
 Create `tests/worker/migration-0021.test.ts` covering, against `TEST_MIGRATIONS`:
 
 *Actor half*
+- duplicate live Manager tokens are normalized deterministically: retain newest by `(created_at DESC, id DESC)`, revoke older live tokens and their live sessions, then prove the partial unique index rejects another live Manager token for the same event;
+- the retained-token tie-break uses `id DESC` when `created_at` is identical;
 - the partial unique index rejects a second **live** actor row for the same `(event_id, manager_upload_account_id)` and accepts one after the first is revoked;
 - an insert or update setting `manager_upload_account_id` non-null with `role = 'guest'` fails;
 - the same with `can_claim_owner = 1` fails;
 - a null `manager_upload_account_id` row is unaffected by both triggers;
 - the foreign key to `host_accounts(id)` is enforced.
+- deleting an `event_hosts` membership revokes that account's live Manager upload actor in the same database mutation; delete then re-add leaves the old actor revoked and permits one fresh actor identity.
 
-*Album era half*
+*Album era and rotation-revision half*
 - backfill stamps `album_pick_version = 1` on exactly those `media` rows with non-null `favorited_at` whose event has a **saved** album (`event_albums.saved_at IS NOT NULL`), and leaves unsaved-album favorites null;
 - a legacy-shaped write of `favorited_at` from null to an instant — the predecessor Worker's exact statement, touching no other column — **commits** and stamps version `1`;
 - a legacy-shaped write from an instant to null **commits** and clears the version;
@@ -98,8 +107,16 @@ Create `tests/worker/migration-0021.test.ts` covering, against `TEST_MIGRATIONS`
 - cleanup of an **already-trashed** picked row does **not** increment, because it was already ineligible;
 - a stored/deleted transition on an unpicked row does not increment;
 - two events' generations move independently.
+- `manager_link_revision` is `0` for fresh and upgraded events, is non-negative, and is not exposed as a token ID.
 
 Use identical timestamps across fixture rows so no assertion can pass by clock ordering.
+
+*Populated-0020 and migration-first compatibility half*
+- build the fixture by applying `0001`–`0020`, then insert guest media, favorites, saved and unsaved Albums, trashed rows, export jobs, and duplicate live Manager tokens with distinct and identical creation instants before applying 0021;
+- after 0021, assert the provenance backfill, deterministic token/session revocation, unchanged unrelated rows, and both new event revisions at `0`;
+- issue the old 0020 Worker's exact live-Manager-token insert after the schema upgrade and assert the new partial unique index rejects it.
+
+Put these rows under the exact describe name `populated 0020 compatibility`, with test names containing `duplicate live Manager tokens` and `old 0020 Worker` respectively. They are part of the initial failing suite and must fail before the migration is written; do not append them after a first GREEN.
 
 - [ ] **Step 2: Run the new suite and verify RED**
 
@@ -111,10 +128,12 @@ Expected: FAIL because `migrations/0021_manager_upload_and_album_era.sql` does n
 
 - [ ] **Step 3: Write the migration**
 
-Write the three `ALTER TABLE` statements above, then:
+Write the four `ALTER TABLE` statements above, then:
 
+- normalize live Manager tokens with a ranked update retaining `(created_at DESC, id DESC)`, revoke the older tokens and their live `event_sessions`, then create `CREATE UNIQUE INDEX event_access_tokens_one_live_manager ON event_access_tokens(event_id) WHERE role = 'manager' AND revoked_at IS NULL;`;
 - `CREATE UNIQUE INDEX event_sessions_manager_upload_actor ON event_sessions (event_id, manager_upload_account_id) WHERE manager_upload_account_id IS NOT NULL AND revoked_at IS NULL;`
 - `BEFORE INSERT` and `BEFORE UPDATE` triggers on `event_sessions` that `RAISE(ABORT, ...)` when `NEW.manager_upload_account_id IS NOT NULL AND (NEW.role <> 'manager' OR NEW.can_claim_owner <> 0)`;
+- an `AFTER DELETE ON event_hosts` trigger that revokes the matching live account actor, so every direct or future membership-deletion path has the same invariant;
 - one backfill `UPDATE media SET album_pick_version = 1 WHERE favorited_at IS NOT NULL AND event_id IN (SELECT event_id FROM event_albums WHERE saved_at IS NOT NULL)`;
 - `AFTER UPDATE OF favorited_at ON media` normalization triggers for the two legacy transitions, each `WHEN` fenced on the exact old/new pair so a compound write does not fire twice;
 - a `BEFORE UPDATE ON media` guard that aborts when the resulting `(favorited_at, album_pick_version)` pair disagrees — a non-null stamp with a null version, or a null stamp with a non-null version — subject to the trigger-ordering ruling below;
@@ -138,9 +157,7 @@ WHEN ((NEW.favorited_at IS NOT NULL AND NEW.album_pick_version IS NULL)
 BEGIN SELECT RAISE(ABORT, 'media.album_pick_version disagrees with media.favorited_at'); END;
 ```
 
-The carve-outs are transition-shaped, not column-shaped: each requires the *old* value to prove the row is mid-normalization, so a direct version-only write — where `favorited_at` does not move — still aborts. The normalizers' own writes re-enter the guard with a consistent pair and pass it on the ordinary branch, so no recursion fence is needed. Do not widen either carve-out to a bare `NEW`-only condition; that would let an arbitrary inconsistent write through.
-
-Verify the ordering directly against `sqlite3` before writing the migration, not only through the Vitest suite: a single `.sql` script that creates the table, both normalizers, and the guard, then runs `UPDATE media SET favorited_at = ?`, must exit zero and leave `album_pick_version = 1`. That probe takes seconds and localizes the failure to the trigger, where the suite would only report a migration that does not apply.
+The carve-outs are transition-shaped, not column-shaped: each requires the *old* value to prove the row is mid-normalization, so a direct version-only write — where `favorited_at` does not move — still aborts. The normalizers' own writes re-enter the guard with a consistent pair and pass it on the ordinary branch, so no recursion fence is needed. Do not widen either carve-out to a bare `NEW`-only condition; that would let an arbitrary inconsistent write through. Keep the predecessor-shaped pick/unpick cases as named rows in `tests/worker/migration-0021.test.ts`, so Step 4's exact focused command proves the trigger ordering and committed end state.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -150,41 +167,57 @@ npx vitest run --config vitest.worker.config.ts tests/worker/migration-0021.test
 
 Expected: PASS.
 
-- [ ] **Step 5: Prove upgrade from a populated 0020 database**
+- [ ] **Step 5: Re-run the migration-first compatibility focus**
 
-Extend the suite with a fixture that applies `0001`–`0020`, writes guest media, favorites, a saved album, an unsaved album, trashed rows, and export jobs, and only then applies `0021`. Assert the backfill result, that no pre-existing row changed except the intended version stamps, and that `album_pick_generation` starts at `0` for every event.
+```bash
+npx vitest run --config vitest.worker.config.ts tests/worker/migration-0021.test.ts -t '(populated 0020|old 0020 Worker|duplicate live Manager tokens)'
+```
+
+Expected: PASS. This is closing evidence for the compatibility rows that were already RED in Step 2, not the point where those tests are first written.
 
 - [ ] **Step 6: Extend fresh-D1 verification**
 
-Update `scripts/verify-fresh-d1.ts` and `tests/unit/verify-fresh-d1.test.ts` for the new expected final migration and post-`0021` schema fingerprint.
+First update only `tests/unit/verify-fresh-d1.test.ts` with the new expected final migration and post-`0021` schema fingerprint, then run:
 
 ```bash
-npm run verify:fresh-d1
 npx vitest run --config vitest.config.ts tests/unit/verify-fresh-d1.test.ts
 ```
 
-Expected: both exit zero.
+Expected: FAIL against the old verifier expectation. Then update `scripts/verify-fresh-d1.ts` minimally and rerun the same command.
 
-- [ ] **Step 7: Commit the schema**
+Expected GREEN: exit zero. Do not run the repository-wide migration gate.
 
-```bash
-git add migrations/0021_manager_upload_and_album_era.sql tests/worker/migration-0021.test.ts scripts/verify-fresh-d1.ts tests/unit/verify-fresh-d1.test.ts
-git commit -m "feat: add the manager upload actor and album era schema"
-```
+- [ ] **Step 7: Task review checkpoint**
+
+Record the focused RED/GREEN outputs and migration compatibility fixture in the task evidence directory. Hand the uncommitted diff to a fresh implementer and an independent reviewer; resolve every P1/P2 before Task 2. Do not stage or commit.
 
 ---
 
 ### Task 2: Actor-aware session storage that cannot authorize
 
 **Files:**
+- Create: `worker/services/upload-authority.ts`
 - Modify: `worker/db/types.ts`
 - Modify: `worker/db/sessions.ts`
 - Modify: `worker/auth/service.ts`
 - Modify: `tests/worker/auth-api.test.ts`
-- Modify: `tests/worker/repositories.test.ts`
 
 **Interfaces:**
-- Produces:
+- Produces the neutral authority contract before `ManagerUploadActorService` or `UploadService` consumes it:
+
+```ts
+export type UploadAuthority =
+  | { kind: 'guest'; actorSessionId: string; eventSessionId: string }
+  | { kind: 'manager-link'; actorSessionId: string; eventSessionId: string }
+  | {
+      kind: 'manager-account';
+      actorSessionId: string;
+      hostSessionId: string;
+      accountId: string;
+    };
+```
+
+The module contains the type only and imports neither actor nor upload service. It also produces:
 
 ```ts
 export interface SessionRecord {
@@ -193,10 +226,6 @@ export interface SessionRecord {
   managerUploadAccountId: string | null;
 }
 ```
-
-- `SessionsRepository.createManagerUploadActor(input)` inserts an actor row with random discarded-source digests, selecting its `access_token_id` from the event's active Manager token in the same statement. It returns `null` when no active token existed, which is the rotation-race signal Task 3's ruling handles.
-- `SessionsRepository.getLiveManagerUploadActor(eventId, accountId)` returns the one live actor or null.
-- `SessionsRepository.revokeManagerUploadActors(eventId, accountId | null, revokedAt)` revokes by account or by event.
 
 - [ ] **Step 1: Write the failing rejection test**
 
@@ -210,24 +239,21 @@ npx vitest run --config vitest.worker.config.ts tests/worker/auth-api.test.ts -t
 
 Expected: FAIL — the actor row currently resolves as an ordinary manager session.
 
-- [ ] **Step 3: Implement the field and the rejection**
+- [ ] **Step 3: Define the neutral authority type, then implement the field and rejection**
 
-Add `manager_upload_account_id` to every `event_sessions` column list and to `mapSession`. In `AuthService.resolve`/`resolveEventSession`, reject a row whose `managerUploadAccountId !== null` **before** the digest comparison. Add the three repository methods; `createManagerUploadActor` generates two random secrets, digests them, and lets the plaintext go out of scope without returning it.
+Create `worker/services/upload-authority.ts` with the exact union above before importing it anywhere. Add `manager_upload_account_id` to every `event_sessions` column list and to `mapSession`. In `AuthService.resolve`/`resolveEventSession`, reject a row whose `managerUploadAccountId !== null` **before** the digest comparison. Do not add an actor-creation repository API in this task; Task 3 introduces it together with the atomic authorization statement it requires.
 
 - [ ] **Step 4: Verify GREEN and prove no secret leaves the service**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/auth-api.test.ts tests/worker/repositories.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/auth-api.test.ts
 ```
 
-Expected: PASS. Add a repository assertion that `createManagerUploadActor` returns a record with no secret-bearing field.
+Expected: PASS. The neutral type exists before either service consumes it, and browser resolution refuses a matching actor digest.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add worker/db/types.ts worker/db/sessions.ts worker/auth/service.ts tests/worker/auth-api.test.ts tests/worker/repositories.test.ts
-git commit -m "feat: store a server-only manager upload actor"
-```
+Record the focused evidence, then obtain fresh-implementer and independent review of the neutral type boundary, browser-resolution refusal, and secret non-disclosure. Resolve P1/P2; do not stage or commit.
 
 ---
 
@@ -236,7 +262,8 @@ git commit -m "feat: store a server-only manager upload actor"
 **Files:**
 - Create: `worker/services/manager-upload-actor.ts`
 - Create: `tests/worker/manager-upload-actor.test.ts`
-- Modify: `worker/db/sessions.ts` *(the guarded token-selecting insert behind `createManagerUploadActor`)*
+- Modify: `worker/db/sessions.ts`
+- Modify: `tests/worker/repositories.test.ts`
 
 **Interfaces:**
 - Produces:
@@ -251,22 +278,74 @@ export class ManagerUploadActorService {
 }
 ```
 
-**Rotation-race ruling.** "Carries the event's current Manager access-token FK" cannot be satisfied by reading the token and then inserting. Task 6 rotates the token and rebinds only the actors its own batch can see, so the interleaving *read active token → rotation commits → insert actor* produces a live actor bound to the token rotation just revoked. That row is not merely stale: the partial unique index from Task 1 is on `(event_id, manager_upload_account_id) WHERE manager_upload_account_id IS NOT NULL AND revoked_at IS NULL`, so the stale row occupies the only live slot and blocks the correct replacement from ever being created. The account's uploads stay broken until something revokes it, and nothing does.
+Consumes `UploadAuthority` from `worker/services/upload-authority.ts`; this task does not redeclare it.
 
-The insert is therefore atomic with the token selection — one statement, no read-then-write:
+It introduces the repository boundary only together with the guarded statement:
+
+```ts
+export interface CreateManagerUploadActorRecord {
+  id: string;
+  secretDigest: string;
+  csrfDigest: string;
+  hostSessionId: string;
+  accountId: string;
+  eventId: string;
+  createdAt: string;
+  nowIso: string;
+}
+
+export interface ManagerUploadActorRecord {
+  id: string;
+  eventId: string;
+  accessTokenId: string;
+  accountId: string;
+  expiresAt: string;
+}
+
+SessionsRepository.createManagerUploadActor(
+  input: CreateManagerUploadActorRecord,
+): Promise<ManagerUploadActorRecord | null>;
+
+SessionsRepository.getLiveManagerUploadActor(
+  eventId: string,
+  accountId: string,
+  nowIso: string,
+): Promise<ManagerUploadActorRecord | null>;
+
+SessionsRepository.revokeManagerUploadActors(
+  eventId: string,
+  accountId: string | null,
+  revokedAt: string,
+): Promise<number>;
+```
+
+`createManagerUploadActor` returns `null` when any atomic proof fails. `getLiveManagerUploadActor` refuses revoked/expired actors and actors not bound to the event's current live Manager token. The narrow actor record intentionally excludes both plaintext and digest credential fields. The service creates random actor secret/CSRF source values, passes only their digests, and lets the plaintext go out of scope; neither repository nor service result exposes a credential-bearing field.
+
+**Atomic-authorization and rotation-race ruling.** "Carries the event's current Manager access-token FK" cannot be satisfied by reading the token and then inserting. Nor may actor creation rely on a separate earlier `requireManager`: the host session can be revoked, its auth version bumped, the account disabled, membership removed, the event deleted/expired, or the token rotated before the insert. The insert is the authorization proof and identity creation together.
+
+The insert is one statement, no read-then-write. It joins the exact `host_sessions.id = auth.sessionId`, `host_sessions.account_id = auth.accountId`, current `host_accounts.auth_version`, active account, current owner/cohost `event_hosts` row, live event management window, and the unique live Manager token:
 
 ```sql
 INSERT INTO event_sessions (
   id, secret_digest, csrf_digest, event_id, access_token_id, role,
   can_claim_owner, manager_upload_account_id, expires_at, created_at
 )
-SELECT ?, ?, ?, ?, t.id, 'manager', 0, ?, ?, ?
-  FROM event_access_tokens AS t
- WHERE t.event_id = ? AND t.role = 'manager'
+SELECT ?, ?, ?, e.id, t.id, 'manager', 0, a.id,
+       e.management_access_expires_at, ?
+  FROM host_sessions AS hs
+  JOIN host_accounts AS a ON a.id = hs.account_id
+  JOIN event_hosts AS eh ON eh.account_id = a.id
+  JOIN events AS e ON e.id = eh.event_id
+  JOIN event_access_tokens AS t ON t.event_id = e.id AND t.role = 'manager'
+ WHERE hs.id = ? AND hs.account_id = ?
+   AND hs.revoked_at IS NULL AND hs.expires_at > ?
+   AND hs.auth_version = a.auth_version AND a.disabled_at IS NULL
+   AND eh.event_id = ? AND eh.role IN ('owner', 'cohost')
+   AND e.deleted_at IS NULL AND e.management_access_expires_at > ?
    AND t.revoked_at IS NULL AND t.expires_at > ?;
 ```
 
-Zero rows inserted means there was no active Manager token at that instant — a rotation is in flight, or the management window closed. Re-read and retry a bounded number of times; if the re-read finds a live actor, return it, and if it finds neither actor nor active token, raise the existing lifecycle refusal rather than inventing a new code. The `SELECT` and the uniqueness check are evaluated in the same statement, so the loser of a genuine two-caller race fails the index rather than committing a second identity, and its retry finds the winner.
+Zero rows inserted means one of the exact proofs failed. Re-resolve through the existing authorization/lifecycle classifier; do not guess "rotation" from zero changes. If authorization remains live, re-read the actor and retry only the bounded unique-index/token race. If the proof remains false, raise the existing session/account/role/lifecycle refusal and insert nothing. The `SELECT` and uniqueness checks are evaluated in the same statement, so the loser of a genuine two-caller race reuses the winner.
 
 - [ ] **Step 1: Write the failing service suite**
 
@@ -280,31 +359,31 @@ Cover:
 - **ensure versus rotation.** Drive the interleaving explicitly: read the active token, run `LinkService.rotateManagementLink` to completion, then let the insert proceed. Assert that no live actor is bound to the revoked predecessor, that the actor the service finally returns is bound to the **replacement** token, and that a reservation made through it then commits. This is the row a read-then-write implementation fails, and it must exist before the service does;
 - the mirror case: rotation lands with no live actor at all, and a first `ensureForReservation` afterwards binds to the replacement on its first attempt;
 - with **no** active Manager token — the window closed — `ensureForReservation` inserts nothing and raises the existing lifecycle refusal.
+- revoke the host session, bump account `auth_version`, disable the account, remove membership, delete the event, or expire the event after `requireManager` but before the insert; each case inserts nothing and returns its existing refusal;
+- delete membership after an actor and reservation exist: the migration trigger revokes the actor, every later phase refuses the old authority, and remove-then-readd creates a fresh actor ID whose new reservation cannot resume the old row.
+- repository results contain no secret-bearing field, and `getLiveManagerUploadActor` excludes revoked and expired rows.
 
 - [ ] **Step 2: Run and verify RED**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/manager-upload-actor.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/manager-upload-actor.test.ts tests/worker/repositories.test.ts
 ```
 
 Expected: FAIL — the module does not exist.
 
 - [ ] **Step 3: Implement the service**
 
-Membership and lifecycle are already checked by `requireManager` before the service is called; the service must not re-derive authorization, only identity. Create through the guarded `INSERT … SELECT` above. On unique-index conflict, re-read and return the winner rather than throwing; on a zero-row insert, re-read and retry under the rotation-race ruling.
+Pass the exact `ManagerAuth.sessionId`, `accountId`, and event ID into the guarded `INSERT … SELECT` above. `requireManager` supplies candidate inputs, not a durable authorization fact; the statement proves every fact again. Generate the random actor credentials in the service, pass only their digests to the repository, and return only `UploadAuthority`. On unique-index conflict, re-read and return the winner only if it is still live under the same proofs. On zero rows, re-resolve the existing refusal and retry only when authorization is still live and the current-token race is the sole missing fact.
 
 - [ ] **Step 4: Verify GREEN**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/worker/manager-upload-actor.test.ts
+npx vitest run --config vitest.worker.config.ts tests/worker/manager-upload-actor.test.ts tests/worker/repositories.test.ts
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add worker/services/manager-upload-actor.ts worker/db/sessions.ts tests/worker/manager-upload-actor.test.ts
-git commit -m "feat: resolve a role-aware manager upload actor"
-```
+Record the atomic authorization and removal-race evidence. A fresh implementer and independent reviewer must confirm the statement re-proves every named fact before Task 4. Resolve P1/P2; do not stage or commit.
 
 ---
 
@@ -312,22 +391,40 @@ git commit -m "feat: resolve a role-aware manager upload actor"
 
 **Files:**
 - Modify: `shared/errors.ts`
+- Create: `worker/http/upload-schemas.ts`
 - Modify: `worker/services/uploads.ts`
 - Modify: `worker/db/media.ts`
 - Modify: `worker/storage/media.ts`
+- Modify: `worker/routes/uploads.ts`
 - Modify: `tests/worker/upload-api.test.ts`
 - Modify: `tests/worker/photo-intake-api.test.ts`
 - Modify: `tests/worker/repositories.test.ts`
 
 **Interfaces:**
-- Produces:
+- Consumes `UploadAuthority` from `worker/services/upload-authority.ts`; no upload or actor module redeclares the union.
+
+- Produces strict reusable schemas in `worker/http/upload-schemas.ts`:
 
 ```ts
-export type UploadAuthority =
-  | { kind: 'guest'; actorSessionId: string; eventSessionId: string }
-  | { kind: 'manager-link'; actorSessionId: string; eventSessionId: string }
-  | { kind: 'manager-account'; actorSessionId: string; hostSessionId: string; accountId: string };
+export const uploadFileSchema = z.object({
+  filename: z.string().min(1).max(255),
+  mimeType: z.string().max(100),
+  byteSize: z.number(),
+  idempotencyKey: z.string().min(1).max(128),
+  caption: z.string().max(300).nullish(),
+}).strict();
+
+export const guestUploadBatchSchema = z.object({
+  guestName: z.string().trim().min(1).max(80),
+  files: z.array(uploadFileSchema).min(1).max(UPLOAD_BATCH_SIZE),
+}).strict();
+
+export const managerUploadBatchSchema = z.object({
+  files: z.array(uploadFileSchema).min(1).max(UPLOAD_BATCH_SIZE),
+}).strict();
 ```
+
+`worker/routes/uploads.ts` imports the guest schema; Task 5 imports the Manager schema. Both outer objects and the nested file object reject unknown keys.
 
 `UploadService.initiate`/`initiateBatch` accept `(authority, event, input, now)` instead of `AuthenticatedSession`. `prepareReservation` takes the attribution separately, so no account field can become display copy.
 
@@ -366,7 +463,7 @@ claimReservationIngress(input): Promise<UploadIngressOutcome<ClaimedMediaIngress
 commitReservationIngress(input): Promise<UploadIngressOutcome<null>>;
 ```
 
-  A zero-row `UPDATE` cannot say by itself which condition failed, so on the failure path — and only there — each method runs the liveness fragment alone as a standalone `SELECT` and reports `forbidden` when it does not hold, `conflict` otherwise. That read never re-admits the write: the statement has already failed closed, and the probe only chooses which refusal to raise. Do not invert it into a pre-check that gates the write.
+  A zero-row `UPDATE` cannot say by itself which condition failed, so on the failure path — and only there — each method runs the liveness fragment alone as a standalone `SELECT` and reports `forbidden` when it does not hold, `conflict` otherwise. **Liveness has precedence:** when management expiry makes both the actor/token/session liveness fragment and the intake predicate false at the same instant, the answer is `forbidden` and the client treats it as authorization-terminal. `conflict` is reserved for a still-live authority whose row or intake state moved. That read never re-admits the write: the statement has already failed closed, and the probe only chooses which refusal to raise. Do not invert it into a pre-check that gates the write.
 
 - `receiveMediaUpload` takes the authority in place of the bare `uploaderSessionId`:
 
@@ -416,6 +513,8 @@ Replace `assertCanUpload` with an authority-driven guard: `kind: 'guest'` requir
 
 Then replace the hard-coded `PHOTO_INTAKE_OPEN_SQL` interpolation with `intakePredicateSql(authority)` at all eight sites named in the intake-predicate ruling. `ReserveMediaRecord` carries the authority so `reserve`, `reserveBatch`, `refreshIdempotent`, and `idempotentRefreshConflict` reach it without a second parameter; `claimReservationIngress` and `commitReservationIngress` take it in their input objects. `idempotentRefreshConflict` must keep deriving its refusal from the *authority's* predicate, or a paused Manager replay reports `UPLOADS_DISABLED` for a state that does not apply to it.
 
+In the same RED/GREEN cycle, move the route-local guest schemas into `worker/http/upload-schemas.ts`, make both levels strict, and update `worker/routes/uploads.ts`. Add guest API cases for an unknown outer key and unknown nested file key so strictness is proved before the Manager route consumes the schema. Update every direct service/repository/storage call to pass an explicit authority, including all direct tests; do not preserve a bare-session overload.
+
 `intakePredicateSql` lives in `worker/db/media.ts` beside `PHOTO_INTAKE_OPEN_SQL`, which stays the guest branch's value, and takes `UploadAuthority` through an `import type` so no value-level cycle forms with `worker/services/uploads.ts`. Delete no site and add none: after this step every one of the eight interpolations reads `intakePredicateSql(...)`, and the constant is referenced only by its own definition and that function.
 
 In the same pass, `AND` `authorityLivenessSql(authority)` into those same eight statements and append `authorityLivenessBindings(authority, nowIso)` to each one's parameter list. Reserve and refresh are not optional here: without them the route-authorization → reserve window stays open, and Step 4's revocation table can only ever prove the second half of the promise. Because the fragment's binding count differs by kind, build each statement's bindings by concatenating the fixed prefix, the intake instant, and the liveness list — never by editing a positional array by hand.
@@ -430,13 +529,14 @@ Cover the same window on idempotent refresh: a replay whose credential died betw
 
 `receiveMediaUpload` takes the authority and forwards it. `claimReservationIngress` and `commitReservationIngress` re-prove, in the same statement that admits the write, that the authority which reserved the row is *still* the authority now committing it, by interpolating the same `authorityLivenessSql`/`authorityLivenessBindings` pair Step 3 wired into reserve and refresh. Matching `uploader_session_id` alone is not sufficient for any kind and is actively misleading for the account kind: the actor row deliberately outlives the browser credential that created it, so the session match says nothing at all about whether that account is still authorized.
 
-Then change what a failure *says*. Both methods return the tagged `UploadIngressOutcome` from this task's Interfaces instead of `null`/`false`, classifying a zero-row result by running the liveness fragment alone. `receiveMediaUpload` raises the generic `RESOURCE_FORBIDDEN` 403 for `forbidden` and keeps today's exact `UPLOAD_FINALIZE_CONFLICT` 409 code and message for `conflict`, at both its claim site and its commit site. Without this the whole revocation table below is unfalsifiable from the browser's side: every row would pass while the response still told the host to wait a moment and try again.
+Then change what a failure *says*. Both methods return the tagged `UploadIngressOutcome` from this task's Interfaces instead of `null`/`false`, classifying a zero-row result by running the liveness fragment alone. `receiveMediaUpload` raises the generic `RESOURCE_FORBIDDEN` 403 for `forbidden` and keeps today's exact `UPLOAD_FINALIZE_CONFLICT` 409 code and message for `conflict`, at both its claim site and its commit site. The classifier evaluates liveness first and never lets a simultaneous intake failure downgrade a dead actor to `conflict`. Without this the whole revocation table below is unfalsifiable from the browser's side: every row would pass while the response still told the host to wait a moment and try again.
 
 Cover, in `tests/worker/repositories.test.ts` and `tests/worker/upload-api.test.ts`:
 - an idempotent replay under a *different* actor for the same `(event, idempotencyKey)` does not re-enter the other actor's row;
 - **revocation during buffer, per authority kind.** Reserve, then revoke between the reserve and the content PUT, then send the bytes. Each of these loses the claim, leaves the media row `reserved`, leaves the promotion row unmoved, and returns the generic `RESOURCE_FORBIDDEN` 403 — asserted as that exact code, not merely as "not 200": an account disabled; a membership removed; the account's `auth_version` bumped by a password reset while its `host_sessions` row is still unexpired; that `host_sessions` row revoked; that `host_sessions` row expired; a management link rotated; the Manager's own event session revoked; and a guest event session signed out;
+- the account actor itself revoked or expired while the host session/account/membership remain live, and the actor still live but bound to a revoked/non-current Manager token; both lose claim and commit with `RESOURCE_FORBIDDEN` and cannot resume the old reservation;
 - every one of those revocations applied instead between a successful claim and the commit likewise loses the commit with the same 403, so no `stored` row and no counter delta appears;
-- a Manager upload whose event's `managementAccessExpiresAt` passes mid-buffer is refused by the intake predicate and reports `conflict`, not `forbidden` — the two conditions are independent and must not be collapsed into one refusal;
+- a Manager upload whose event's `managementAccessExpiresAt` passes mid-buffer makes both intake and actor/token/session liveness false; liveness wins, so claim and commit return the generic `RESOURCE_FORBIDDEN` 403. Assert that exact code and record it as authorization-terminal evidence for the dialog's local table, never as retryable `UPLOAD_FINALIZE_CONFLICT`;
 - the guest equivalent — a pause landing mid-buffer — still refuses the guest with today's `UPLOAD_FINALIZE_CONFLICT` code and message, asserted character for character;
 - a claim or commit that fails because the row genuinely moved — a competing finalize, an expired reservation — still reports `conflict` with today's wire answer, so the new 403 branch cannot swallow the existing conflict assertions;
 - an upload whose bytes committed successfully and whose credential is revoked immediately afterwards still answers 200 from the already-stored short-circuit, because a delivered photo is not retroactively unauthorized;
@@ -449,12 +549,9 @@ Cover, in `tests/worker/repositories.test.ts` and `tests/worker/upload-api.test.
 npx vitest run --config vitest.worker.config.ts tests/worker/upload-api.test.ts tests/worker/photo-intake-api.test.ts tests/worker/repositories.test.ts
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Task review checkpoint**
 
-```bash
-git add shared/errors.ts worker/services/uploads.ts worker/db/media.ts worker/storage/media.ts tests/worker/upload-api.test.ts tests/worker/photo-intake-api.test.ts tests/worker/repositories.test.ts
-git commit -m "feat: give the upload pipeline a server-created authority"
-```
+Record the focused authority, schema, guest-call-site, and ingress-race evidence. Hand the uncommitted diff to a fresh implementer and independent reviewer; resolve P1/P2 before routes consume it. Do not stage or commit.
 
 ---
 
@@ -465,7 +562,6 @@ git commit -m "feat: give the upload pipeline a server-created authority"
 - Modify: `worker/db/media.ts` *(the actor-scoped cancel transition)*
 - Modify: `tests/worker/repositories.test.ts`
 - Create: `tests/worker/manager-upload-api.test.ts`
-- Modify: `worker/http/csrf.ts` *(only if the account/link pair selection needs an explicit helper)*
 
 **Interfaces:**
 - Produces four routes, each calling `requireManager(context, { write: true })` **before** reading or buffering a body:
@@ -477,16 +573,24 @@ POST   /api/manage/events/:eventId/uploads/:mediaId/finalize
 DELETE /api/manage/events/:eventId/uploads/:mediaId
 ```
 
-Batch body: `z.object({ files: z.array(fileSchema).min(1).max(UPLOAD_BATCH_SIZE) }).strict()` — `fileSchema` reused from the guest routes, with no `guestName`. Reservation URLs point only at the Manager content path.
+Batch body: `managerUploadBatchSchema` from Task 4, with no `guestName`. Reservation URLs point only at the Manager content path.
+
+The batch route imports `managerUploadBatchSchema` from Task 4. Unknown outer keys and unknown nested file keys—including actor, account, event, upload URL, and object-key attempts—are `VALIDATION_FAILED`; no route-local permissive schema remains. Mount `privateJson` with `.use(...)` for all four Manager paths before registering any handler. Every success and error assertion checks `Cache-Control: private, no-store` and `Vary: Cookie`.
 
 - Also produces the actor-scoped cancel transition the cancel-CAS ruling requires:
 
 ```ts
+export type UploadCancelOutcome =
+  | { kind: 'canceled'; claim: MediaObjectDeletionClaim }
+  | { kind: 'already-canceled' }
+  | { kind: 'forbidden' }
+  | { kind: 'conflict' };
+
 cancelReservation(
   mediaId: string,
   authority: UploadAuthority,
   canceledAt: string,
-): Promise<UploadIngressOutcome<MediaObjectDeletionClaim>>;
+): Promise<UploadCancelOutcome>;
 ```
 
   It is a sibling of `MediaRepository.delete`, not a wrapper around it, and `delete` is not modified.
@@ -505,6 +609,8 @@ In `tests/worker/repositories.test.ts` and `tests/worker/manager-upload-api.test
 - cancel of a genuinely `reserved` row and of a genuinely `failed` row each succeed exactly once, release the reserved counters by exactly that row's declared bytes, and are idempotent on replay;
 - another actor's reserved row — a guest's, another account's, a rotated link's, another event's — is refused with `RESOURCE_FORBIDDEN` 403 and stays reserved;
 - a cancel whose own credential died between route authorization and the statement is refused with the same 403 and leaves the row reserved.
+- a lost cancel response followed by the same actor replay returns `already-canceled`; a lost CAS may run one classification-only read, but cancel is never retried against the winner;
+- the legacy `POST /manage/events/:eventId/media/:mediaId/cancel-reservation` succeeds only for a **guest-owned** `reserved`/`failed` row, returns `RESOURCE_FORBIDDEN` for a Manager-owned row, and returns conflict without changing a finalize winner.
 
 Assert on the persisted row in every case. A test that only reads the HTTP status cannot tell a refusal from a deletion that also happened to return 409.
 
@@ -524,7 +630,9 @@ Expected: FAIL — the routes do not exist.
 
 Mirror `worker/routes/uploads.ts` exactly, substituting `requireManager({ write: true })` plus `ManagerUploadActorService` for `guestForSlug`, and matching media on `uploaderSessionId === authority.actorSessionId`. The routes call the one `receiveMediaUpload` and the one `retireMediaObjects` — the same implementations the guest routes call, now passing the authority Task 4 threaded through them rather than a bare session id.
 
-`DELETE` does **not** call `MediaRepository.delete`. Per the cancel-CAS ruling it gets its own transition, `MediaRepository.cancelReservation(mediaId, authority, canceledAt)`, whose single guarded statement carries the whole restriction in its `WHERE` — the media ID, the event, `uploader_session_id = authority.actorSessionId`, `upload_state IN ('reserved', 'failed')`, `deleted_at IS NULL`, `trashed_at IS NULL`, and the authority's liveness fragment — with the reserved-counter release and the object-key inventory chained off it exactly as the existing terminal paths do. It has no re-read and no retry loop: a row that moved out from under it is a refusal, never a second attempt against the winner. It returns a tagged outcome on the same three-way shape Task 4 introduced, so the route answers `RESOURCE_FORBIDDEN` 403 for a lost or foreign authority and the existing conflict for a row that reached `stored`.
+`DELETE` does **not** call `MediaRepository.delete`. Per the cancel-CAS ruling it gets its own transition, `MediaRepository.cancelReservation(mediaId, authority, canceledAt)`, whose single guarded statement carries the whole restriction in its `WHERE` — the media ID, the event, `uploader_session_id = authority.actorSessionId`, `upload_state IN ('reserved', 'failed')`, `deleted_at IS NULL`, `trashed_at IS NULL`, and the authority's liveness fragment — with the reserved-counter release and object-key inventory chained off that winner. It returns the four-way `UploadCancelOutcome`. On a zero-row CAS, one classification-only read may distinguish already canceled, foreign/dead authority, and moved-state conflict; it may not issue a second delete.
+
+Preserve the legacy host cleanup route at its existing path. Replace its read-then-`MediaRepository.delete` flow with `cancelGuestReservationFromManager(mediaId, eventId, canceledAt)`, another one-shot CAS whose `WHERE` requires a guest-owned uploader session (`role = 'guest'`, no Manager actor), `reserved`/`failed`, same event, live row, and no trash. It is not self-cancel—this is the host cleanup tool—but it can never match a Manager-owned row or a finalize winner. Its lost-CAS classification is read-only.
 
 The content route resolves its authority with `lookupForExistingUpload` **before** buffering and passes that same object to `receiveMediaUpload`; it must not re-resolve, re-`ensure`, or downgrade to `media.uploaderSessionId` after the bytes arrive. Re-resolving after the buffer would re-admit exactly the mid-buffer revocation Task 4 exists to refuse.
 
@@ -536,34 +644,59 @@ npx vitest run --config vitest.worker.config.ts tests/worker/manager-upload-api.
 
 Expected: PASS with no guest-route behavior change, and `MediaRepository.delete` unchanged — assert that by diff, since the cancel path must not have been implemented by loosening it.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Task review checkpoint**
 
-```bash
-git add worker/routes/manage.ts worker/db/media.ts tests/worker/manager-upload-api.test.ts tests/worker/repositories.test.ts
-git commit -m "feat: accept host photos through the manager routes"
-```
+Record the route matrix, strict-schema, header, and one-shot cancel evidence. A fresh implementer and independent reviewer must confirm both cancel endpoints refuse Manager/finalize winners as applicable. Resolve P1/P2; do not stage or commit.
 
 ---
 
 ### Task 6: Atomic management-link rotation
 
 **Files:**
+- Modify: `shared/contracts.ts`
 - Modify: `worker/services/links.ts`
 - Modify: `worker/db/tokens.ts`
 - Modify: `worker/db/sessions.ts`
 - Modify: `worker/db/media.ts`
+- Modify: `worker/http/event-view.ts`
+- Modify: `worker/routes/manage.ts`
 - Modify: `tests/worker/manage-api.test.ts`
 - Modify: `tests/worker/manager-upload-api.test.ts`
+- Modify: `tests/worker/event-theme-api.test.ts`
+- Modify: `tests/e2e/event-cover-studio.spec.ts`
+- Modify: `tests/e2e/fixtures/routes.ts`
+- Modify: `tests/ui/event-settings-editor.test.tsx`
+- Modify: `tests/unit/event-settings-draft.test.ts`
+- Modify: `tests/unit/manager-event-merge.test.ts`
+- Modify: `tests/ui/manager-guestbook.test.tsx`
+- Modify: `tests/ui/manager-recovery.test.tsx`
+- Modify: `tests/ui/host-private-gallery.test.tsx`
+- Modify: `tests/ui/manager-rsvp-panel.test.tsx`
+- Modify: `tests/ui/event-appearance-editor.test.tsx`
+- Modify: `tests/ui/manager-photo-intake.test.tsx`
+- Modify: `tests/ui/album-workspace.test.tsx`
 
 **Interfaces:**
-- `LinkService.rotateManagementLink(event, now)` becomes one `DB.batch([...])` that, as a unit: **revokes the prior Manager token**; creates the replacement; revokes every session derived from the prior token; rebinds live **account** upload actors to the replacement token; terminally cancels every revoked **link** actor's `reserved`/`failed` media with exact counter deltas; and inventories those rows' object keys for typed deletion.
-- The revoke is deliberately first, and it is the batch's guarded statement, but it revokes **one named token**, not the role — see the single-winner ruling in Step 3. Every later statement keys its own guard off the stamp it wrote.
+- `EventView` gains `managerLinkRevision: number | null`: account-authorized Manager projections carry the non-negative revision; link-only projections carry `null`; no response exposes token IDs. Update `EVENT_VIEW_KEYS`, `tests/e2e/fixtures/routes.ts`, and every direct typed `EventView` fixture explicitly listed in this task. Confirm the current inventory with `rg -l ": EventView =|satisfies EventView" tests src`; any new match is added explicitly before implementation.
+- The rotation route accepts only `z.object({ expectedManagerLinkRevision: z.number().int().nonnegative() }).strict()` and calls:
+
+```ts
+LinkService.rotateManagementLink(
+  event: EventRecord,
+  expectedManagerLinkRevision: number,
+  now?: Date,
+): Promise<{ managementLink: string; managerLinkRevision: number }>;
+```
+
+- One `DB.batch([...])` compare-and-sets/increments the event revision, revokes the exact predecessor token, creates the unique replacement, revokes every session derived from the predecessor, rebinds live **account** upload actors, terminally cancels predecessor **link** actors' `reserved`/`failed` media with exact counter deltas, and inventories those rows' object keys for typed deletion.
 - Deletion claims run **after** commit through the existing tombstone cleanup. A failed R2 delete stays janitor-owned and never rolls credentials back.
 
 - [ ] **Step 1: Write the failing rotation tests**
 
-- **two concurrent rotations produce exactly one success.** Both callers read the same predecessor token, then both batches run; assert that exactly one returns a `managementLink`, that the other raises the rotation conflict without creating a token, that exactly one unrevoked Manager token exists afterwards, and that the link the winner returned is the one that resolves. Write this row first — it is the row the role-wide form passes vacuously while handing one host a dead link;
-- a rotation whose predecessor was revoked by something else between the read and the batch changes no rows and returns the conflict, leaving the other rotation's replacement live;
+- account-authorized projection carries revision `0`, link-only carries `null`, exact-key coverage includes the new key, and no response contains a token ID;
+- **two concurrent rotations with the same expected revision produce exactly one success.** Both callers observe revision `0`; exactly one returns revision `1` and a resolving link, the other conflicts without creating or revoking a token, and exactly one live Manager token remains;
+- delayed request A observed revision `0`; request B succeeds to revision `1`; A arrives afterwards and conflicts without rotating B's replacement;
+- an exact predecessor revoked by something else between revision CAS and revoke makes the batch fail closed: no replacement is inserted and no optional dependent changes;
 - an account-owned reservation survives rotation and can still finalize afterwards;
 - a link-owned reservation does **not** transfer: it is terminally canceled, and the event's media count and byte counters fall by exactly the canceled rows;
 - the old link's sessions are revoked;
@@ -590,52 +723,56 @@ Expected: FAIL — rotation is currently two sequential statements with no sessi
 
 - [ ] **Step 3: Implement the batch**
 
-Guard the first statement — the rotation itself — and check `results[0].meta.changes === 1`, per the repository's D1 concurrency convention. Do not read-then-write any counter.
-
-**Single-winner ruling: `revoked_at IS NULL` alone does not produce one winner.** At `153d05f` `LinkService.rotateManagementLink` calls `TokensRepository.revokeRole(event.id, 'manager', now)` and then creates a replacement, and there is no unique-active-token constraint anywhere in the schema — `migrations/0001_core.sql` gives `event_access_tokens` only the non-unique `event_access_tokens_event_role` index. A role-wide `UPDATE … WHERE role = 'manager' AND revoked_at IS NULL` therefore does not fence a second rotation; it *consumes* the first one's replacement. Two callers serialize as: A revokes the predecessor and creates `T_A`; B revokes everything still live — which is now `T_A` — and creates `T_B`. Probed directly against SQLite at plan time, both callers observe `changes() = 1` and both report success, while the host holding `T_A` has been handed a link that was dead before they finished reading it. Nothing in the batch detects this, and the host's only symptom is a link that never worked.
-
-The rotation is a compare-and-set on the **exact predecessor token ID**, captured before the batch and bound into the guard:
+Read the unique live predecessor token ID once, generate the replacement token ID/secret once, and construct the batch in this exact order:
 
 ```sql
--- Statement 1: the guarded rotation. `?prev` is the token ID read immediately
--- before the batch; `?rot` is the rotation instant.
-UPDATE event_access_tokens SET revoked_at = ?rot
- WHERE id = ?prev AND revoked_at IS NULL;
+-- 1. The client-observed revision is the single-winner fact.
+UPDATE events
+   SET manager_link_revision = manager_link_revision + 1
+ WHERE id = ?event
+   AND manager_link_revision = ?expected_revision
+   AND deleted_at IS NULL
+   AND management_access_expires_at > ?now;
+
+-- 2. Revoke only the predecessor this caller observed, and only if CAS won.
+UPDATE event_access_tokens
+   SET revoked_at = ?now
+ WHERE id = ?predecessor AND event_id = ?event
+   AND role = 'manager' AND revoked_at IS NULL
+   AND changes() = 1;
+
+-- 3. Insert the unique replacement only if exact predecessor revoke won.
+INSERT INTO event_access_tokens (...)
+SELECT ...
+ WHERE changes() = 1;
 ```
 
-`results[0].meta.changes === 1` now means *this caller revoked the predecessor it actually read*. The loser changes zero rows, the whole batch's dependents are inert because each re-proves the rotation stamp, and the caller reports the existing rotation conflict rather than returning a link. Do not fall back to the role-wide form for the "no predecessor" case: an event with no active Manager token is a lifecycle refusal, not a rotation.
+Check `results[0].meta.changes === 1`, `results[1].meta.changes === 1`, and `results[2].meta.changes === 1`; otherwise return the canonical rotation conflict and expose no secret. The first two `changes()` links are safe because each required predecessor changes exactly one row. They are not reused after statement 3.
 
-Two consequences follow and both must be honored. The replacement's creation stays inside the same batch, so a caller that lost the CAS cannot leave an orphan token behind. And the dependents' `EXISTS` guard keys off `revoked_at = ?rot` on that same predecessor row, so it cannot be satisfied by some other caller's concurrent rotation stamp.
-
-**`changes()` is the wrong guard for this batch.** `changes()` reports the row count of the *immediately preceding* completed statement, so the convention documented in `CLAUDE.md` — first statement guarded, dependents appending `AND changes() = 1` — holds only while every dependent changes exactly one row. This batch breaks that precondition: revoking sessions, rebinding an actor, and canceling reservations are each legitimately zero-row. A SQLite probe of the chained form at plan time rotated the token, revoked zero sessions, and then left the account actor bound to the **old** token, because the zero from the empty step propagated into the next statement's `WHERE`.
-
-Every dependent therefore guards on a **stable fact of the transaction**, not on the previous statement:
+Every optional dependent guards on the unique replacement token ID, the stable winner fact for the remainder of the batch:
 
 ```sql
--- Statement 1 is the predecessor CAS from the single-winner ruling above.
-
--- Every dependent re-proves that same rotation and is unaffected by an empty sibling.
 ... WHERE <its own condition>
   AND EXISTS (SELECT 1 FROM event_access_tokens
-              WHERE id = ?prev AND revoked_at = ?rot);
+              WHERE id = ?replacement AND event_id = ?event
+                AND role = 'manager' AND revoked_at IS NULL);
 ```
 
-The predecessor ID comes from one `TokensRepository.getActiveForRole(event.id, 'manager')` read before the batch, and the instant is generated once by the caller; both are bound into every statement, so the predicate identifies *this* rotation of *that* token rather than any rotation. Counter deltas stay in SQL — derive them from the same guarded selection that cancels the rows, never from a prior read. Verify the guard choice directly: the zero-row permutations from Step 1 are exactly the cases the chained form passes vacuously.
+Do not guard optional session/actor/media statements with a timestamp or the immediately preceding `changes()`: any optional cohort may contain zero rows. Counter deltas stay in SQL and derive from the same replacement-guarded selection that cancels link-owned rows. The event projection returns `managerLinkRevision` only when `requireManager` resolved through the account; link-only gets `null`. The route parses the strict body before calling the service and returns the incremented revision with the link.
 
 - [ ] **Step 4: Verify GREEN**
 
 ```bash
 npx vitest run --config vitest.worker.config.ts tests/worker/manage-api.test.ts tests/worker/manager-upload-api.test.ts tests/worker/manager-upload-actor.test.ts tests/worker/auth-api.test.ts
+npx vitest run --config vitest.config.ts tests/unit/event-settings-draft.test.ts tests/ui/event-settings-editor.test.tsx tests/ui/host-private-gallery.test.tsx tests/ui/manager-rsvp-panel.test.tsx tests/ui/event-appearance-editor.test.tsx
+npx playwright test tests/e2e/event-cover-studio.spec.ts --project=desktop
 ```
 
-The actor suite is re-run here deliberately: Task 3's ensure-versus-rotation row was written against the two-statement rotation, and this is where it is re-proved against the atomic one.
+The actor suite is re-run here deliberately: Task 3's ensure-versus-rotation row was written against the two-statement rotation, and this is where it is re-proved against the atomic one. The two additional commands are the bounded closing evidence for every direct typed fixture/spec named in this task; they are not a full UI or E2E gate.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Task review checkpoint**
 
-```bash
-git add worker/services/links.ts worker/db/tokens.ts worker/db/sessions.ts worker/db/media.ts tests/worker/manage-api.test.ts tests/worker/manager-upload-api.test.ts
-git commit -m "fix: make management link rotation one transaction"
-```
+Record the delayed-request, zero-row optional cohort, and projection privacy evidence. A fresh implementer and independent reviewer must confirm the revision/revoke/insert ordering and replacement-ID guards. Resolve P1/P2; do not stage or commit.
 
 ---
 
@@ -657,28 +794,23 @@ Record this checkpoint's landed work instead as a short prose paragraph directly
 
 - [ ] **Step 2: Document the operational contract**
 
-In `docs/operations.md`, describe the server-only upload actor: what it is, that it cannot mint a cookie, that rotation rebinds account actors and cancels link-owned reservations, and how to read a stranded actor. Record that rotation is a compare-and-set on one predecessor token ID, so a concurrent second rotation conflicts instead of silently killing the first host's replacement link. Document `UPLOAD_RESERVATION_CANCELED` beside the other `UPLOAD_*` codes, including that it is Manager-only and that the guest path still answers `UPLOAD_FINALIZE_CONFLICT`. Document the refusal split the tagged ingress outcomes produce — a lost credential at reserve, refresh, claim, commit, or cancel answers the generic `RESOURCE_FORBIDDEN` 403 and is not retryable, while a moved row keeps its existing `UPLOAD_*` 409 and is — because that distinction is what an operator reads to tell a revocation from a race. In `docs/deployment.md`, add `0021` to the migration-first ordering with the compatibility-target ruling from Global constraints. In `CLAUDE.md`, extend the upload-path and authorization sections with the two Manager authorities, the authority-selected intake predicate, and the `guest_name = 'Host'` rule.
+In `docs/operations.md`, describe the server-only upload actor: what it is, that it cannot mint a cookie, that rotation rebinds account actors and cancels link-owned reservations, and how to read a stranded actor. Record that rotation compares and increments the client-observed Manager-link revision, revokes the exact predecessor only for the CAS winner, inserts the replacement only for that revoke winner, and guards optional work by replacement token ID. Document `UPLOAD_RESERVATION_CANCELED` beside the other `UPLOAD_*` codes, including that it is Manager-only and that the guest path still answers `UPLOAD_FINALIZE_CONFLICT`. Document the refusal split the tagged ingress outcomes produce — a lost credential at reserve, refresh, claim, commit, or cancel answers the generic `RESOURCE_FORBIDDEN` 403 and is not retryable, while a moved row keeps its existing `UPLOAD_*` 409 and is — because that distinction is what an operator reads to tell a revocation from a race. In `docs/deployment.md`, add `0021` to the migration-first ordering with the compatibility-target ruling from Global constraints. In `CLAUDE.md`, extend the upload-path and authorization sections with the two Manager authorities, the authority-selected intake predicate, and the `guest_name = 'Host'` rule.
 
 - [ ] **Step 3: Run the complete checkpoint gates**
 
 ```bash
-npm run typecheck
-npm run lint
-npm run verify:bindings
-npx vitest run --config vitest.worker.config.ts tests/worker/migration-0021.test.ts tests/worker/manager-upload-actor.test.ts tests/worker/manager-upload-api.test.ts tests/worker/upload-api.test.ts tests/worker/photo-intake-api.test.ts tests/worker/manage-api.test.ts tests/worker/auth-api.test.ts
-npm test
-npm run build
-CI_BASE_SHA="$(git merge-base origin/main HEAD)" CI_HEAD_SHA="$(git rev-parse HEAD)" npm run ci:migrations
-git diff --check
+npx vitest run --config vitest.worker.config.ts tests/worker/migration-0021.test.ts tests/worker/manager-upload-actor.test.ts tests/worker/manager-upload-api.test.ts tests/worker/upload-api.test.ts tests/worker/photo-intake-api.test.ts tests/worker/manage-api.test.ts tests/worker/auth-api.test.ts tests/worker/repositories.test.ts
+npx vitest run --config vitest.config.ts tests/unit/verify-fresh-d1.test.ts
+npx vitest run --config vitest.config.ts tests/unit/event-settings-draft.test.ts tests/ui/event-settings-editor.test.tsx tests/ui/host-private-gallery.test.tsx tests/ui/manager-rsvp-panel.test.tsx tests/ui/event-appearance-editor.test.tsx
+npx playwright test tests/e2e/event-cover-studio.spec.ts --project=desktop
+git diff --name-only --diff-filter=ACMR -- '*.ts' '*.tsx' | xargs -r npx eslint --
+git diff --check -- migrations/0021_manager_upload_and_album_era.sql shared/errors.ts shared/contracts.ts worker tests/worker tests/e2e/fixtures/routes.ts docs/superpowers/host-gallery-verification-matrix.md docs/operations.md docs/deployment.md CLAUDE.md
 ```
 
-Expected: every command exits zero. The known build chunk-size and missing-local-secret warnings may remain; no new warning is accepted.
+Expected: every focused command exits zero. Do not substitute a full test, build, lint, typecheck, E2E, or migration run.
 
-- [ ] **Step 4: Commit the record**
+- [ ] **Step 4: Checkpoint review handoff**
 
-```bash
-git add docs/superpowers/host-gallery-verification-matrix.md docs/operations.md docs/deployment.md CLAUDE.md
-git commit -m "docs: record manager upload authority evidence"
-```
+Record the changed documentation and focused outputs, run `git diff --check --` against the files listed in this task, and obtain independent checkpoint review. Keep the entire Slice diff uncommitted for the later plans.
 
 Do not push. The next Slice 5 checkpoint is the Manager upload dialog and queue extensions.
