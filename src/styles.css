@@ -50,6 +50,9 @@ svg { width: 1.15em; height: 1.15em; stroke-width: 1.75; }
    14px floor of the control band and holds a gap between them; the wider band restores 16px. */
 .page-header { gap: 12px; }
 .page-header .text-link { min-width: 44px; justify-content: center; font-size: .875rem; }
+/* The same quiet exit is sometimes a routed anchor and sometimes an action button.
+   Remove only the button's browser chrome so its semantics can change without its appearance. */
+.page-header button.text-link { padding: 0; border: 0; background: transparent; cursor: pointer; }
 /* The header is `space-between`: with the brand and one exit that reads as opposite ends of the row,
    but a third child would park itself in the middle. Exits past the first therefore travel as one
    right-aligned group, and 16px is the band they hold apart from each other. */
@@ -1337,11 +1340,22 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .host-panel h1 { font-size: clamp(2rem, 4vw, 3rem); margin-bottom: 16px; }
 .host-panel h2 { font-size: 1.6rem; margin-bottom: 12px; }
 .host-panel > p { color: var(--muted); }
-.host-panel .create-form { max-width: none; padding: 0; background: none; border: 0; box-shadow: none; }
 .host-panel__links { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 20px; }
 /* `text-link` is a button here as often as an anchor, and a bare button carries
    none of the anchor's appearance. */
 .host-panel button.text-link { padding: 0; min-height: 44px; background: none; border: 0; cursor: pointer; }
+.host-event-controls { min-width: 0; margin: 24px 0 28px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.host-event-controls > label { min-width: 0; display: grid; gap: 8px; font-weight: 600; }
+/* Search and sort are one control group. The native select keeps its platform arrow, but the field
+   around it uses the same size, type, paper, border, radius, and focus geometry as search. */
+.host-event-controls input,
+.host-event-controls select { width: 100%; min-width: 0; height: 48px; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 7px; background: #fffdf8; color: var(--ink); font: inherit; }
+.host-event-controls select { padding-right: 40px; cursor: pointer; }
+.host-event-controls > p { margin: -4px 0 0; color: var(--muted); font-size: .875rem; }
+@media (min-width: 560px) {
+  .host-event-controls { grid-template-columns: minmax(0, 1fr) minmax(160px, .6fr); align-items: end; }
+  .host-event-controls > p { grid-column: 1 / -1; }
+}
 .host-event-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
 .host-event-list li { padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: #fffdf8; }
 .host-event-list a { display: grid; gap: 6px; text-decoration: none; }

@@ -127,7 +127,7 @@ export function HostEventsPage() {
           </p>
         </div>}
 
-        {session.events.length > 0 && <div className="create-form">
+        {session.events.length > 0 && <div className="host-event-controls">
           <label>
             Search events
             <input

@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
+import type { HostSessionResponse } from '../../shared/contracts';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 import { UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
 import {
@@ -49,6 +51,33 @@ const CREATE_ERROR_FIELDS = [
   { control: 'input[name="eventDate"]', id: 'eventDate-error', message: 'Choose an event date.' },
   { control: 'textarea[name="welcomeMessage"]', id: 'welcomeMessage-error', message: 'Write a welcome message.' },
 ];
+const HOST_EVENTS_SESSION = {
+  account: {
+    id: 'account-host-events-responsive',
+    email: 'host@example.test',
+    displayName: 'Host Events',
+    emailVerified: true,
+    notificationsEnabled: true,
+  },
+  events: [{
+    id: 'event-host-events-responsive',
+    name: 'Gallery Dinner',
+    slug: 'gallery-dinner',
+    eventDate: '2027-01-02',
+    eventTimezone: 'Pacific/Auckland',
+    storedMediaCount: 40,
+    managementAccessExpiresAt: '2027-01-03T10:30:00.000Z',
+  }],
+} satisfies HostSessionResponse;
+
+async function openHostEvents(page: Page) {
+  await page.route('**/api/host/session', (route) => route.fulfill({
+    headers: { 'cache-control': 'private, no-store' },
+    json: { data: HOST_EVENTS_SESSION, requestId: 'request-host-events-responsive' },
+  }));
+  await page.goto('/host/events');
+  await expect(page.getByRole('heading', { name: 'Your events' })).toBeVisible();
+}
 
 test('the landing headline and primary action lead the first fold on phones', async ({ page }) => {
   for (const { width, height } of FOLD_VIEWPORTS) {
@@ -170,6 +199,83 @@ test('native event date and start time stay inside their fields under iOS sizing
 
   const documentSize = await measureDocument(page);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
+test('the signed-in header action uses Candidary quiet chrome at account widths', async ({ page }) => {
+  await openHostEvents(page);
+
+  for (const width of [320, 768]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.reload();
+
+    const signOut = page.getByRole('button', { name: 'Sign out' });
+    await expect(signOut).toBeVisible();
+    const chrome = await signOut.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderTopStyle: style.borderTopStyle,
+        borderTopWidth: style.borderTopWidth,
+      };
+    });
+    expect(chrome.backgroundColor, `quiet background at ${width}`).toBe('rgba(0, 0, 0, 0)');
+    expect(chrome.borderTopStyle, `quiet border style at ${width}`).toBe('none');
+    expect(chrome.borderTopWidth, `quiet border width at ${width}`).toBe('0px');
+
+    const target = await measureTarget(signOut);
+    expect(target.width, `Sign out target width at ${width}`).toBeGreaterThanOrEqual(44);
+    expect(target.height, `Sign out target height at ${width}`).toBeGreaterThanOrEqual(44);
+  }
+});
+
+test('host event search and sort share field styling and stack only on phones', async ({ page }) => {
+  await openHostEvents(page);
+
+  for (const width of [320, 768]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.reload();
+
+    const search = page.getByRole('searchbox', { name: 'Search events' });
+    const sort = page.getByRole('combobox', { name: 'Sort events' });
+    const [searchBox, sortBox] = await Promise.all([search.boundingBox(), sort.boundingBox()]);
+    if (!searchBox || !sortBox) throw new Error(`Host event controls must be laid out at ${width}`);
+
+    expect(searchBox.height, `search field height at ${width}`).toBeGreaterThanOrEqual(48);
+    expect(sortBox.height, `sort field height at ${width}`).toBe(searchBox.height);
+    const fieldStyles = await Promise.all([search, sort].map((field) => field.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderRadius: style.borderRadius,
+        color: style.color,
+        fontFamily: style.fontFamily,
+      };
+    })));
+    expect(fieldStyles[1], `sort field visual system at ${width}`).toEqual(fieldStyles[0]);
+
+    const searchLabel = search.locator('..');
+    const sortLabel = sort.locator('..');
+    const [searchLabelBox, sortLabelBox] = await Promise.all([
+      searchLabel.boundingBox(),
+      sortLabel.boundingBox(),
+    ]);
+    if (!searchLabelBox || !sortLabelBox) throw new Error(`Host event labels must be laid out at ${width}`);
+    if (width === 320) {
+      expect(sortLabelBox.y, 'phone controls stack vertically')
+        .toBeGreaterThanOrEqual(searchLabelBox.y + searchLabelBox.height);
+    } else {
+      expect(Math.abs(sortLabelBox.y - searchLabelBox.y), 'desktop controls share a row')
+        .toBeLessThanOrEqual(1);
+    }
+
+    const resultColor = await page.getByRole('status').evaluate(
+      (element) => getComputedStyle(element).color,
+    );
+    expect(resultColor, `result metadata color at ${width}`).toBe('rgb(118, 108, 112)');
+
+    const documentSize = await measureDocument(page);
+    expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+  }
 });
 
 test('event and sensitive management links remain usable across the width matrix', async ({ page }) => {
