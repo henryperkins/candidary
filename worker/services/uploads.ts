@@ -5,9 +5,10 @@ import {
   UPLOAD_RESERVATION_TTL_SECONDS,
   type SupportedImageType,
 } from '../../shared/constants';
-import { ApiError, type ApiErrorCode } from '../../shared/errors';
+import type { UploadBatchItemView } from '../../shared/contracts';
+import { ApiError } from '../../shared/errors';
 import { resolvePhotoIntake } from '../../shared/rsvp';
-import { MediaRepository, type ReserveMediaRecord } from '../db/media';
+import { MediaRepository, uploadMediaView, type ReserveMediaRecord } from '../db/media';
 import type { AppEnv, AuthenticatedSession } from '../env';
 import { assertWorkerIngressEnabled } from '../media-upload-release';
 import { sanitizeFilename } from '../security/filenames';
@@ -24,9 +25,7 @@ export interface InitiateUploadInput {
 
 export type BatchUploadFile = Omit<InitiateUploadInput, 'guestName'>;
 
-export type BatchUploadResult =
-  | ({ idempotencyKey: string; status: 'accepted' } & Awaited<ReturnType<UploadService['initiate']>>)
-  | { idempotencyKey: string; status: 'rejected'; error: { code: ApiErrorCode; message: string } };
+export type BatchUploadResult = UploadBatchItemView;
 
 const PROVISIONAL_MIME_TYPES = new Set(['', 'application/octet-stream', 'binary/octet-stream']);
 const VENDOR_HEIF_TYPES = new Map<string, SupportedImageType>([
@@ -106,9 +105,11 @@ export class UploadService {
     this.assertCanUpload(auth);
     const repository = new MediaRepository(this.env.DB);
     const media = await repository.reserve(this.prepareReservation(auth, input, now));
-    if (media.uploadState === 'stored') return { media, alreadyDelivered: true as const };
+    if (media.uploadState === 'stored') {
+      return { media: uploadMediaView(media), alreadyDelivered: true as const };
+    }
     return {
-      media,
+      media: uploadMediaView(media),
       alreadyDelivered: false as const,
       uploadUrl: `/api/event/${encodeURIComponent(auth.event.slug)}/uploads/${encodeURIComponent(media.id)}/content`,
       uploadUrlExpiresAt: media.reservationExpiresAt,
@@ -167,7 +168,7 @@ export class UploadService {
         items[index] = {
           idempotencyKey: file.idempotencyKey,
           status: 'accepted',
-          media: result.media,
+          media: uploadMediaView(result.media),
           alreadyDelivered: true,
         };
         return;
@@ -175,7 +176,7 @@ export class UploadService {
       items[index] = {
         idempotencyKey: file.idempotencyKey,
         status: 'accepted',
-        media: result.media,
+        media: uploadMediaView(result.media),
         alreadyDelivered: false,
         uploadUrl: `/api/event/${encodeURIComponent(auth.event.slug)}/uploads/${encodeURIComponent(result.media.id)}/content`,
         uploadUrlExpiresAt: result.media.reservationExpiresAt,

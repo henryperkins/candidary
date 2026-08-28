@@ -1,67 +1,91 @@
-import { ImageOff } from 'lucide-react';
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { mediaPreview } from '../../app/api';
-import type { AlbumEntryView } from '../../../shared/contracts';
-import { galleryPhotoTitle } from './gallery-timeline';
+import type { PublicAlbumView } from '../../../shared/contracts';
+import {
+  describeLoadFailure,
+  ErrorState,
+  LoadingState,
+  type LoadFailure,
+} from '../../components/States';
+import { fetchManagerAlbumPreview, managerAlbumPreviewImage } from './album-share-api';
+import { PublicAlbum } from './PublicAlbum';
 
 interface AlbumPreviewProps {
-  entries: readonly AlbumEntryView[];
-  title: string;
-  description: string;
+  eventId: string;
+  /**
+   * Read again when the saved album has moved on. The Manager passes the revision it last saved,
+   * so reopening the preview after an edit cannot show the previous arrangement.
+   */
+  revision?: number;
+  onAnnouncement?: (message: string) => void;
 }
 
-interface PreviewBlock {
-  key: string;
-  heading: string | null;
-  photos: Array<Extract<AlbumEntryView, { kind: 'photo' }>>;
-}
+/**
+ * The Album-link reading order, read back from the server rather than composed from the editor's
+ * draft.
+ *
+ * The projection the Album link serves is the only honest answer to what people with the link see:
+ * it is the one that drops a photo the host trashed, withholds an unpublished caption, and omits an
+ * emptied section. Rebuilding that from the draft would be a second implementation of the rule, free
+ * to disagree with the first. This preview is Manager-authenticated and is not sharing — it works
+ * before a link exists and after one is stopped, and no link, token, or ciphertext reaches it.
+ */
+export function AlbumPreview({ eventId, revision, onAnnouncement }: AlbumPreviewProps) {
+  const [album, setAlbum] = useState<PublicAlbumView | null>(null);
+  const [failure, setFailure] = useState<LoadFailure | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const loadGeneration = useRef(0);
+  const announce = useRef(onAnnouncement);
+  useEffect(() => { announce.current = onAnnouncement; });
 
-function previewBlocks(entries: readonly AlbumEntryView[]): PreviewBlock[] {
-  const blocks: PreviewBlock[] = [];
-  for (const entry of entries) {
-    if (entry.kind === 'section') {
-      blocks.push({ key: `section:${entry.id}`, heading: entry.heading, photos: [] });
-      continue;
-    }
-    if (blocks.length === 0) blocks.push({ key: 'lead', heading: null, photos: [] });
-    blocks.at(-1)!.photos.push(entry);
-  }
-  return blocks;
-}
+  useEffect(() => {
+    const generation = ++loadGeneration.current;
+    const controller = new AbortController();
+    setAlbum(null);
+    setFailure(null);
+    void fetchManagerAlbumPreview(eventId, controller.signal).then(
+      (result) => {
+        if (generation !== loadGeneration.current) return;
+        setAlbum(result.album);
+        announce.current?.(result.album.photoCount === 0
+          ? 'Album preview ready. No photos are In Album yet.'
+          : `Album preview ready. ${result.album.photoCount} ${result.album.photoCount === 1 ? 'photo' : 'photos'}.`);
+      },
+      (caught: unknown) => {
+        if (generation !== loadGeneration.current) return;
+        if (caught instanceof DOMException && caught.name === 'AbortError') return;
+        const described = describeLoadFailure(
+          caught,
+          'manager',
+          'The Album preview could not be loaded.',
+        );
+        setFailure(described);
+        announce.current?.(described.message);
+      },
+    );
 
-function PreviewPhoto({ entry }: { entry: Extract<AlbumEntryView, { kind: 'photo' }> }) {
-  const [failed, setFailed] = useState(false);
-  const title = galleryPhotoTitle(entry.photo);
-  const label = `${title}, from ${entry.photo.guestName}`;
-  if (!entry.photo.previewAvailable || failed) {
-    return <div className="album-preview__placeholder" role="img" aria-label={label}>
-      <ImageOff aria-hidden="true" />
-      <span>Preview unavailable</span>
-    </div>;
-  }
-  return <img
-    src={mediaPreview(entry.photo.id)}
-    alt={label}
-    loading="lazy"
-    decoding="async"
-    onError={() => setFailed(true)}
-  />;
-}
+    return () => {
+      loadGeneration.current += 1;
+      controller.abort();
+    };
+  }, [attempt, eventId, revision]);
 
-/** The guest-facing reading order, rendered inline so editing and preview never compete. */
-export function AlbumPreview({ entries, title, description }: AlbumPreviewProps) {
+  const retry = useCallback(() => setAttempt((current) => current + 1), []);
+  const imageSource = useCallback(
+    (mediaId: string) => managerAlbumPreviewImage(eventId, mediaId),
+    [eventId],
+  );
+
   return <section className="album-preview" aria-labelledby="album-preview-title">
-    <p className="section-label">What a guest opening the link sees</p>
-    <h3 id="album-preview-title">{title}</h3>
-    {description && <p className="album-preview__description">{description}</p>}
-    <div className="album-preview__blocks">
-      {previewBlocks(entries).map((block) => <section className="album-preview__block" key={block.key}>
-        {block.heading && <h4>{block.heading}</h4>}
-        {block.photos.length > 0 && <div className="album-preview__photos">
-          {block.photos.map((entry) => <PreviewPhoto entry={entry} key={entry.photo.id} />)}
-        </div>}
-      </section>)}
-    </div>
+    <p className="section-label" id="album-preview-title">What people with the Album link see</p>
+    {failure
+      ? <ErrorState
+          message={failure.message}
+          recoveryHint={failure.recoveryHint}
+          onRetry={failure.retryable ? retry : undefined}
+        />
+      : !album
+        ? <LoadingState label="Opening the preview…" live={false} />
+        : <PublicAlbum album={album} imageSource={imageSource} variant="embedded" />}
   </section>;
 }

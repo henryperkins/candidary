@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 
+import { normalizeManagerExportErrorCode } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
 import { ExportsRepository } from '../db/exports';
@@ -23,8 +24,16 @@ function managerExport(job: ExportRecord) {
     kind: job.kind,
     state: job.state,
     snapshotAt: job.snapshotAt,
+    createdAt: job.createdAt,
+    startedAt: job.executionProtocol === 'attempt-v2'
+      ? job.executionStartedAt
+      : job.startedAt,
+    completedAt: job.completedAt,
     mediaCount: job.mediaCount,
     totalBytes: job.totalBytes,
+    processedMediaCount: job.processedMediaCount,
+    processedBytes: job.processedBytes,
+    progressUpdatedAt: job.progressUpdatedAt,
     attempt: job.attempt,
     partCount: job.partCount,
     expiresAt: job.expiresAt,
@@ -35,6 +44,7 @@ function managerExport(job: ExportRecord) {
     guestbookEventTimezone: job.guestbookEventTimezone,
     guestbookPrompt: job.guestbookPrompt,
     guestbookGalleryVisible: job.guestbookGalleryVisible,
+    errorCode: normalizeManagerExportErrorCode(job.errorCode),
   };
 }
 
@@ -58,11 +68,40 @@ async function commitOrRecoverRetry(
     const committed = await repository.getById(current.id);
     if (committed?.state === 'queued'
       && committed.attempt === current.attempt + 1
+      && committed.executionProtocol === 'attempt-v2'
+      && committed.executionTransition === current.executionTransition + 1
+      && committed.executionStartedAt === null
+      && committed.processedMediaCount === null
+      && committed.processedBytes === null
+      && committed.progressUpdatedAt === null
       && committed.eventId === current.eventId
+      && committed.kind === current.kind
+      && committed.albumEntriesJson === current.albumEntriesJson
       && committed.snapshotAt === current.snapshotAt
       && committed.mediaCount === current.mediaCount
       && committed.totalBytes === current.totalBytes
-      && committed.createdAt === current.createdAt) {
+      && committed.createdAt === current.createdAt
+      && committed.guestbookEntryCount === current.guestbookEntryCount
+      && committed.guestbookSharedCount === current.guestbookSharedCount
+      && committed.guestbookEventName === current.guestbookEventName
+      && committed.guestbookEventDate === current.guestbookEventDate
+      && committed.guestbookEventTimezone === current.guestbookEventTimezone
+      && committed.guestbookPrompt === current.guestbookPrompt
+      && committed.guestbookGalleryVisible === current.guestbookGalleryVisible
+      && committed.objectKey === null
+      && committed.manifestObjectKey === null
+      && committed.partCount === 0
+      && committed.guestbookHtmlObjectKey === null
+      && committed.guestbookHtmlBytes === null
+      && committed.guestbookHtmlSha256 === null
+      && committed.guestbookCsvObjectKey === null
+      && committed.guestbookCsvBytes === null
+      && committed.guestbookCsvSha256 === null
+      && committed.errorCode === null
+      && committed.startedAt === null
+      && committed.completedAt === null
+      && committed.expiresAt === null
+      && (await repository.listParts(committed.id)).length === 0) {
       return committed;
     }
     throw error;
@@ -74,12 +113,43 @@ function isRecoverableQueuedRetry(
 ): boolean {
   return job.state === 'queued'
     && job.attempt > 1
+    && job.executionProtocol === 'attempt-v2'
+    && Number.isSafeInteger(job.executionTransition)
+    && job.executionTransition > 0
     && job.objectKey === null
     && job.manifestObjectKey === null
     && job.partCount === 0
     && job.startedAt === null
+    && job.executionStartedAt === null
+    && job.processedMediaCount === null
+    && job.processedBytes === null
+    && job.progressUpdatedAt === null
+    && job.errorCode === null
     && job.completedAt === null
     && job.expiresAt === null;
+}
+
+async function observedWorkflowDispatch(
+  workflow: AppEnv['EXPORT_WORKFLOW'],
+  id: string,
+): Promise<'dispatched' | 'failed' | 'unknown'> {
+  const observed = await (await workflow.get(id)).status();
+  if (observed.status === 'errored'
+    || observed.status === 'terminated'
+    || observed.status === 'complete') {
+    return 'failed';
+  }
+  return observed.status === 'unknown' ? 'unknown' : 'dispatched';
+}
+
+async function dispatchWorkflowBatch(
+  workflow: AppEnv['EXPORT_WORKFLOW'],
+  id: string,
+  input: Parameters<AppEnv['EXPORT_WORKFLOW']['createBatch']>[0],
+): Promise<'dispatched' | 'failed' | 'unknown'> {
+  const created = await workflow.createBatch(input);
+  if (created.length > 0) return 'dispatched';
+  return observedWorkflowDispatch(workflow, id);
 }
 
 async function ensureRetryWorkflow(
@@ -88,41 +158,39 @@ async function ensureRetryWorkflow(
 ): Promise<'dispatched' | 'failed'> {
   const id = `${job.id}-${job.attempt}`;
   try {
-    await workflow.createBatch([{ id, params: { jobId: job.id } }]);
-    return 'dispatched';
+    const dispatch = await dispatchWorkflowBatch(workflow, id, [{
+      id,
+      params: { jobId: job.id, attempt: job.attempt },
+    }]);
+    if (dispatch !== 'unknown') return dispatch;
   } catch (error) {
     try {
-      const observed = await (await workflow.get(id)).status();
-      if (observed.status === 'errored'
-        || observed.status === 'terminated'
-        || observed.status === 'complete') {
-        return 'failed';
-      }
-      if (observed.status !== 'unknown') return 'dispatched';
+      const observed = await observedWorkflowDispatch(workflow, id);
+      if (observed !== 'unknown') return observed;
     } catch {
       // The original creation failure remains authoritative when existence
       // cannot be observed. A later request can safely retry the same ID.
     }
     throw error;
   }
+  throw new Error(`Retained retry Workflow ${id} has unknown status.`);
 }
 
 async function ensureInitialWorkflow(
   workflow: AppEnv['EXPORT_WORKFLOW'],
   job: Awaited<ReturnType<typeof ownedJob>>,
 ): Promise<'dispatched' | 'failed'> {
-  const input = [{ id: job.id, params: { jobId: job.id } }];
+  const input = [{
+    id: job.id,
+    params: { jobId: job.id, attempt: job.attempt },
+  }];
   try {
-    await workflow.createBatch(input);
-    return 'dispatched';
+    const dispatch = await dispatchWorkflowBatch(workflow, job.id, input);
+    return dispatch === 'unknown' ? 'dispatched' : dispatch;
   } catch {
     try {
-      const observed = await (await workflow.get(job.id)).status();
-      if (observed.status === 'errored'
-        || observed.status === 'terminated'
-        || observed.status === 'complete') {
-        return 'failed';
-      }
+      const observed = await observedWorkflowDispatch(workflow, job.id);
+      if (observed === 'failed') return 'failed';
       // A successful lookup is evidence that the deterministic instance ID is
       // retained, even when status propagation still reports `unknown`.
       return 'dispatched';
@@ -132,8 +200,8 @@ async function ensureInitialWorkflow(
       // retained ID, so replay exactly that ID instead of inventing a successor.
     }
     try {
-      await workflow.createBatch(input);
-      return 'dispatched';
+      const dispatch = await dispatchWorkflowBatch(workflow, job.id, input);
+      return dispatch === 'unknown' ? 'dispatched' : dispatch;
     } catch {
       // Creation is still ambiguous, but leaving the D1 row queued would block every
       // future export and attempt-1 is not eligible for retry redrive. The caller
@@ -144,11 +212,12 @@ async function ensureInitialWorkflow(
   }
 }
 
-async function priorAttemptKeys(
+async function attemptKeys(
   bucket: R2Bucket,
   job: Awaited<ReturnType<typeof ownedJob>>,
+  attempt: number,
 ): Promise<string[]> {
-  const prefix = `events/${job.eventId}/exports/${job.id}/attempt-${job.attempt - 1}/`;
+  const prefix = `events/${job.eventId}/exports/${job.id}/attempt-${attempt}/`;
   const keys: string[] = [];
   let cursor: string | undefined;
   do {
@@ -299,7 +368,8 @@ async function streamArtifact(
 
 exportRoutes.get('/manage/events/:eventId/exports', async (context) => {
   await manager(context);
-  const jobs = await new ExportsRepository(context.env.DB).listForEvent(context.req.param('eventId'));
+  const jobs = await new ExportsRepository(context.env.DB)
+    .listLatestForManager(context.req.param('eventId'));
   return context.json({ data: { exports: jobs.map(managerExport) }, requestId: context.get('requestId') });
 });
 
@@ -355,22 +425,33 @@ exportRoutes.get('/manage/events/:eventId/exports/:jobId', async (context) => {
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context) => {
   await manager(context, true);
   const current = await ownedJob(context);
-  const recovering = isRecoverableQueuedRetry(current);
+  const repository = new ExportsRepository(context.env.DB);
+  const currentParts = await repository.listParts(current.id);
+  const recovering = isRecoverableQueuedRetry(current) && currentParts.length === 0;
   if (current.state !== 'failed' && current.state !== 'expired' && !recovering) {
     throw new ApiError('EXPORT_ALREADY_ACTIVE', 'Only failed or expired exports can be retried.', 409);
   }
-  const repository = new ExportsRepository(context.env.DB);
-  const currentParts = await repository.listParts(current.id);
-  const keys = recovering
-    ? await priorAttemptKeys(context.env.MEDIA_BUCKET, current)
-    : [
-      current.objectKey,
-      current.manifestObjectKey,
-      ...currentParts.map(({ objectKey }) => objectKey),
-      current.guestbookHtmlObjectKey,
-      current.guestbookCsvObjectKey,
-    ].filter((key): key is string => Boolean(key));
+  const recordedKeys = [
+    current.objectKey,
+    current.manifestObjectKey,
+    ...currentParts.map(({ objectKey }) => objectKey),
+    current.guestbookHtmlObjectKey,
+    current.guestbookCsvObjectKey,
+  ].filter((key): key is string => Boolean(key));
+  const rediscoveredKeys = current.executionProtocol === 'attempt-v2'
+    ? await attemptKeys(
+      context.env.MEDIA_BUCKET,
+      current,
+      recovering ? current.attempt - 1 : current.attempt,
+    )
+    : [];
+  const keys = [...new Set([...recordedKeys, ...rediscoveredKeys])];
   let job = recovering ? current : await commitOrRecoverRetry(repository, current);
+  // The won/recovered D1 transition is the ownership fence. Clean the exact
+  // prior attempt before a replacement Workflow can claim and write attempt N.
+  // A deletion failure leaves a pristine queued retry for this same route to
+  // rediscover and redrive; it never races cleanup against a running attempt.
+  await deleteExportKeys(context.env.MEDIA_BUCKET, keys);
   const dispatch = await ensureRetryWorkflow(context.env.EXPORT_WORKFLOW, job);
   if (dispatch === 'failed') {
     const recovered = await repository.markRetryDispatchFailed(
@@ -382,7 +463,6 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context
   } else {
     job = await repository.getById(job.id) ?? job;
   }
-  await deleteExportKeys(context.env.MEDIA_BUCKET, keys);
   return context.json({ data: { export: managerExport(job) }, requestId: context.get('requestId') }, 202);
 });
 

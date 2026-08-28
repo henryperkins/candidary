@@ -4,12 +4,13 @@ import { z } from 'zod';
 import { MAX_IMAGE_BYTES, UPLOAD_BATCH_SIZE } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
-import { MediaRepository } from '../db/media';
+import { MediaRepository, uploadMediaView } from '../db/media';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertCsrf } from '../http/csrf';
+import { privateJson } from '../http/private-json';
 import { UploadService } from '../services/uploads';
-import { deleteMediaObjectAliases, receiveMediaUpload } from '../storage/media';
+import { receiveMediaUpload, retireMediaObjects } from '../storage/media';
 
 const fileSchema = z.object({
   filename: z.string().min(1).max(255),
@@ -49,6 +50,12 @@ async function guestForSlug(context: Parameters<typeof assertCsrf>[0]) {
 
 export const uploadRoutes = new Hono<AppBindings>();
 
+uploadRoutes.use('/event/:slug/uploads', privateJson);
+uploadRoutes.use('/event/:slug/uploads/batch', privateJson);
+uploadRoutes.use('/event/:slug/uploads/:mediaId', privateJson);
+uploadRoutes.use('/event/:slug/uploads/:mediaId/content', privateJson);
+uploadRoutes.use('/event/:slug/uploads/:mediaId/finalize', privateJson);
+
 uploadRoutes.post('/event/:slug/uploads', async (context) => {
   const auth = await guestForSlug(context);
   const parsed = initiateSchema.safeParse(await context.req.json().catch(() => null));
@@ -73,7 +80,10 @@ uploadRoutes.post('/event/:slug/uploads/:mediaId/finalize', async (context) => {
     throw new ApiError('ROLE_FORBIDDEN', 'This upload belongs to a different guest or event.', 403);
   }
   if (media.uploadState === 'stored') {
-    return context.json({ data: { media }, requestId: context.get('requestId') });
+    return context.json({
+      data: { media: uploadMediaView(media) },
+      requestId: context.get('requestId'),
+    });
   }
   // New Workers never start an unbounded R2 write from this legacy handshake.
   // The browser queue interprets this domain conflict by replaying bytes through
@@ -92,14 +102,23 @@ uploadRoutes.delete('/event/:slug/uploads/:mediaId', async (context) => {
   if (!media || media.eventId !== auth.event.id || media.uploaderSessionId !== auth.session.id) {
     throw new ApiError('ROLE_FORBIDDEN', 'This upload belongs to a different guest or event.', 403);
   }
-  const deleted = await repository.delete(media.id, new Date().toISOString());
-  await deleteMediaObjectAliases(
+  // A guest's own deletion is permanent, and stays permanent whether or not the
+  // host had already moved the photo to Recently deleted. Recovery is the host's
+  // safety net for the host's mistake; it was never a way to keep a photograph a
+  // guest asked to take back.
+  const deletedAt = new Date().toISOString();
+  const deleted = await repository.delete(media.id, deletedAt);
+  await retireMediaObjects(
     context.env.MEDIA_BUCKET,
     context.env.CANONICAL_MEDIA_BUCKET,
     repository,
     media,
+    deletedAt,
   ).catch(() => undefined);
-  return context.json({ data: { media: deleted }, requestId: context.get('requestId') });
+  return context.json({
+    data: { media: { id: deleted.id, deleted: true as const } },
+    requestId: context.get('requestId'),
+  });
 });
 
 uploadRoutes.put('/event/:slug/uploads/:mediaId/content', async (context) => {
@@ -111,7 +130,10 @@ uploadRoutes.put('/event/:slug/uploads/:mediaId/content', async (context) => {
     throw new ApiError('ROLE_FORBIDDEN', 'This upload belongs to a different guest or event.', 403);
   }
   if (media.uploadState === 'stored') {
-    return context.json({ data: { media }, requestId: context.get('requestId') });
+    return context.json({
+      data: { media: uploadMediaView(media) },
+      requestId: context.get('requestId'),
+    });
   }
   if (media.uploadState !== 'reserved' || media.deletedAt !== null) {
     throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer receive bytes.', 409);
@@ -165,5 +187,8 @@ uploadRoutes.put('/event/:slug/uploads/:mediaId/content', async (context) => {
     bytes,
     context.req.header('content-type') ?? '',
   );
-  return context.json({ data: { media: stored }, requestId: context.get('requestId') });
+  return context.json({
+    data: { media: uploadMediaView(stored) },
+    requestId: context.get('requestId'),
+  });
 });

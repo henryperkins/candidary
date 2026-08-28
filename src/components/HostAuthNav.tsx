@@ -2,6 +2,7 @@ import { type KeyboardEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { api } from '../app/api';
+import { canonicalManagerReturnPath } from '../app/manager-location';
 import { hostRegisterHref, hostSignInHref } from '../app/recovery';
 import type { EventView } from '../app/types';
 
@@ -66,11 +67,6 @@ export function AuthModeSwitch({ mode, returnTo, adopt }: RecoveryContext & { mo
   </div>;
 }
 
-// `returnTo` has already been through `safeReturnTo`, so this only reads the id back
-// out of a path known to be one of the two accepted shapes. It is not a second
-// validator and must never become the thing that decides a path is acceptable.
-const MANAGER_EVENT = /^\/manage\/event\/([0-9a-f-]+)$/iu;
-
 type Resolution =
   | { state: 'pending' }
   | { state: 'named'; name: string; date: string }
@@ -90,7 +86,9 @@ function formatEventDate(value: string): string {
 // The name and date are resolved from the API by event id — never read from the query
 // string, which is attacker-controlled and validated for navigation only.
 export function AuthReturnNote({ returnTo, adopt }: RecoveryContext) {
-  const eventId = returnTo ? MANAGER_EVENT.exec(returnTo)?.[1] ?? null : null;
+  // `returnTo` has already passed `safeReturnTo`; this only reads its event id from
+  // the canonical Manager contract and never decides whether it is acceptable.
+  const eventId = returnTo ? canonicalManagerReturnPath(returnTo)?.eventId ?? null : null;
   const [resolved, setResolved] = useState<Resolution>({ state: 'pending' });
 
   useEffect(() => {

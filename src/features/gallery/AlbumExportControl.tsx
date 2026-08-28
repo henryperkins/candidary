@@ -3,29 +3,30 @@ import { useState } from 'react';
 
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
-import { EXPORT_STATE_LABELS, ExportStatusAnnouncement } from './export-control-status';
+import {
+  ExportJobStatus,
+  describeCurrentSource,
+  exportAnnouncementMessage,
+  exportWaitMessage,
+  hasTrustedEmptySource,
+  isTerminalExport,
+  useExportAnnouncement,
+  type ExportCurrentSource,
+} from './export-control-status';
 
 interface AlbumExportControlProps {
-  photoCount: number;
-  totalBytes: number;
+  eventTimezone: string;
+  currentSource: ExportCurrentSource;
+  now?: number;
   job?: ExportView;
   activeJob?: ExportView;
   download?: ExportDownloadView;
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
   onRetry(job: ExportView): Promise<void>;
+  /** Retained while call sites move to Manager's one live owner; controls render no live nodes. */
   live?: boolean;
   onAnnouncement?(message: string): void;
-}
-
-function jobDetail(job: ExportView): string {
-  const counts = `${job.mediaCount.toLocaleString()} photos · ${formatBytes(job.totalBytes)}`;
-  if (job.state === 'queued' || job.state === 'running') {
-    return `Preparing ${counts}. Download links last 24 hours.`;
-  }
-  if (job.state === 'ready') return `${counts}. Download links last 24 hours.`;
-  if (job.state === 'failed') return `${counts}. Attempt ${job.attempt} failed.`;
-  return `${counts}. The download links have expired.`;
 }
 
 /**
@@ -34,53 +35,64 @@ function jobDetail(job: ExportView): string {
  * this component's vocabulary and therefore cannot leak into the album UI.
  */
 export function AlbumExportControl({
-  photoCount,
-  totalBytes,
+  eventTimezone,
+  currentSource,
+  now = Date.now(),
   job,
   activeJob,
   download,
   onPrepare,
   onDownload,
   onRetry,
-  live = true,
   onAnnouncement,
 }: AlbumExportControlProps) {
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
-  const otherExportActive = activeJob !== undefined && activeJob.id !== job?.id;
+  const waitMessage = exportWaitMessage(activeJob, job?.id);
+  const currentSourceEmpty = hasTrustedEmptySource(currentSource);
   const run = (action: typeof pendingAction, request: () => Promise<void>) => {
     if (pendingAction !== null) return;
     setPendingAction(action);
     void request().finally(() => setPendingAction(null));
   };
-  const liveMessage = job
-    ? `${EXPORT_STATE_LABELS[job.state]}. ${jobDetail(job)}`
-    : pendingAction === 'prepare' ? 'Preparing the album download…' : '';
+  const liveMessage = job === undefined
+    ? pendingAction === 'prepare' ? 'Preparing the current Album…' : ''
+    : exportAnnouncementMessage(job, 'Album', now);
+  useExportAnnouncement(liveMessage, onAnnouncement);
+  const prepareDisabled = pendingAction !== null || waitMessage !== null || currentSourceEmpty;
+  const prepareReason = waitMessage
+    ?? (currentSourceEmpty ? 'Add a photo to the Album before preparing it.' : null);
+  const currentCountCopy = describeCurrentSource(
+    currentSource,
+    currentSource.count ?? 0,
+    'Album',
+  );
 
   return <div className="gallery-export album-export">
-    <ExportStatusAnnouncement
-      live={live}
-      message={liveMessage}
-      onAnnouncement={onAnnouncement}
-    />
     {job === undefined
       ? <>
           <p className="gallery-export__copy">
-            {photoCount.toLocaleString()} photos · {formatBytes(totalBytes)}. This is the album only —
-            Download all in Library stays the complete archive of every delivered original.
+            {currentCountCopy} This is the Album only — Download all in Library stays the complete
+            archive of every delivered original.
           </p>
           <button
             type="button"
             className="button button--primary"
-            disabled={photoCount === 0 || pendingAction !== null || otherExportActive}
+            disabled={prepareDisabled}
             onClick={() => run('prepare', onPrepare)}
           >
             <Download aria-hidden="true" />
             {pendingAction === 'prepare' ? 'Preparing album download…' : 'Download album photos'}
           </button>
+          {prepareReason === null ? null : <p className="gallery-export__copy">{prepareReason}</p>}
         </>
       : <div className="export-state">
-          <strong>{EXPORT_STATE_LABELS[job.state]}</strong>
-          <span>{jobDetail(job)}</span>
+          <ExportJobStatus
+            job={job}
+            eventTimezone={eventTimezone}
+            currentSource={currentSource}
+            currentLabel="Album"
+            now={now}
+          />
           {job.state === 'ready' && download === undefined
             ? <button
                 type="button"
@@ -111,15 +123,29 @@ export function AlbumExportControl({
                 ))}
               </div>
             : null}
-          {job.state === 'failed' || job.state === 'expired'
+          {(job.state === 'failed' || job.state === 'expired')
+            && job.errorCode !== 'EXPORT_SOURCE_REMOVED'
             ? <button
                 type="button"
                 className="button button--secondary"
-                disabled={pendingAction !== null || otherExportActive}
+                disabled={pendingAction !== null || waitMessage !== null}
                 onClick={() => run('retry', () => onRetry(job))}
               >
-                {pendingAction === 'retry' ? 'Retrying export…' : 'Retry export'}
+                {pendingAction === 'retry' ? 'Retrying export…' : 'Retry this prepared export'}
               </button>
+            : null}
+          {isTerminalExport(job)
+            ? <button
+                type="button"
+                className="button button--secondary"
+                disabled={prepareDisabled}
+                onClick={() => run('prepare', onPrepare)}
+              >
+                {pendingAction === 'prepare' ? 'Preparing current Album…' : 'Prepare current Album'}
+              </button>
+            : null}
+          {isTerminalExport(job) && prepareReason !== null
+            ? <p className="gallery-export__copy">{prepareReason}</p>
             : null}
         </div>}
   </div>;

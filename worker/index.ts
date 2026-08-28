@@ -31,11 +31,16 @@ import {
 
 const app = createApp();
 
-export class ExportWorkflow extends WorkflowEntrypoint<AppEnv, { jobId: string }> {
-  async run(event: WorkflowEvent<{ jobId: string }>, step: WorkflowStep) {
+export interface ExportWorkflowPayload {
+  jobId: string;
+  attempt: number;
+}
+
+export class ExportWorkflow extends WorkflowEntrypoint<AppEnv, ExportWorkflowPayload> {
+  async run(event: WorkflowEvent<ExportWorkflowPayload>, step: WorkflowStep) {
     return step.do('prepare private event export', async () => processExport(
       this.env,
-      event.payload.jobId,
+      event.payload,
       new Date(),
       MAX_EXPORT_PART_SOURCE_BYTES,
       event.timestamp.toISOString(),
@@ -201,6 +206,9 @@ export default {
           await cleanupMediaObjectWriteTombstones(env, executedAt);
           console.log(JSON.stringify({
             event: 'cleanup_completed',
+            workerVersionId: env.CF_VERSION_METADATA.id,
+            cleanupKind: 'hourly-maintenance',
+            cron: controller.cron,
             scheduledAt: scheduledAt.toISOString(),
             executedAt: executedAt.toISOString(),
             mediaPromotion: mediaPromotionSummary,
@@ -219,6 +227,9 @@ export default {
     context.waitUntil(scheduledCleanup(env, executedAt, (summary) => {
       console.log(JSON.stringify({
         event: 'cleanup_completed',
+        workerVersionId: env.CF_VERSION_METADATA.id,
+        cleanupKind: 'daily-lifecycle',
+        cron: controller.cron,
         scheduledAt: scheduledAt.toISOString(),
         executedAt: executedAt.toISOString(),
         ...summary,

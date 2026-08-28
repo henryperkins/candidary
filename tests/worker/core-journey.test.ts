@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
 import { ExportsRepository } from '../../worker/db/exports';
-import { processExport } from '../../worker/workflows/export';
 import { DEFAULT_EVENT_THEME_CONFIG } from '../../shared/event-theme';
 import { guestEventView } from '../../worker/http/event-view';
 import {
@@ -11,6 +10,7 @@ import {
   cookiesFrom,
   eventAccess,
   origin,
+  processExport,
   resetDatabase,
   testEnv,
   uploadPending,

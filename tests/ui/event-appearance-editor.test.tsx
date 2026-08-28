@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { useState } from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { StrictMode, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { EventView } from '../../shared/contracts';
@@ -64,7 +64,7 @@ const event: EventView = {
   reservedMediaCount: 0,
   storedMediaCount: 3,
   reservedBytes: 0,
-  storedBytes: 128,
+  storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z',
   managementAccessExpiresAt: '2026-10-19T00:00:00Z',
   purgeAfter: '2026-12-19T00:00:00Z',
@@ -87,7 +87,13 @@ const eventWithoutCover: EventView = {
   },
 };
 
-function Harness({ initial = eventWithoutCover }: { initial?: EventView }) {
+function Harness({
+  initial = eventWithoutCover,
+  onThemeSavedObserved = () => undefined,
+}: {
+  initial?: EventView;
+  onThemeSavedObserved?: (event: EventView) => void;
+}) {
   const [current, setCurrent] = useState(initial);
   const [state, setState] = useState<DomainAutosaveState | null>(null);
   return <>
@@ -99,7 +105,10 @@ function Harness({ initial = eventWithoutCover }: { initial?: EventView }) {
       // jsdom has no Worker, OffscreenCanvas, or ImageBitmap, so the composition
       // model is injected here exactly as `GuestUploadFlow` takes a transport.
       compositionRunner={async () => ({ x: 0.42, y: 0.61 })}
-      onThemeSaved={(updated) => setCurrent((held) => mergeThemeResponse(held, updated))}
+      onThemeSaved={(updated) => {
+        onThemeSavedObserved(updated);
+        setCurrent((held) => mergeThemeResponse(held, updated));
+      }}
       onCoverSaved={(updated) => setCurrent((held) => mergeCoverResponse(held, updated))}
       onCoverAccessFailure={() => undefined}
       onAutosaveStateChange={setState}
@@ -115,6 +124,15 @@ function themeMutationCalls(fetchMock: ReturnType<typeof vi.fn>) {
     String(input) === '/api/manage/events/event-a/theme'
     && String(init?.method).toUpperCase() === 'PUT'
   ));
+}
+
+async function settleMicrotasks() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 }
 
 function installMeasuredCover(width = 620) {
@@ -189,6 +207,35 @@ describe('event appearance editor', () => {
       version: 1, presetId: 'garden-party', overrides: {},
     });
     await waitFor(() => expect(screen.getByTestId('appearance-confirmed')).toHaveTextContent('garden-party'));
+    expect(screen.getByText('Event appearance saved')).toBeInTheDocument();
+  });
+
+  it('keeps one live Appearance queue through StrictMode replay and reports Saved only after adoption', async () => {
+    let release: (() => void) | null = null;
+    const onThemeSavedObserved = vi.fn();
+    const saved = { ...eventWithoutCover, theme: resolveEventTheme({
+      version: 1, presetId: 'garden-party', overrides: {},
+    }) };
+    const fetchMock = vi.fn(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return json({ event: saved });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<StrictMode><Harness onThemeSavedObserved={onThemeSavedObserved} /></StrictMode>);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Garden Party' }));
+
+    expect(themeMutationCalls(fetchMock)).toHaveLength(1);
+    expect(screen.getByTestId('appearance-state')).toHaveTextContent('appearance:saving');
+    expect(screen.queryByText('Event appearance saved')).not.toBeInTheDocument();
+    expect(release).not.toBeNull();
+
+    release!();
+    await waitFor(() => expect(screen.getByTestId('appearance-confirmed')).toHaveTextContent('garden-party'));
+
+    expect(onThemeSavedObserved).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByTestId('appearance-state'))
+      .toHaveTextContent('appearance:saved'));
     expect(screen.getByText('Event appearance saved')).toBeInTheDocument();
   });
 
@@ -445,6 +492,39 @@ describe('event appearance editor', () => {
     expect(primary).toHaveAccessibleDescription('Enter a six-digit hex color, such as #245c46.');
   });
 
+  it('does not adopt an Appearance response after its autosave generation retires', async () => {
+    let release: (() => void) | null = null;
+    const onThemeSaved = vi.fn();
+    const saved = { ...eventWithoutCover, theme: resolveEventTheme({
+      version: 1, presetId: 'garden-party', overrides: {},
+    }) };
+    const fetchMock = vi.fn(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return json({ event: saved });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const view = render(<StrictMode><EventAppearanceEditor
+      event={eventWithoutCover}
+      onThemeSaved={onThemeSaved}
+      onCoverSaved={() => undefined}
+      onAutosaveStateChange={() => undefined}
+      onEventWrite={(request) => request()}
+      onEventRead={(request) => request()}
+      onCoverAccessFailure={() => undefined}
+      compositionRunner={async () => ({ x: 0.42, y: 0.61 })}
+    /></StrictMode>);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Garden Party' }));
+    expect(themeMutationCalls(fetchMock)).toHaveLength(1);
+    expect(release).not.toBeNull();
+
+    view.unmount();
+    release!();
+    await settleMicrotasks();
+
+    expect(onThemeSaved).not.toHaveBeenCalled();
+  });
+
   it('keeps the newest draft after a failed save and retries it', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new TypeError('Failed to fetch'))));
     render(<Harness />);
@@ -516,6 +596,7 @@ describe('event appearance editor', () => {
   });
 
   it('uploads through the draft pipeline and removes with one publication', async () => {
+    installMeasuredCover();
     Object.defineProperties(URL, {
       createObjectURL: { configurable: true, value: vi.fn(() => 'blob:cover-preview') },
       revokeObjectURL: { configurable: true, value: vi.fn() },
@@ -569,7 +650,7 @@ describe('event appearance editor', () => {
           preview: { effect: 'natural', width: 1280, height: 853, byteSize: 900, recipeVersion: 1 },
         }) });
       }
-      if (path === '/api/manage/events/event-a/cover/drafts/draft-a/previews/natural' && method === 'POST') {
+      if (path.startsWith('/api/manage/events/event-a/cover/drafts/draft-a/previews/') && method === 'POST') {
         return Promise.resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) } as Response);
       }
       if (path === '/api/manage/events/event-a/cover/drafts/draft-a/composition' && method === 'PATCH') {
@@ -616,10 +697,33 @@ describe('event appearance editor', () => {
 
     fireEvent.change(input, { target: { files: [file] } });
     await waitFor(() => expect(calls).toContain('PATCH /api/manage/events/event-a/cover/drafts/draft-a/composition'));
+    const studio = screen.getByRole('dialog', { name: 'Cover Studio' });
+    fireEvent.click(within(studio).getByRole('button', { name: 'Continue' }));
+    fireEvent.click(await within(studio).findByRole('button', { name: 'Adjust framing' }));
+    fireEvent.change(within(studio).getByRole('slider', { name: 'Left or right' }), {
+      target: { value: '70' },
+    });
+    expect(studio.querySelector('.event-appearance-canvas__local-cover img'))
+      .toHaveStyle({ objectPosition: '70% 61%' });
+    fireEvent.click(within(studio).getByRole('button', { name: 'Back' }));
+
+    fireEvent.click(within(studio).getByRole('radio', { name: /^Warm Linen/u }));
+    fireEvent.click(within(studio).getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(within(studio).getByRole('heading', { name: 'Choose a style' })).toBeVisible());
+    expect(calls.filter((call) => call.includes('/previews/'))).toHaveLength(1);
+    expect(studio.querySelector('.responsive-cover__image')?.getAttribute('src'))
+      .toContain('/warm-linen/natural/');
+
+    fireEvent.click(within(studio).getByRole('button', { name: 'Back' }));
+    fireEvent.click(within(studio).getByRole('radio', { name: /Upload a photo/u }));
+    fireEvent.click(within(studio).getByRole('button', { name: 'Continue' }));
+    expect(within(studio).getByRole('slider', { name: 'Left or right' })).toHaveValue('70');
+    expect(studio.querySelector('.event-appearance-canvas__local-cover img'))
+      .toHaveAttribute('src', 'blob:cover-preview');
+    expect(studio.querySelector('.event-appearance-canvas__local-cover img'))
+      .toHaveStyle({ objectPosition: '70% 61%' });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Adjust framing' }));
-    await waitFor(() => expect(screen.getByRole('slider', { name: 'Left or right' })).toBeVisible());
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(calls.filter((call) => call.includes('/previews/'))).toHaveLength(5));
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(calls).toContain('POST /api/manage/events/event-a/cover/publications'));

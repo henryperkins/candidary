@@ -9,6 +9,7 @@ import type { AlbumShareView, PublicAlbumView } from '../../shared/contracts';
 import { createApp } from '../../worker/app';
 import { AlbumShareService } from '../../worker/services/album-share';
 import {
+  applySettings,
   eventAccess,
   origin,
   resetDatabase,
@@ -121,6 +122,17 @@ function albumCookie(response: Response): { cookie: string; token: string; setCo
 
 function publicAlbum(cookie: string) {
   return createApp().request('/api/album-share', { headers: { cookie } }, testEnv);
+}
+
+/**
+ * What the host sees when they check the album before sending it. The same
+ * projection as the link, read with the manager's own credential — no share
+ * cookie, no fragment, and nothing that could mint either.
+ */
+function managerPreview(access: Access) {
+  return createApp().request(`/api/manage/events/${access.event.id}/album/preview`, {
+    headers: { cookie: access.manager.cookie },
+  }, testEnv);
 }
 
 async function enabledShare(access: Access): Promise<AlbumShareView> {
@@ -451,7 +463,9 @@ describe('public album exchange and projection', () => {
       photoCount: 2,
       entries: [
         { kind: 'section', id: 'ceremony', heading: 'Ceremony' },
-        { kind: 'photo', photo: { id: photoIds[0], caption: 'First dance', previewAvailable: true } },
+        // Picked but unpublished: the photograph crosses to the album's
+        // audience, its guest-written caption does not.
+        { kind: 'photo', photo: { id: photoIds[0], caption: null, previewAvailable: true } },
         { kind: 'photo', photo: { id: photoIds[1], caption: 'After dinner', previewAvailable: true } },
       ],
     });
@@ -630,7 +644,7 @@ describe('public album preview authorization', () => {
     expect((await afterDelete.json<AlbumEnvelope>()).data.album).toMatchObject({
       coverMediaId: null,
       photoCount: 0,
-      entries: [{ kind: 'section', id: 'ceremony', heading: 'Ceremony' }],
+      entries: [],
     });
     expect((await createApp().request(
       `/api/album-share/media/${photoIds[1]}/preview`,
@@ -669,5 +683,209 @@ describe('public album preview authorization', () => {
     );
     expect(original.status).toBe(404);
     expect(original.headers.get('content-disposition')).toBeNull();
+  });
+});
+
+// Publication is a Guest-gallery decision. The Album link is a different
+// audience, and the only thing publication decides for it is whether a
+// guest-written caption travels — never whether the photograph is in the album.
+describe('album caption boundary', () => {
+  it('keeps album membership constant across publication and gallery visibility while only a published caption travels', async () => {
+    const access = await eventAccess();
+    const published = await seedPhoto(access, {
+      caption: 'Published caption',
+      publicationStatus: 'published',
+    });
+    const unpublished = await seedPhoto(access, {
+      caption: 'Unpublished caption',
+      publicationStatus: 'unpublished',
+    });
+    const hidden = await seedPhoto(access, {
+      caption: 'Hidden caption',
+      publicationStatus: 'hidden',
+    });
+    await saveAlbum(access, [published, unpublished, hidden], { coverMediaId: published });
+    const share = await enabledShare(access);
+    const session = albumCookie(await exchange(fragment(share.url)));
+
+    // Three publication states read with the guest gallery visible and hidden:
+    // the six cases the caption rule has to survive.
+    const readings: PublicAlbumView[] = [];
+    for (const galleryVisible of [true, false]) {
+      const settings = await applySettings(access, { galleryVisible });
+      expect(settings.status).toBe(200);
+      // Read the setting back rather than trusting the write: a toggle that
+      // quietly did nothing would collapse these six cases into three.
+      expect((await settings.json<{ data: { event: { galleryVisible: boolean } } }>())
+        .data.event.galleryVisible).toBe(galleryVisible);
+
+      const recipient = await publicAlbum(session.cookie);
+      const preview = await managerPreview(access);
+      expect(recipient.status).toBe(200);
+      expect(preview.status).toBe(200);
+      const recipientAlbum = (await recipient.json<AlbumEnvelope>()).data.album;
+      const previewAlbum = (await preview.json<AlbumEnvelope>()).data.album;
+
+      expect(recipientAlbum.entries).toEqual([
+        { kind: 'section', id: 'ceremony', heading: 'Ceremony' },
+        {
+          kind: 'photo',
+          photo: { id: published, caption: 'Published caption', previewAvailable: true },
+        },
+        { kind: 'photo', photo: { id: unpublished, caption: null, previewAvailable: true } },
+        { kind: 'photo', photo: { id: hidden, caption: null, previewAvailable: true } },
+      ]);
+      expect(recipientAlbum.photoCount).toBe(3);
+      expect(recipientAlbum.coverMediaId).toBe(published);
+      const serialized = JSON.stringify(recipientAlbum);
+      expect(serialized).not.toContain('Unpublished caption');
+      expect(serialized).not.toContain('Hidden caption');
+      // Preview exists so a host can check the link without sending it. A second
+      // projection that disagreed would make that a rehearsal, not the show.
+      expect(previewAlbum).toEqual(recipientAlbum);
+      readings.push(recipientAlbum);
+    }
+
+    expect(readings).toHaveLength(2);
+    expect(readings[0]).toEqual(readings[1]);
+  });
+});
+
+describe('manager album preview', () => {
+  it('answers before sharing was ever enabled and after it was stopped, without naming the credential', async () => {
+    const access = await eventAccess();
+    const [photoId] = await shareableAlbum(access);
+
+    const before = await managerPreview(access);
+    const beforeBody = await before.json<AlbumEnvelope>();
+
+    expect(before.status).toBe(200);
+    expect(before.headers.get('cache-control')).toBe('private, no-store');
+    expect(before.headers.get('vary')).toBe('Cookie');
+    expect(before.headers.get('set-cookie')).toBeNull();
+    expect(await env.DB.prepare('SELECT count(*) AS count FROM event_album_shares')
+      .first<number>('count')).toBe(0);
+    // The response is the album and nothing else, which is the structural
+    // reason it cannot carry a link: there is no field for one.
+    expect(Object.keys(beforeBody).sort()).toEqual(['data', 'requestId']);
+    expect(Object.keys(beforeBody.data)).toEqual(['album']);
+    expect(Object.keys(beforeBody.data.album).sort()).toEqual([
+      'coverMediaId', 'description', 'entries', 'photoCount', 'title',
+    ]);
+    expect(beforeBody.data.album.entries).toEqual([
+      { kind: 'photo', photo: { id: photoId, caption: null, previewAvailable: true } },
+    ]);
+
+    const share = await enabledShare(access);
+    const row = await env.DB.prepare(`
+      SELECT id, secret_digest, secret_ciphertext FROM event_album_shares WHERE event_id = ?
+    `).bind(access.event.id).first<{
+      id: string;
+      secret_digest: string;
+      secret_ciphertext: string;
+    }>();
+    if (!row) throw new Error('Expected the enabled share row.');
+    const during = await managerPreview(access);
+    const duringSerialized = JSON.stringify(await during.json<AlbumEnvelope>());
+
+    expect(during.status).toBe(200);
+    expect(during.headers.get('set-cookie')).toBeNull();
+    for (const secret of [
+      share.url, fragment(share.url), row.id, row.secret_digest, row.secret_ciphertext,
+    ]) {
+      expect(duringSerialized).not.toContain(secret);
+    }
+
+    expect((await managerShare(access, 'DELETE')).status).toBe(200);
+    const after = await managerPreview(access);
+
+    expect(after.status).toBe(200);
+    expect(after.headers.get('set-cookie')).toBeNull();
+    // Revocation ends the link, not the album. A host who just stopped sharing
+    // is exactly the person who wants to look at what they stopped sharing.
+    expect((await after.json<AlbumEnvelope>()).data.album).toEqual(beforeBody.data.album);
+  });
+
+  it('answers for an album that has no photos at all', async () => {
+    const access = await eventAccess();
+    await saveAlbum(access, [], { title: 'The evening', description: 'Still being chosen.' });
+
+    const response = await managerPreview(access);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect((await response.json<AlbumEnvelope>()).data.album).toEqual({
+      title: 'The evening',
+      description: 'Still being chosen.',
+      coverMediaId: null,
+      entries: [],
+      photoCount: 0,
+    });
+    // Sharing refuses this album; Preview still has to answer, because the host
+    // looking at an empty album is the one who needs to see that it is empty.
+    expect((await managerShare(access)).status).toBe(409);
+  });
+});
+
+describe('manager album preview images', () => {
+  it('serves the preview representation with private, non-sniffable, same-origin headers', async () => {
+    const access = await eventAccess();
+    const [photoId] = await shareableAlbum(access);
+    const { env: previewEnv } = withRecordingImages({
+      encode: () => ({
+        bytes: new Uint8Array([4, 2, 4]),
+        width: 800,
+        height: 600,
+        contentType: 'image/webp',
+      }),
+    });
+
+    const response = await createApp().request(
+      `/api/manage/events/${access.event.id}/album/media/${photoId}/preview`,
+      { headers: { cookie: access.manager.cookie } },
+      previewEnv,
+    );
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([4, 2, 4]));
+    expect(response.headers.get('content-type')).toBe('image/webp');
+    expect(response.headers.get('content-length')).toBe('3');
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(response.headers.get('vary')).toBe('Cookie');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('cross-origin-resource-policy')).toBe('same-origin');
+    // Read with the host's own credential; this route never mints an album one.
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(response.headers.get('content-disposition')).toBeNull();
+  });
+
+  it('gives one indistinguishable refusal for guessed, foreign, and unpicked photos', async () => {
+    const access = await eventAccess();
+    const other = await eventAccess('Foreign photos');
+    await shareableAlbum(access);
+    const [foreignPhoto] = await shareableAlbum(other);
+    const unpicked = await seedPhoto(access, { favorited: false });
+    const preview = (id: string) => createApp().request(
+      `/api/manage/events/${access.event.id}/album/media/${id}/preview`,
+      { headers: { cookie: access.manager.cookie } },
+      testEnv,
+    );
+
+    const responses = await Promise.all([
+      preview(crypto.randomUUID()),
+      preview(foreignPhoto!),
+      preview(unpicked),
+    ]);
+    const shapes = await Promise.all(responses.map(unavailableShape));
+
+    // Never existed, belongs to another event, or is simply not in this album:
+    // one body, so the route cannot be walked to learn which ids are real.
+    expect(new Set(shapes.map((shape) => JSON.stringify(shape))).size).toBe(1);
+    expect(shapes[0]).toEqual({
+      status: 403,
+      code: 'RESOURCE_FORBIDDEN',
+      message: 'This photo is not available.',
+      cacheControl: 'private, no-store',
+    });
   });
 });

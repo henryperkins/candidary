@@ -160,7 +160,7 @@ export function CreatePage() {
           assumption they never saw. */}
       <p className="form-note">{created.event.name} begins {formatEventStart(created.event.eventStartAt, created.event.eventTimezone)} ({created.event.eventTimezone}).</p>
       <p className="form-note">RSVP is paused until you add and validate the guest list. Photo delivery opens by itself when the event starts.</p>
-      <CopyableLinkCard label="Event link" value={created.eventLink} /><CopyableLinkCard label="Management link" value={created.managementLink} />
+      <CopyableLinkCard label="Event link" value={created.eventLink} /><CopyableLinkCard label="Management link" value={created.managementLink} sensitive />
       <div className="button-row">
         <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
         {/* The event is paused on purpose, so the receipt names the step that

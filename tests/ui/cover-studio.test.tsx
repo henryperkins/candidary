@@ -102,6 +102,8 @@ function Harness({
   composeState,
   focusMode = 'manual' as 'auto' | 'manual',
   styleThumbnail = readyThumbnail,
+  onStyleStepVisible = vi.fn(),
+  onEffectRetry = vi.fn(),
   accessFailure = null as CoverAccessFailure | null,
   settledOperation = null as EventCoverPreparationView | null,
 }: {
@@ -121,6 +123,8 @@ function Harness({
   composeState?: CoverDraftSessionState;
   focusMode?: 'auto' | 'manual';
   styleThumbnail?: (effect: EventCoverEffectId) => CoverStyleThumbnail;
+  onStyleStepVisible?: () => void;
+  onEffectRetry?: (effect: EventCoverEffectId) => void;
   accessFailure?: CoverAccessFailure | null;
   settledOperation?: EventCoverPreparationView | null;
 }) {
@@ -163,15 +167,51 @@ function Harness({
     canRemove={canRemove}
     presetThumbnail={(presetId) => `/assets/event-covers/v1/${presetId}.webp`}
     styleThumbnail={styleThumbnail}
+    onStyleStepVisible={onStyleStepVisible}
     onSourceChange={setSource}
     onUpload={onUpload}
     onEnterCompose={onEnterCompose}
     onFocusChange={(next) => { setMode('manual'); setFocus(next); }}
     onResetFocus={() => { setMode('auto'); setFocus(draft?.automaticFocus ?? DRAFT.automaticFocus); }}
     onEffectChange={setEffect}
+    onEffectRetry={onEffectRetry}
     onPublish={onPublish}
     onDiscardDraft={onDiscardDraft}
     onClose={onClose}
+  />;
+}
+
+function RetryingStyleHarness({
+  onRetry,
+  exposeFailure,
+  exposeSuccess,
+}: {
+  onRetry(effect: EventCoverEffectId): void;
+  exposeFailure(fail: () => void): void;
+  exposeSuccess?(succeed: () => void): void;
+}) {
+  const [warmPreview, setWarmPreview] = useState<CoverStyleThumbnail>({
+    status: 'error',
+    url: 'blob:warm-retained',
+    error: new Error('Preview unavailable'),
+  });
+  return <Harness
+    initialEffect="natural"
+    styleThumbnail={(effect) => effect === 'warm' ? warmPreview : readyThumbnail(effect)}
+    onEffectRetry={(effect) => {
+      onRetry(effect);
+      setWarmPreview({ status: 'loading', url: 'blob:warm-retained', error: null });
+      exposeFailure(() => setWarmPreview({
+        status: 'error',
+        url: 'blob:warm-retained',
+        error: new Error('Preview unavailable again'),
+      }));
+      exposeSuccess?.(() => setWarmPreview({
+        status: 'ready',
+        url: 'blob:warm-replacement',
+        error: null,
+      }));
+    }}
   />;
 }
 
@@ -767,14 +807,28 @@ describe('cover studio', () => {
     expect(screen.queryByRole('slider')).not.toBeInTheDocument();
   });
 
+  it('announces Style visibility only after the fixed five choices are on screen', async () => {
+    const user = userEvent.setup();
+    const onStyleStepVisible = vi.fn();
+    render(<Harness onStyleStepVisible={onStyleStepVisible} />);
+
+    expect(onStyleStepVisible).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    expect(onStyleStepVisible).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    expect(screen.getAllByRole('radio')).toHaveLength(5);
+    await waitFor(() => expect(onStyleStepVisible).toHaveBeenCalledTimes(1));
+  });
+
   it('keeps style radios usable while real thumbnails load or fail', async () => {
     const user = userEvent.setup();
     render(<Harness styleThumbnail={(effect) => effect === 'natural'
       ? { status: 'idle', url: null, error: null }
       : effect === 'warm'
-        ? { status: 'error', url: null, error: new Error('Preview unavailable') }
+        ? { status: 'error', url: 'blob:warm-retained', error: new Error('Preview unavailable') }
         : effect === 'film'
-          ? { status: 'loading', url: null, error: null }
+          ? { status: 'loading', url: 'blob:film-retained', error: null }
           : readyThumbnail(effect)} />);
     await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
     await user.click(screen.getByRole('button', { name: 'Continue' }));
@@ -785,6 +839,95 @@ describe('cover studio', () => {
     expect(screen.getByText('Preview unavailable. Try this preview again.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Retry Warm preview' })).toBeVisible();
     expect(screen.getByText('Loading Film preview')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Retrying Film preview' }))
+      .not.toBeInTheDocument();
+    const warm = screen.getByRole('radio', { name: /^Warm/u }).closest('li');
+    const film = screen.getByRole('radio', { name: /^Film/u }).closest('li');
+    expect(warm?.querySelector('img')).toHaveAttribute('src', 'blob:warm-retained');
+    expect(film?.querySelector('img')).toHaveAttribute('src', 'blob:film-retained');
+  });
+
+  it('retries a failed thumbnail without changing the selected style', async () => {
+    const user = userEvent.setup();
+    const onEffectRetry = vi.fn();
+    render(<Harness
+      initialEffect="natural"
+      onEffectRetry={onEffectRetry}
+      styleThumbnail={(effect) => effect === 'warm'
+        ? { status: 'error', url: null, error: new Error('Preview unavailable') }
+        : readyThumbnail(effect)}
+    />);
+    await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    await user.click(screen.getByRole('button', { name: 'Retry Warm preview' }));
+
+    expect(onEffectRetry).toHaveBeenCalledWith('warm');
+    expect(screen.getByRole('radio', { name: /^Natural/u })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /^Warm/u })).not.toBeChecked();
+  });
+
+  it('keeps a failed preview Retry focused, announced, and deduplicated through another failure', async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    let failRetry: (() => void) | null = null;
+    render(<RetryingStyleHarness
+      onRetry={onRetry}
+      exposeFailure={(fail) => { failRetry = fail; }}
+    />);
+    await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    const retry = screen.getByRole('button', { name: 'Retry Warm preview' });
+    retry.focus();
+    await user.click(retry);
+
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(retry).toHaveFocus();
+    expect(retry).toHaveAttribute('aria-disabled', 'true');
+    expect(retry).toHaveAttribute('aria-busy', 'true');
+    expect(retry).toHaveAccessibleName('Retrying Warm preview');
+    expect(retry.closest('[role="status"]')).toHaveAttribute('aria-live', 'polite');
+    fireEvent.click(retry);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('radio', { name: /^Natural/u })).toBeChecked();
+
+    act(() => { failRetry?.(); });
+    expect(retry).toHaveFocus();
+    expect(retry).not.toHaveAttribute('aria-disabled');
+    expect(retry).not.toHaveAttribute('aria-busy');
+    expect(retry).toHaveAccessibleName('Retry Warm preview');
+    expect(screen.getByText('Preview unavailable. Try this preview again.')).toBeVisible();
+    expect(screen.getByRole('radio', { name: /^Natural/u })).toBeChecked();
+  });
+
+  it('announces a successful preview Retry and moves focus to its connected style radio', async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    let succeedRetry: (() => void) | null = null;
+    render(<RetryingStyleHarness
+      onRetry={onRetry}
+      exposeFailure={() => undefined}
+      exposeSuccess={(succeed) => { succeedRetry = succeed; }}
+    />);
+    await user.click(screen.getByRole('radio', { name: /Warm Linen/u }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+
+    const retry = screen.getByRole('button', { name: 'Retry Warm preview' });
+    retry.focus();
+    await user.click(retry);
+    expect(retry).toHaveFocus();
+    expect(onRetry).toHaveBeenCalledTimes(1);
+
+    act(() => { succeedRetry?.(); });
+
+    const warm = screen.getByRole('radio', { name: /^Warm/u });
+    await waitFor(() => expect(warm).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByText('Warm preview ready.')).toHaveAttribute('role', 'status');
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('radio', { name: /^Natural/u })).toBeChecked();
+    expect(warm).not.toBeChecked();
   });
 
   it('renders a before-dispatch access failure without sending Done', async () => {

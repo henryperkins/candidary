@@ -90,6 +90,8 @@ export interface CoverStudioSession {
   setFocus(focus: CoverFocusValue): void;
   resetFocus(): void;
   setEffect(effect: EventCoverEffectId): Promise<void>;
+  prefetchStylePreviews(): Promise<void>;
+  retryEffectPreview(effect: EventCoverEffectId): Promise<void>;
   publish(): Promise<CoverOperationAnswer>;
   discard(): Promise<void>;
   close(): void;
@@ -215,20 +217,46 @@ export function useCoverStudioSession({
     setDraftSessionStateValue(next);
   }
 
-  const revokeUrls = useCallback((preserveBytes: boolean) => {
-    for (const controller of previewControllersRef.current.values()) controller.abort();
+  const replacePreviewUrl = useCallback((effect: EventCoverEffectId, url: string) => {
+    const previous = previewUrlsRef.current.get(effect);
+    previewUrlsRef.current.set(effect, url);
+    if (previous && previous !== url) {
+      const stillOwned = [...previewUrlsRef.current.entries()]
+        .some(([heldEffect, heldUrl]) => heldEffect !== effect && heldUrl === previous);
+      if (!stillOwned) URL.revokeObjectURL(previous);
+    }
+  }, []);
+
+  const revokeUrls = useCallback((preserveBytes: boolean, preserveUrls = false) => {
+    for (const [effect, controller] of previewControllersRef.current) {
+      controller.abort();
+      previewAttemptedRef.current.delete(effect);
+    }
     previewControllersRef.current.clear();
     previewPromisesRef.current.clear();
-    for (const url of new Set(previewUrlsRef.current.values())) URL.revokeObjectURL(url);
-    previewUrlsRef.current.clear();
-    if (!preserveBytes) {
+    if (!preserveUrls) {
+      for (const url of new Set(previewUrlsRef.current.values())) URL.revokeObjectURL(url);
+      previewUrlsRef.current.clear();
+    }
+    if (preserveBytes) {
+      for (const effect of previewAttemptedRef.current) {
+        if (!previewBytesRef.current.has(effect)) previewAttemptedRef.current.delete(effect);
+      }
+    } else {
       previewBytesRef.current.clear();
       previewAttemptedRef.current.clear();
     }
     if (mountedRef.current) {
-      setStyleThumbnails(idleThumbnails());
+      setStyleThumbnails(preserveUrls
+        ? Object.fromEntries(EVENT_COVER_EFFECTS.map((effect) => {
+            const url = previewUrlsRef.current.get(effect);
+            return [effect, url
+              ? { status: 'loading', url, error: null }
+              : { status: 'idle', url: null, error: null }];
+          })) as Record<EventCoverEffectId, CoverStyleThumbnail>
+        : idleThumbnails());
       const held = draftRef.current;
-      if (held) updateDraft({ ...held, previewUrl: '' });
+      if (held && !preserveUrls) updateDraft({ ...held, previewUrl: '' });
     }
   }, []);
 
@@ -268,37 +296,55 @@ export function useCoverStudioSession({
         return Promise.resolve();
       }
       const url = createPreviewUrl(cachedBytes);
-      previewUrlsRef.current.set(effect, url);
+      replacePreviewUrl(effect, url);
       setThumbnail(effect, { status: 'ready', url, error: null });
       if (effect === 'natural') updateDraft({ ...heldDraft, previewUrl: url });
       return Promise.resolve();
     }
     if (previewAttemptedRef.current.has(effect)) return Promise.resolve();
     previewAttemptedRef.current.add(effect);
-    setThumbnail(effect, { status: 'loading', url: null, error: null });
+    setThumbnail(effect, {
+      status: 'loading',
+      url: previewUrlsRef.current.get(effect) ?? null,
+      error: null,
+    });
     const controller = new AbortController();
     previewControllersRef.current.set(effect, controller);
     const draftId = heldDraft.view.id;
     const request = (async () => {
       try {
         const bytes = await readCoverEffectPreview(event.id, draftId, effect, controller.signal);
-        if (draftRef.current?.view.id !== draftId || controller.signal.aborted) return;
+        const currentDraft = draftRef.current;
+        if (currentDraft?.view.id !== draftId
+            || controller.signal.aborted
+            || previewControllersRef.current.get(effect) !== controller) return;
         previewBytesRef.current.set(effect, bytes);
         const url = createPreviewUrl(bytes);
-        previewUrlsRef.current.set(effect, url);
+        replacePreviewUrl(effect, url);
         setThumbnail(effect, { status: 'ready', url, error: null });
-        if (effect === 'natural') updateDraft({ ...draftRef.current, previewUrl: url });
+        if (effect === 'natural') updateDraft({ ...currentDraft, previewUrl: url });
       } catch (error) {
-        if (controller.signal.aborted) return;
-        setThumbnail(effect, { status: 'error', url: null, error });
-      } finally {
-        previewControllersRef.current.delete(effect);
-        previewPromisesRef.current.delete(effect);
+        if (controller.signal.aborted
+            || previewControllersRef.current.get(effect) !== controller) return;
+        setThumbnail(effect, {
+          status: 'error',
+          url: previewUrlsRef.current.get(effect) ?? null,
+          error,
+        });
       }
     })();
     previewPromisesRef.current.set(effect, request);
+    const release = () => {
+      if (previewControllersRef.current.get(effect) === controller) {
+        previewControllersRef.current.delete(effect);
+      }
+      if (previewPromisesRef.current.get(effect) === request) {
+        previewPromisesRef.current.delete(effect);
+      }
+    };
+    void request.then(release, release);
     return request;
-  }, [event.id, setThumbnail]);
+  }, [event.id, replacePreviewUrl, setThumbnail]);
 
   const installReadyDraft = useCallback((view: CoverDraftView, naturalBytes: ArrayBuffer) => {
     if (!view.master) throw new Error('The ready cover draft is missing master geometry.');
@@ -311,7 +357,7 @@ export function useCoverStudioSession({
     const url = createPreviewUrl(naturalBytes);
     previewBytesRef.current.set('natural', naturalBytes);
     previewAttemptedRef.current.add('natural');
-    previewUrlsRef.current.set('natural', url);
+    replacePreviewUrl('natural', url);
     setThumbnail('natural', { status: 'ready', url, error: null });
     updateDraft({
       id: view.id,
@@ -330,7 +376,7 @@ export function useCoverStudioSession({
       updateSelection({ ...selectionRef.current, focus: initialFocus });
     }
     updateDraftState({ status: 'ready', error: null });
-  }, [setThumbnail]);
+  }, [replacePreviewUrl, setThumbnail]);
 
   const runDraft = useCallback((
     key: string,
@@ -344,7 +390,7 @@ export function useCoverStudioSession({
     unresolvedDraftAttemptsRef.current.set(key, source);
     draftIntentKeysRef.current.add(key);
     const generation = ++generationRef.current;
-    revokeUrls(false);
+    revokeUrls(false, true);
     updateDraft(null);
     updateDraftState({ status: 'loading', error: null });
 
@@ -389,6 +435,11 @@ export function useCoverStudioSession({
         const naturalController = new AbortController();
         previewControllersRef.current.set('natural', naturalController);
         previewAttemptedRef.current.add('natural');
+        setThumbnail('natural', {
+          status: 'loading',
+          url: previewUrlsRef.current.get('natural') ?? null,
+          error: null,
+        });
         let naturalBytes: ArrayBuffer;
         try {
           naturalBytes = await readCoverEffectPreview(
@@ -397,8 +448,20 @@ export function useCoverStudioSession({
             'natural',
             naturalController.signal,
           );
+        } catch (error) {
+          if (!naturalController.signal.aborted
+              && previewControllersRef.current.get('natural') === naturalController) {
+            setThumbnail('natural', {
+              status: 'error',
+              url: previewUrlsRef.current.get('natural') ?? null,
+              error,
+            });
+          }
+          throw error;
         } finally {
-          previewControllersRef.current.delete('natural');
+          if (previewControllersRef.current.get('natural') === naturalController) {
+            previewControllersRef.current.delete('natural');
+          }
         }
         if (generation !== generationRef.current) return;
         if (view.state === 'inspected') {
@@ -431,7 +494,7 @@ export function useCoverStudioSession({
       () => pendingDraftPromisesRef.current.delete(request),
     );
     return request;
-  }, [compositionRunner, event.cover.revision, event.id, installReadyDraft, reconciler, revokeUrls]);
+  }, [compositionRunner, event.cover.revision, event.id, installReadyDraft, reconciler, revokeUrls, setThumbnail]);
 
   const openStudio = useCallback(() => {
     const terminal = reconciler.controller.getState().phase;
@@ -449,13 +512,17 @@ export function useCoverStudioSession({
     }
     reconciler.controller.releaseTerminal();
     setOpen(true);
-    if (draftRef.current && !draftRef.current.previewUrl) void ensureEffectPreview('natural');
+    if (selectionRef.current.source?.kind === 'upload'
+        && draftRef.current
+        && !draftRef.current.previewUrl) {
+      void ensureEffectPreview('natural');
+    }
   }, [ensureEffectPreview, event, reconciler.controller, revokeUrls]);
 
   const chooseSource = useCallback((source: CoverSessionSource) => {
     if (discardingRef.current) return;
-    const keepUploadFocus = source?.kind === 'upload'
-      && selectionRef.current.source?.kind === 'upload';
+    const keepUploadFocus = draftRef.current !== null
+      || (source?.kind === 'upload' && selectionRef.current.source?.kind === 'upload');
     updateSelection({
       ...selectionRef.current,
       source,
@@ -520,10 +587,24 @@ export function useCoverStudioSession({
   const setEffect = useCallback(async (effect: EventCoverEffectId) => {
     if (discardingRef.current) throw new Error('Cover draft discard is in progress.');
     updateSelection({ ...selectionRef.current, effect });
-    if (styleThumbnails[effect].status === 'error') {
-      previewAttemptedRef.current.delete(effect);
+    if (selectionRef.current.source?.kind === 'upload' && draftRef.current) {
+      await ensureEffectPreview(effect);
     }
-    if (draftRef.current) await ensureEffectPreview(effect);
+  }, [ensureEffectPreview]);
+
+  const prefetchStylePreviews = useCallback(async () => {
+    if (selectionRef.current.source?.kind !== 'upload') return;
+    await Promise.all(EVENT_COVER_EFFECTS.map((effect) => ensureEffectPreview(effect)));
+  }, [ensureEffectPreview]);
+
+  const retryEffectPreview = useCallback(async (effect: EventCoverEffectId) => {
+    if (discardingRef.current) throw new Error('Cover draft discard is in progress.');
+    if (selectionRef.current.source?.kind !== 'upload') return;
+    const inFlight = previewPromisesRef.current.get(effect);
+    if (inFlight) return inFlight;
+    if (styleThumbnails[effect].status !== 'error') return;
+    previewAttemptedRef.current.delete(effect);
+    await ensureEffectPreview(effect);
   }, [ensureEffectPreview, styleThumbnails]);
 
   const publish = useCallback(async (): Promise<CoverOperationAnswer> => {
@@ -696,12 +777,13 @@ export function useCoverStudioSession({
 
   let canvasPreview: CoverCanvasPreview = { kind: 'authoritative' };
   if (open) {
-    const selectedThumbnail = styleThumbnails[selection.effect];
-    const draftUrl = selectedThumbnail.status === 'ready'
-      ? selectedThumbnail.url
-      : draft?.previewUrl;
-    if (draftUrl) canvasPreview = { kind: 'draft', url: draftUrl };
-    else if (selection.source?.kind === 'preset') {
+    if (selection.source?.kind === 'upload') {
+      const selectedThumbnail = styleThumbnails[selection.effect];
+      const draftUrl = selectedThumbnail.status === 'ready'
+        ? selectedThumbnail.url
+        : draft?.previewUrl;
+      if (draftUrl) canvasPreview = { kind: 'draft', url: draftUrl };
+    } else if (selection.source?.kind === 'preset') {
       const current = event.cover.config;
       const unchanged = current.source.kind === 'preset'
         && current.source.presetId === selection.source.presetId
@@ -733,6 +815,8 @@ export function useCoverStudioSession({
     setFocus,
     resetFocus,
     setEffect,
+    prefetchStylePreviews,
+    retryEffectPreview,
     publish,
     discard,
     close,

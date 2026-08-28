@@ -466,11 +466,19 @@ describe('durable notification outbox', () => {
     await testEnv.MEDIA_BUCKET.put(orphanKey, new Uint8Array([1]));
     await testEnv.MEDIA_BUCKET.put(discoveredKey, new Uint8Array([2]));
     const scheduled: Promise<unknown>[] = [];
+    const versionedEnv = {
+      ...testEnv,
+      CF_VERSION_METADATA: {
+        id: 'worker-version-hourly',
+        tag: 'hourly-test',
+        timestamp: '2026-07-21T11:55:00.000Z',
+      },
+    };
     const clock = vi.useFakeTimers();
     clock.setSystemTime(executedAt);
 
     worker.scheduled!({ cron: '47 * * * *', scheduledTime: scheduledAt.getTime() } as ScheduledController,
-      testEnv,
+      versionedEnv,
       { waitUntil: (promise: Promise<unknown>) => scheduled.push(promise), passThroughOnException() {} } as unknown as ExecutionContext);
     await Promise.all(scheduled);
     const second: Promise<unknown>[] = [];
@@ -479,7 +487,7 @@ describe('durable notification outbox', () => {
       cron: '47 * * * *',
       scheduledTime: scheduledAt.getTime() + 60 * 60 * 1_000,
     } as ScheduledController,
-    testEnv,
+    versionedEnv,
     {
       waitUntil: (promise: Promise<unknown>) => second.push(promise),
       passThroughOnException() {},
@@ -499,6 +507,9 @@ describe('durable notification outbox', () => {
     }));
     expect(logged.mock.calls.map(([entry]) => JSON.parse(String(entry)))).toContainEqual(expect.objectContaining({
       event: 'cleanup_completed',
+      workerVersionId: 'worker-version-hourly',
+      cleanupKind: 'hourly-maintenance',
+      cron: '47 * * * *',
       scheduledAt: scheduledAt.toISOString(),
       executedAt: executedAt.toISOString(),
       mediaPromotion: expect.objectContaining({ inspected: 0, promoted: 0 }),
@@ -508,5 +519,47 @@ describe('durable notification outbox', () => {
     expect(await testEnv.MEDIA_BUCKET.head(discoveredKey)).toBeNull();
     expect(await new MediaObjectWriteTombstoneRepository(testEnv.DB).get(discoveredKey, 'legacy'))
       .toMatchObject({ suppressionStartedAt: expect.any(String) });
+  });
+
+  it('attributes the daily lifecycle cleanup to its exact version and cron', async () => {
+    const cron = '17 3 * * *';
+    const scheduledAt = new Date('2026-07-22T03:17:00.000Z');
+    const executedAt = new Date('2026-07-22T03:17:05.000Z');
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const pending: Promise<unknown>[] = [];
+    const clock = vi.useFakeTimers();
+    clock.setSystemTime(executedAt);
+    const versionedEnv = {
+      ...testEnv,
+      CF_VERSION_METADATA: {
+        id: 'worker-version-daily',
+        tag: 'daily-test',
+        timestamp: '2026-07-22T03:00:00.000Z',
+      },
+    };
+
+    worker.scheduled!(
+      { cron, scheduledTime: scheduledAt.getTime() } as ScheduledController,
+      versionedEnv,
+      {
+        waitUntil: (promise: Promise<unknown>) => pending.push(promise),
+        passThroughOnException() {},
+      } as unknown as ExecutionContext,
+    );
+    await Promise.all(pending);
+    clock.useRealTimers();
+
+    const records = logged.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(records).toContainEqual(expect.objectContaining({
+      event: 'cleanup_completed',
+      workerVersionId: 'worker-version-daily',
+      cleanupKind: 'daily-lifecycle',
+      cron,
+      scheduledAt: scheduledAt.toISOString(),
+      executedAt: executedAt.toISOString(),
+    }));
+    expect(records).not.toContainEqual(expect.objectContaining({
+      event: 'cleanup_completed', cleanupKind: 'hourly-maintenance',
+    }));
   });
 });

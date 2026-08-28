@@ -18,6 +18,17 @@ export const MAX_EXPORT_PART_SOURCE_BYTES = 2 * 1024 * 1024 * 1024;
 export const MANAGER_MEDIA_PAGE_SIZE = 24;
 export const MANAGER_MEDIA_MAX_PAGE_SIZE = 50;
 export const MANAGER_BULK_SELECTION_MAX = 50;
+/**
+ * How long a host-deleted photo stays recoverable, before the two limits that
+ * always win: the event's management access expiry and its purge time. Recovery
+ * never outlives the authorization needed to perform it, so the durable
+ * `restoreUntil` the server returns is the minimum of all three — never this
+ * number on its own.
+ */
+export const MEDIA_RECOVERY_WINDOW_DAYS = 30;
+export const MEDIA_RECOVERY_WINDOW_MS = MEDIA_RECOVERY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+/** One scheduled pass terminalizes at most this many expired recoverable photos. */
+export const MEDIA_RECOVERY_CLEANUP_BATCH = 100;
 // Host private Gallery: the one non-sentinel timeline instant per stored photo
 // and the bounded chronological page size shared by server and production client.
 export const MEDIA_TIMELINE_SENTINEL = '1970-01-01T00:00:00.000Z';

@@ -48,3 +48,30 @@ export function fetchPublicAlbum(signal?: AbortSignal): Promise<{ album: PublicA
 export function publicAlbumPreview(mediaId: string): string {
   return `/api/album-share/media/${encodeURIComponent(mediaId)}/preview`;
 }
+
+function managerAlbumPath(eventId: string): string {
+  return `/api/manage/events/${encodeURIComponent(eventId)}/album`;
+}
+
+/**
+ * Manager Preview is not sharing.
+ *
+ * It reads the same public projection through ordinary Manager authentication, so a host can see
+ * exactly what a recipient would see before a link has ever existed, after one was stopped, and
+ * with nothing picked yet. It asks nothing of the share status, exchanges no fragment, touches no
+ * album-share cookie, and carries back no link, token, or ciphertext.
+ */
+export function fetchManagerAlbumPreview(
+  eventId: string,
+  signal?: AbortSignal,
+): Promise<{ album: PublicAlbumView }> {
+  return api<{ album: PublicAlbumView }>(
+    `${managerAlbumPath(eventId)}/preview`,
+    signal ? { signal } : {},
+  );
+}
+
+/** The Manager-authenticated twin of `publicAlbumPreview`, for the same bytes. */
+export function managerAlbumPreviewImage(eventId: string, mediaId: string): string {
+  return `${managerAlbumPath(eventId)}/media/${encodeURIComponent(mediaId)}/preview`;
+}

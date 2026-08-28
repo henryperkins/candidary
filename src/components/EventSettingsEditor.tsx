@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, Ref } from 'react';
 
 import type { EventView } from '../../shared/contracts';
@@ -62,6 +62,11 @@ interface EditorState {
 interface EventSettingsSave {
   payload: EventSettingsPayload;
   generations: FieldGenerations;
+}
+
+interface SettingsQueueOwner {
+  generation: number;
+  queue: AutosaveQueue<EventSettingsSave>;
 }
 
 type ScheduleFields = Pick<
@@ -165,11 +170,16 @@ export function EventSettingsEditor({
   // Everything the queue callbacks read has to be readable synchronously from
   // a promise continuation, so state is mirrored rather than closed over.
   const stateRef = useRef(state);
-  const queueRef = useRef<AutosaveQueue<EventSettingsSave> | null>(null);
+  const queueRef = useRef<SettingsQueueOwner | null>(null);
+  const queueGenerationRef = useRef(0);
+  const sendSettingsRef = useRef<((
+    save: EventSettingsSave,
+    generation: number,
+  ) => Promise<AutosaveOutcome>) | null>(null);
+  const describeFailureRef = useRef<((error: unknown) => AutosaveFailure) | null>(null);
   // The queue is built once, so anything it closes over has to be read through
   // a ref or it would keep calling the first render props forever.
   const savedRef = useRef(onSettingsSaved);
-  savedRef.current = onSettingsSaved;
   // The settings queue is serialized, so this is the exact confirmed server
   // schedule immediately before each queued snapshot starts. Comparing at
   // request time avoids calling a name-only save schedule-changing merely
@@ -190,7 +200,18 @@ export function EventSettingsEditor({
     return eventSettingsKey({ ...payload, rsvpRosterVersion: 0 });
   }
 
-  async function sendSettings(save: EventSettingsSave): Promise<AutosaveOutcome> {
+  function ownsQueueGeneration(generation: number): boolean {
+    return queueRef.current?.generation === generation;
+  }
+
+  function currentQueue(): AutosaveQueue<EventSettingsSave> | null {
+    return queueRef.current?.queue ?? null;
+  }
+
+  async function sendSettings(
+    save: EventSettingsSave,
+    generation: number,
+  ): Promise<AutosaveOutcome> {
     const { payload } = save;
     const scheduleChanged = scheduleKey(payload) !== confirmedScheduleKeyRef.current;
     try {
@@ -198,6 +219,13 @@ export function EventSettingsEditor({
         '/api/manage/events/' + eventId + '/settings',
         { method: 'PATCH', body: JSON.stringify(payload) },
       ));
+      const confirmedKey = eventSettingsKey(canonicalEventSettings(
+        draftFromEvent(result.event),
+        result.event.rsvpRosterVersion,
+      ));
+      if (!ownsQueueGeneration(generation)) {
+        return { status: 'confirmed', key: confirmedKey };
+      }
       raceRef.current = null;
       confirmedThroughRef.current = save.generations;
       confirmedScheduleKeyRef.current = scheduleKey(draftFromEvent(result.event));
@@ -206,12 +234,10 @@ export function EventSettingsEditor({
       // zone and may return a roster version this payload did not carry.
       return {
         status: 'confirmed',
-        key: eventSettingsKey(canonicalEventSettings(
-          draftFromEvent(result.event),
-          result.event.rsvpRosterVersion,
-        )),
+        key: confirmedKey,
       };
     } catch (caught) {
+      if (!ownsQueueGeneration(generation)) throw caught;
       if (!(caught instanceof ClientApiError) || caught.code !== 'RSVP_ROSTER_INVALID') throw caught;
       // One read decides which kind of refusal this is. A version that moved is
       // a race worth rebasing; the same version is a roster that cannot open at
@@ -219,6 +245,9 @@ export function EventSettingsEditor({
       const refreshed = await onEventRead(() => (
         api<{ event: EventView }>('/api/manage/events/' + eventId)
       ));
+      // A retired queue must settle terminally. Returning `rebased` here would
+      // put its already-disposed state back into a perpetual saving phase.
+      if (!ownsQueueGeneration(generation)) throw caught;
       confirmedScheduleKeyRef.current = scheduleKey(draftFromEvent(refreshed.event));
       savedRef.current(refreshed.event, { scheduleChanged: false });
       if (refreshed.event.rsvpRosterVersion === payload.rsvpRosterVersion) throw caught;
@@ -267,15 +296,39 @@ export function EventSettingsEditor({
       : { message: failure.message, retryable: false, escalation: failure };
   }
 
-  if (queueRef.current === null) {
-    queueRef.current = createAutosaveQueue<EventSettingsSave>({
+  // Publish only committed callbacks. Writing these refs during render would
+  // let an abandoned concurrent render replace the live queue's event owner.
+  useLayoutEffect(() => {
+    savedRef.current = onSettingsSaved;
+    sendSettingsRef.current = sendSettings;
+    describeFailureRef.current = describeFailure;
+  });
+
+  useLayoutEffect(() => {
+    const generation = queueGenerationRef.current + 1;
+    queueGenerationRef.current = generation;
+    const queue = createAutosaveQueue<EventSettingsSave>({
       baselineKey: baselineKeyOf(stateRef.current),
-      save: (snapshot) => sendSettings(snapshot),
-      describeFailure: (error) => describeFailure(error),
-      onChange: setAutosave,
+      save: (snapshot) => {
+        const send = sendSettingsRef.current;
+        if (!send) return Promise.reject(new Error('The settings save owner is unavailable.'));
+        return send(snapshot, generation);
+      },
+      describeFailure: (error) => describeFailureRef.current?.(error) ?? {
+        message: 'These settings could not be saved.',
+        retryable: true,
+      },
+      onChange: (next) => {
+        if (queueRef.current?.generation === generation) setAutosave(next);
+      },
     });
-  }
-  const queue = queueRef.current;
+    const owner: SettingsQueueOwner = { generation, queue };
+    queueRef.current = owner;
+    return () => {
+      if (queueRef.current === owner) queueRef.current = null;
+      queue.dispose();
+    };
+  }, [eventId]);
 
   // Silent records state without touching the queue: describeFailure runs
   // inside the queue settle path, and re-entering it there would decide the
@@ -286,7 +339,7 @@ export function EventSettingsEditor({
     if (mode === 'silent') return;
     const errors = editorErrors(next, eventDate);
     const payload = canonicalEventSettings(next.draft, next.rosterVersion);
-    queue.submit(
+    currentQueue()?.submit(
       {
         key: eventSettingsKey(payload),
         // Every general setting is a controlled value, so what the host can see
@@ -313,9 +366,9 @@ export function EventSettingsEditor({
     }, mode);
   }
 
-  useEffect(() => () => { queue.dispose(); }, [queue]);
-
   useEffect(() => {
+    const queue = queueRef.current?.queue;
+    if (!queue) return;
     const current = stateRef.current;
     const incoming = draftFromEvent(event);
     confirmedScheduleKeyRef.current = scheduleKey(incoming);
@@ -338,7 +391,7 @@ export function EventSettingsEditor({
     queue.adoptBaseline(baseline);
     const exhausted = raceRef.current !== null && raceRef.current.races >= 2;
     apply(next, exhausted ? 'silent' : 'enqueue');
-  }, [event, queue]);
+  }, [event]);
 
   const errors = editorErrors(state, eventDate);
   const blockingName = EVENT_SETTINGS_FIELDS.find((field) => errors[field]);
@@ -355,7 +408,7 @@ export function EventSettingsEditor({
     : null;
   useEffect(() => {
     if (blockedKey === null) return;
-    queue.submit({
+    queueRef.current?.queue.submit({
       key: blockedKey,
       intent: JSON.stringify([state.draft, Object.entries(errors).sort()]),
       snapshot: null,
@@ -363,7 +416,7 @@ export function EventSettingsEditor({
     // State and errors are deliberately not dependencies: this exists only to
     // tell the queue the domain became unsendable, and rerunning it on every
     // keystroke would fight apply.
-  }, [blockedKey, queue]);
+  }, [blockedKey]);
 
   useEffect(() => {
     onAutosaveStateChange({
@@ -375,7 +428,7 @@ export function EventSettingsEditor({
     });
   }, [autosave, blockingField?.label, blockingField?.message, onAutosaveStateChange]);
 
-  useImperativeHandle(ref, () => ({ flush: () => { queue.flush(); } }), [queue]);
+  useImperativeHandle(ref, () => ({ flush: () => { queueRef.current?.queue.flush(); } }), []);
 
   function describedBy(field: EventSettingsField) {
     return errors[field] ? 'settings-' + field + '-error' : undefined;
@@ -392,7 +445,7 @@ export function EventSettingsEditor({
   function flushOnEnter(keyEvent: KeyboardEvent) {
     if (keyEvent.key !== 'Enter') return;
     keyEvent.preventDefault();
-    queue.flush();
+    currentQueue()?.flush();
   }
 
   // A raw value that canonicalizes to what is already stored is normalized on
@@ -406,7 +459,7 @@ export function EventSettingsEditor({
     if (current.draft[field] !== canonical) {
       apply({ ...current, draft: { ...current.draft, [field]: canonical } }, 'enqueue');
     }
-    queue.flush();
+    currentQueue()?.flush();
   }
 
   return <section className="event-settings-editor" aria-labelledby="event-settings-title">
@@ -419,7 +472,10 @@ export function EventSettingsEditor({
         onRetry={() => apply(stateRef.current, 'immediate')}
       />
     </div>
-    <form className="settings-form" onSubmit={(formEvent) => { formEvent.preventDefault(); queue.flush(); }}>
+    <form className="settings-form" onSubmit={(formEvent) => {
+      formEvent.preventDefault();
+      currentQueue()?.flush();
+    }}>
       <div className="settings-field">
         <label htmlFor="settings-name">Event name</label>
         <input

@@ -7,8 +7,16 @@ import {
   ALBUM_MAX_ENTRIES,
   ALBUM_TITLE_MAX_LENGTH,
 } from '../../shared/constants';
-import type { AlbumView } from '../../shared/contracts';
-import { eventAccess, origin, resetDatabase, testEnv, writeHeaders } from './helpers';
+import type { AlbumEntryView, AlbumView, PublicAlbumView } from '../../shared/contracts';
+import {
+  eventAccess,
+  origin,
+  resetDatabase,
+  testEnv,
+  trashMedia,
+  uploadPending,
+  writeHeaders,
+} from './helpers';
 
 beforeEach(resetDatabase);
 
@@ -17,6 +25,18 @@ const NOW = '2026-08-23T00:00:00.000Z';
 
 function mediaId(index: number) {
   return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+}
+
+/**
+ * The album row this entry occupies, named the way a host would name it: the
+ * photograph, the photograph a retained slot is still holding a place for, or
+ * the section divider itself. Written once because an album entry became a
+ * three-way union the moment trash could stand in for a picture.
+ */
+function entryId(entry: AlbumEntryView): string {
+  if (entry.kind === 'photo') return entry.photo.id;
+  if (entry.kind === 'photo-retained') return entry.slot.mediaId;
+  return entry.id;
 }
 
 async function seedStored(
@@ -118,18 +138,22 @@ describe('album read', () => {
   it('is empty and unsaved before anything is picked', async () => {
     const access = await eventAccess();
     const album = await albumOf(access);
-    expect(album).toMatchObject({
+    // Exact rather than partial: an album a host has never touched is the one
+    // read where every field of the contract should be visible at once.
+    expect(album).toEqual({
       revision: 0,
       saved: false,
       title: 'Album',
       description: '',
       coverMediaId: null,
       effectiveCoverMediaId: null,
+      coverRetained: null,
+      entries: [],
       photoCount: 0,
+      retainedCount: 0,
       sectionCount: 0,
       totalBytes: 0,
     });
-    expect(album.entries).toEqual([]);
   });
 
   it('appends picks that have no stored position, in timeline order', async () => {
@@ -141,8 +165,7 @@ describe('album read', () => {
     const album = await albumOf(access);
     expect(album.photoCount).toBe(2);
     expect(album.totalBytes).toBe(2048);
-    expect(album.entries.map((entry) => (entry.kind === 'photo' ? entry.photo.id : entry.id)))
-      .toEqual([mediaId(1), mediaId(2)]);
+    expect(album.entries.map(entryId)).toEqual([mediaId(1), mediaId(2)]);
   });
 
   it('drops a stored position whose photo is no longer picked', async () => {
@@ -201,12 +224,13 @@ describe('album order', () => {
       description: 'The photographs we kept together.',
       coverMediaId: first,
       effectiveCoverMediaId: first,
+      coverRetained: null,
       photoCount: 2,
+      retainedCount: 0,
       sectionCount: 0,
       totalBytes: 4600,
     });
-    expect(album.entries.map((entry) => entry.kind === 'photo' ? entry.photo.id : entry.id))
-      .toEqual([second, first]);
+    expect(album.entries.map(entryId)).toEqual([second, first]);
     expect(await env.DB.prepare(`
       SELECT revision, publication_status FROM event_albums
       JOIN media ON media.id = ?
@@ -235,7 +259,7 @@ describe('album order', () => {
     const album = await albumOf(access);
     expect(album.saved).toBe(true);
     expect(album.sectionCount).toBe(1);
-    expect(album.entries.map((entry) => (entry.kind === 'section' ? entry.heading : entry.photo.id)))
+    expect(album.entries.map((entry) => (entry.kind === 'section' ? entry.heading : entryId(entry))))
       .toEqual(['Ceremony', second, first]);
   });
 
@@ -675,6 +699,56 @@ describe('album start', () => {
     expect(album.photoCount).toBe(1);
   });
 
+  it('starts a retained-only unsaved album from picks without losing its recovery slot', async () => {
+    const access = await eventAccess();
+    const media = await uploadPending(
+      access,
+      `retained-start-${crypto.randomUUID()}`,
+      null,
+      'Avery Stone',
+    );
+    await env.DB.prepare('UPDATE media SET favorited_at = ?, timeline_at = ? WHERE id = ?')
+      .bind(NOW, '2026-09-19T11:00:00.000Z', media.id)
+      .run();
+    const trashed = await trashMedia(access, media.id);
+
+    expect(await albumOf(access)).toMatchObject({
+      saved: false,
+      photoCount: 0,
+      retainedCount: 1,
+      entries: [{
+        kind: 'photo-retained',
+        slot: { mediaId: media.id, restoreUntil: trashed.restoreUntil, state: 'recoverable' },
+      }],
+    });
+
+    const response = await write(access, '/start', { start: 'from-picks' });
+
+    expect(response.status).toBe(200);
+    expect((await response.json() as { data: { started: boolean; album: AlbumView } }).data)
+      .toMatchObject({
+        started: true,
+        album: {
+          saved: true,
+          photoCount: 0,
+          retainedCount: 1,
+          entries: [{
+            kind: 'photo-retained',
+            slot: { mediaId: media.id, restoreUntil: trashed.restoreUntil, state: 'recoverable' },
+          }],
+        },
+      });
+    expect(await albumOf(access)).toMatchObject({
+      saved: true,
+      photoCount: 0,
+      retainedCount: 1,
+      entries: [{
+        kind: 'photo-retained',
+        slot: { mediaId: media.id, restoreUntil: trashed.restoreUntil, state: 'recoverable' },
+      }],
+    });
+  });
+
   it('stores the starting picks in timeline order so a later older pick appends', async () => {
     const access = await eventAccess();
     const later = await seedStored(access, 2, {
@@ -696,8 +770,7 @@ describe('album start', () => {
     })).status).toBe(200);
 
     const album = await albumOf(access);
-    expect(album.entries.map((entry) => entry.kind === 'photo' ? entry.photo.id : entry.id))
-      .toEqual([earlier, later, pickedAfterStart]);
+    expect(album.entries.map(entryId)).toEqual([earlier, later, pickedAfterStart]);
   });
 
   it('clears earlier favorites, reports them, and stays saved', async () => {
@@ -749,8 +822,292 @@ describe('album start', () => {
       cleared: [],
       album: { saved: true, photoCount: 1 },
     });
-    expect((await albumOf(access)).entries.map((entry) => (
-      entry.kind === 'photo' ? entry.photo.id : entry.id
-    ))).toEqual([pickedAfterStart]);
+    expect((await albumOf(access)).entries.map(entryId)).toEqual([pickedAfterStart]);
+  });
+});
+
+// Recently deleted, read from the album. A trashed pick keeps its place as an
+// opaque marker: closing the arrangement up around a photograph that is still
+// recoverable would quietly rewrite the album, and Restore would have nowhere
+// to put the picture back.
+describe('album retained slots', () => {
+  /**
+   * A delivered, picked photograph made the way a guest makes one. Trash moves
+   * the event's own capacity counters, so these rows have to be real counted
+   * uploads rather than the direct inserts the ordering tests seed.
+   */
+  async function pickedUpload(access: Access, hour: number, caption: string | null = null) {
+    const media = await uploadPending(
+      access,
+      `retained-${crypto.randomUUID()}`,
+      caption,
+      'Avery Stone',
+    );
+    await env.DB.prepare('UPDATE media SET favorited_at = ?, timeline_at = ? WHERE id = ?')
+      .bind(NOW, `2026-09-19T${String(hour).padStart(2, '0')}:00:00.000Z`, media.id)
+      .run();
+    return media.id;
+  }
+
+  function managerPreview(access: Access) {
+    return createApp().request(`/api/manage/events/${access.event.id}/album/preview`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+  }
+
+  /** Enable the Album link and follow it the way a recipient's browser does. */
+  async function recipientAlbum(access: Access) {
+    const enabled = await createApp().request(
+      `/api/manage/events/${access.event.id}/album/share`,
+      { method: 'POST', headers: writeHeaders(access.manager) },
+      testEnv,
+    );
+    expect(enabled.status).toBe(200);
+    const share = (await enabled.json() as { data: { share: { url: string } } }).data.share;
+    const exchanged = await createApp().request('/api/album-share/exchange', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ token: new URL(share.url).hash.slice(1) }),
+    }, testEnv);
+    expect(exchanged.status).toBe(200);
+    const token = /candidary_album=([^;,]+)/u.exec(exchanged.headers.get('set-cookie') ?? '')?.[1];
+    if (!token) throw new Error('Expected the narrow album cookie from the exchange.');
+    return createApp().request(
+      '/api/album-share',
+      { headers: { cookie: `candidary_album=${token}` } },
+      testEnv,
+    );
+  }
+
+  async function publicAlbumOf(response: Response): Promise<PublicAlbumView> {
+    expect(response.status).toBe(200);
+    return (await response.json() as { data: { album: PublicAlbumView } }).data.album;
+  }
+
+  function restore(access: Access, id: string) {
+    return createApp().request(
+      `/api/manage/events/${access.event.id}/media/${id}/restore`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+  }
+
+  /**
+   * A save that omits a retained slot is refused rather than accepted.
+   *
+   * An omitted *active* pick is an ordinary edit — the resolver re-appends it in
+   * timeline order and nothing is lost. An omitted retained slot is not: the
+   * photo is invisible, so the host cannot have meant to move it, and letting the
+   * save through would silently relocate it to the tail and send a timely Restore
+   * back to the wrong position. The likeliest source is a client deployed before
+   * `photo-retained` existed, which cannot serialize the marker at all.
+   */
+  it('refuses a save that drops a retained slot, and keeps the slot where it was', async () => {
+    const access = await eventAccess();
+    const kept = await pickedUpload(access, 10, 'Kept caption');
+    const retained = await pickedUpload(access, 11, 'Trashed caption');
+    expect((await write(access, '', {
+      revision: 0,
+      entries: [{ kind: 'photo', mediaId: retained }, { kind: 'photo', mediaId: kept }],
+      metadata: { title: 'The evening', description: '', coverMediaId: kept },
+    }, 'PUT')).status).toBe(200);
+    await trashMedia(access, retained);
+
+    const before = await albumOf(access);
+    expect(before.entries.map(entryId)).toEqual([retained, kept]);
+
+    const dropped = await write(access, '', {
+      revision: before.revision,
+      entries: [{ kind: 'photo', mediaId: kept }],
+      metadata: { title: 'The evening', description: '', coverMediaId: kept },
+    }, 'PUT');
+
+    expect(dropped.status).toBe(409);
+    expect((await dropped.json() as { code: string }).code).toBe('MEDIA_STATE_CONFLICT');
+    const after = await albumOf(access);
+    expect(after.revision).toBe(before.revision);
+    expect(after.entries.map(entryId)).toEqual([retained, kept]);
+  });
+
+  it('accepts a save that keeps the retained slot while reordering around it', async () => {
+    const access = await eventAccess();
+    const kept = await pickedUpload(access, 10, 'Kept caption');
+    const retained = await pickedUpload(access, 11, 'Trashed caption');
+    expect((await write(access, '', {
+      revision: 0,
+      entries: [{ kind: 'photo', mediaId: retained }, { kind: 'photo', mediaId: kept }],
+      metadata: { title: 'The evening', description: '', coverMediaId: kept },
+    }, 'PUT')).status).toBe(200);
+    await trashMedia(access, retained);
+    const before = await albumOf(access);
+
+    const reordered = await write(access, '', {
+      revision: before.revision,
+      entries: [{ kind: 'photo', mediaId: kept }, { kind: 'photo', mediaId: retained }],
+      metadata: { title: 'The evening', description: '', coverMediaId: kept },
+    }, 'PUT');
+
+    expect(reordered.status).toBe(200);
+    expect((await albumOf(access)).entries.map(entryId)).toEqual([kept, retained]);
+  });
+
+  it('stands an opaque marker in for a trashed pick and shows it to neither public audience', async () => {
+    const access = await eventAccess();
+    const kept = await pickedUpload(access, 10, 'Kept caption');
+    const retained = await pickedUpload(access, 11, 'Trashed caption');
+    expect((await write(access, '', {
+      revision: 0,
+      entries: [{ kind: 'photo', mediaId: kept }, { kind: 'photo', mediaId: retained }],
+      metadata: { title: 'The evening', description: '', coverMediaId: kept },
+    }, 'PUT')).status).toBe(200);
+
+    const trashed = await trashMedia(access, retained);
+
+    const album = await albumOf(access);
+    expect(album).toMatchObject({
+      photoCount: 1,
+      retainedCount: 1,
+      sectionCount: 0,
+      coverMediaId: kept,
+      effectiveCoverMediaId: kept,
+      coverRetained: null,
+    });
+    expect(album.entries.map(entryId)).toEqual([kept, retained]);
+    // Exactly the marker contract — an id, a deadline, a state. No caption,
+    // guest, filename, or preview flag: the point of trashing the photograph
+    // was to stop showing it, and the album editor is no exception.
+    expect(album.entries[1]).toEqual({
+      kind: 'photo-retained',
+      slot: { mediaId: retained, restoreUntil: trashed.restoreUntil, state: 'recoverable' },
+    });
+    expect(JSON.stringify(album.entries[1]))
+      .not.toMatch(/Trashed caption|Avery Stone|retained-|previewAvailable|publicationStatus/u);
+
+    const preview = await publicAlbumOf(await managerPreview(access));
+    const recipient = await publicAlbumOf(await recipientAlbum(access));
+    for (const projection of [preview, recipient]) {
+      expect(projection.entries).toEqual([
+        { kind: 'photo', photo: { id: kept, caption: null, previewAvailable: true } },
+      ]);
+      expect(projection.photoCount).toBe(1);
+      expect(JSON.stringify(projection)).not.toContain(retained);
+    }
+    expect(preview).toEqual(recipient);
+  });
+
+  it('removes sections whose only following slots are retained, including adjacent and trailing headings', async () => {
+    const access = await eventAccess();
+    const first = await pickedUpload(access, 10);
+    const retained = await pickedUpload(access, 11);
+    const last = await pickedUpload(access, 12);
+    expect((await write(access, '', {
+      revision: 0,
+      entries: [
+        { kind: 'photo', mediaId: first },
+        { kind: 'section', id: 'only-retained', heading: 'Only retained' },
+        { kind: 'photo', mediaId: retained },
+        { kind: 'section', id: 'adjacent-empty', heading: 'Adjacent empty' },
+        { kind: 'section', id: 'last-live', heading: 'Last live' },
+        { kind: 'photo', mediaId: last },
+        { kind: 'section', id: 'trailing', heading: 'Trailing' },
+      ],
+      metadata: { title: 'The evening', description: '', coverMediaId: first },
+    }, 'PUT')).status).toBe(200);
+    await trashMedia(access, retained);
+
+    const preview = await publicAlbumOf(await managerPreview(access));
+    const recipient = await publicAlbumOf(await recipientAlbum(access));
+    const expected = [
+      { kind: 'photo' as const, photo: { id: first, caption: null, previewAvailable: true } },
+      { kind: 'section' as const, id: 'last-live', heading: 'Last live' },
+      { kind: 'photo' as const, photo: { id: last, caption: null, previewAvailable: true } },
+    ];
+    expect(preview.entries).toEqual(expected);
+    expect(recipient.entries).toEqual(expected);
+    expect(preview).toEqual(recipient);
+    expect(preview.photoCount).toBe(2);
+  });
+
+  it('restores a trashed pick into the slot a reorder saved it into', async () => {
+    const access = await eventAccess();
+    const first = await pickedUpload(access, 10);
+    const retained = await pickedUpload(access, 11);
+    const last = await pickedUpload(access, 12);
+    expect((await write(access, '', {
+      revision: 0,
+      entries: [
+        { kind: 'photo', mediaId: first },
+        { kind: 'photo', mediaId: retained },
+        { kind: 'photo', mediaId: last },
+      ],
+    }, 'PUT')).status).toBe(200);
+
+    await trashMedia(access, retained);
+
+    // The host keeps arranging around the marker. That save has to round-trip
+    // it unchanged, or a Restore afterwards would land somewhere else.
+    const reordered = await write(access, '', {
+      revision: (await albumOf(access)).revision,
+      entries: [
+        { kind: 'photo', mediaId: last },
+        { kind: 'photo', mediaId: retained },
+        { kind: 'photo', mediaId: first },
+      ],
+    }, 'PUT');
+    expect(reordered.status).toBe(200);
+    const arranged = await albumOf(access);
+    expect(arranged.entries.map((entry) => entry.kind))
+      .toEqual(['photo', 'photo-retained', 'photo']);
+    expect(arranged.entries.map(entryId)).toEqual([last, retained, first]);
+
+    expect((await restore(access, retained)).status).toBe(200);
+
+    const album = await albumOf(access);
+    expect(album.entries.map((entry) => entry.kind)).toEqual(['photo', 'photo', 'photo']);
+    expect(album.entries.map(entryId)).toEqual([last, retained, first]);
+    expect(album).toMatchObject({ photoCount: 3, retainedCount: 0, coverRetained: null });
+  });
+
+  it('retains a trashed cover, falls the effective cover through, and lets a new choice replace it', async () => {
+    const access = await eventAccess();
+    const fallback = await pickedUpload(access, 10);
+    const cover = await pickedUpload(access, 11);
+    expect((await write(access, '', {
+      revision: 0,
+      entries: [{ kind: 'photo', mediaId: fallback }, { kind: 'photo', mediaId: cover }],
+      metadata: { title: 'The evening', description: '', coverMediaId: cover },
+    }, 'PUT')).status).toBe(200);
+
+    const trashed = await trashMedia(access, cover);
+
+    const retainedCover = await albumOf(access);
+    expect(retainedCover).toMatchObject({
+      // The chosen cover is still the chosen cover — a timely Restore puts that
+      // photograph back at the top — but the album has to show a picture in the
+      // meantime, so the effective cover falls to the first visible photo.
+      coverMediaId: cover,
+      effectiveCoverMediaId: fallback,
+      coverRetained: { mediaId: cover, restoreUntil: trashed.restoreUntil, state: 'recoverable' },
+      photoCount: 1,
+      retainedCount: 1,
+    });
+    expect(await publicAlbumOf(await managerPreview(access)))
+      .toMatchObject({ coverMediaId: fallback });
+
+    const rechosen = await write(access, '', {
+      revision: retainedCover.revision,
+      entries: [{ kind: 'photo', mediaId: fallback }, { kind: 'photo', mediaId: cover }],
+      metadata: { title: 'The evening', description: '', coverMediaId: fallback },
+    }, 'PUT');
+    expect(rechosen.status).toBe(200);
+    // Choosing another cover is the one edit that intentionally gives up the
+    // retained reference; the slot itself survives for Restore.
+    expect(await albumOf(access)).toMatchObject({
+      coverMediaId: fallback,
+      effectiveCoverMediaId: fallback,
+      coverRetained: null,
+      photoCount: 1,
+      retainedCount: 1,
+    });
   });
 });

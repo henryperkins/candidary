@@ -4,6 +4,7 @@ import { toErrorResponse } from '../shared/errors';
 import type { AppBindings } from './env';
 import { agentMarkdown } from './http/agent-markdown';
 import { securityHeaders } from './http/security-headers';
+import { albumPreviewRoutes } from './routes/album-preview';
 import { albumShareRoutes } from './routes/album-share';
 import { entryRoutes } from './routes/entry';
 import { eventRoutes } from './routes/event';
@@ -46,6 +47,9 @@ export function createApp() {
   app.route('/api', contentRoutes);
   app.route('/api', galleryRoutes);
   app.route('/api', albumShareRoutes);
+  // Ahead of `manageRoutes`: Album Preview is a Manager read that must never be
+  // able to fall through to a share-credential path.
+  app.route('/api', albumPreviewRoutes);
   // Ahead of `manageRoutes`, which no longer owns any `/cover` path, so the
   // cover surface has exactly one owner rather than two mount positions.
   app.route('/api', eventCoverRoutes);

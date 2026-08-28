@@ -17,6 +17,8 @@ const FOLD_VIEWPORTS = [
   { width: 390, height: 844 },
 ];
 const PHONE_WIDTHS = [320, 360, 390, 430];
+const MANAGEMENT_LINK = `${UNBROKEN_TOKEN}-manage`;
+const SENSITIVE_LINK_MASK = '••••••••••••';
 // 761 is the guest enhancement boundary; 780 and 860 sit inside the tablet band above it.
 const TABLET_WIDTHS = [761, 780, 860];
 // The design system holds workflow body copy readable; below this a step reads as a broken column.
@@ -170,11 +172,11 @@ test('native event date and start time stay inside their fields under iOS sizing
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
 });
 
-test('a private link can be revealed and read across the width matrix', async ({ page }) => {
+test('event and sensitive management links remain usable across the width matrix', async ({ page }) => {
   await page.route('**/api/events', (route) => route.fulfill({ status: 201, json: { data: {
     event: EVENT_FIXTURE,
     eventLink: UNBROKEN_TOKEN,
-    managementLink: `${UNBROKEN_TOKEN}-manage`,
+    managementLink: MANAGEMENT_LINK,
     csrfToken: 'csrf-a',
   }, requestId: 'request-a' } }));
 
@@ -186,25 +188,62 @@ test('a private link can be revealed and read across the width matrix', async ({
     await page.getByLabel('Welcome message').fill('Come share the moments you caught.');
     await page.getByRole('button', { name: 'Create private event' }).click();
 
-    const reveal = page.getByRole('button', { name: 'Show full event link' });
-    await expect(reveal).toBeVisible();
-    const revealSize = await measureTarget(reveal);
-    expect(revealSize.width, `reveal target width at ${width}`).toBeGreaterThanOrEqual(44);
-    expect(revealSize.height, `reveal target height at ${width}`).toBeGreaterThanOrEqual(44);
+    const eventCard = page.getByText('Event link', { exact: true }).locator('..');
+    const eventCode = eventCard.locator('code');
+    await expect(eventCode).toHaveCount(1);
+    await expect(eventCode).toHaveText(UNBROKEN_TOKEN);
+
+    const managementCard = page.getByText('Management link', { exact: true }).locator('..');
+    await expect(managementCard).not.toContainText(MANAGEMENT_LINK);
+    expect(await managementCard.evaluate((element, secret) => !element.outerHTML.includes(secret), MANAGEMENT_LINK))
+      .toBe(true);
+    await expect(managementCard.locator('.link-card__mask')).toHaveText(SENSITIVE_LINK_MASK);
+    await expect(managementCard.locator('.link-card__mask')).toHaveAttribute('aria-hidden', 'true');
+    await expect(managementCard.locator('input')).toHaveCount(0);
+
+    const revealManagement = page.getByRole('button', { name: 'Reveal management link' });
+    const copyManagement = page.getByRole('button', { name: 'Copy management link' });
+    await expect(revealManagement).toBeVisible();
+    await expect(copyManagement).toBeVisible();
+    for (const [name, control] of [
+      ['Reveal', revealManagement],
+      ['Copy', copyManagement],
+    ] as const) {
+      const size = await measureTarget(control);
+      expect(size.width, `${name} management-link width at ${width}`).toBeGreaterThanOrEqual(48);
+      expect(size.height, `${name} management-link height at ${width}`).toBeGreaterThanOrEqual(48);
+    }
 
     const collapsed = await measureDocument(page);
     expect(collapsed.scrollWidth).toBeLessThanOrEqual(collapsed.clientWidth + 1);
 
-    await reveal.click();
-    const code = page.locator('.link-card--expanded code');
-    await expect(code).toHaveCount(1);
-    await expect(code).toHaveText(UNBROKEN_TOKEN);
+    await revealManagement.click();
+    const managementInput = managementCard.getByRole('textbox', { name: 'Management link' });
+    await expect(managementInput).toHaveCount(1);
+    await expect(managementInput).toHaveAttribute('readonly', '');
+    await expect(managementInput).toHaveValue(MANAGEMENT_LINK);
+    await expect(eventCard.locator('code')).toHaveCount(1);
+    const [managementFont, eventFont] = await Promise.all([
+      managementInput.evaluate((element) => getComputedStyle(element).fontFamily),
+      eventCode.evaluate((element) => getComputedStyle(element).fontFamily),
+    ]);
+    expect(managementFont, `revealed management-link typography at ${width}`).toBe(eventFont);
+
+    const revealedManagement = await measureDocument(page);
+    expect(revealedManagement.scrollWidth).toBeLessThanOrEqual(revealedManagement.clientWidth + 1);
+
+    const revealEvent = page.getByRole('button', { name: 'Show full event link' });
+    await expect(revealEvent).toBeVisible();
+    const revealEventSize = await measureTarget(revealEvent);
+    expect(revealEventSize.width, `event reveal target width at ${width}`).toBeGreaterThanOrEqual(44);
+    expect(revealEventSize.height, `event reveal target height at ${width}`).toBeGreaterThanOrEqual(44);
+    await revealEvent.click();
 
     // Read in full, not clipped, and reachable by keyboard so it can be selected by hand.
-    const codeSize = await measureOverflow(code);
+    const codeSize = await measureOverflow(eventCode);
     expect(codeSize.scrollWidth, `revealed link wraps at ${width}`).toBeLessThanOrEqual(codeSize.clientWidth + 1);
-    await code.focus();
-    await expect(code).toBeFocused();
+    await eventCode.focus();
+    await expect(eventCode).toBeFocused();
 
     const expanded = await measureDocument(page);
     expect(expanded.scrollWidth).toBeLessThanOrEqual(expanded.clientWidth + 1);
@@ -339,7 +378,7 @@ test('a long public album keeps its cover, sections, captions, failed preview, a
   const description = `Story${'kepttogether'.repeat(90)}`.slice(0, 1_000);
   const heading = `Dinner${'anddancing'.repeat(8)}`.slice(0, 80);
   const caption = `Photograph${'fromtheevening'.repeat(18)}`;
-  const rows = makeMedia(18, 'unpublished').map((item, index) => ({
+  const rows = makeMedia(18, 'published').map((item, index) => ({
     ...item,
     originalFilename: `private-${index + 1}.jpg`,
     caption: index === 1 ? caption : `Album photograph ${index + 1}`,

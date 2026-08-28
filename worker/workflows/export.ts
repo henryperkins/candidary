@@ -1,8 +1,12 @@
 import { MAX_EXPORT_PART_SOURCE_BYTES } from '../../shared/constants';
 import type { AppEnv } from '../env';
-import { ExportsRepository, type ReadyExportPart } from '../db/exports';
+import {
+  ExportsRepository,
+  type ExportRunOwner,
+  type ReadyExportPart,
+} from '../db/exports';
+import type { ExportRecord } from '../db/types';
 import { GuestbookRepository } from '../db/guestbook';
-import { MediaRepository } from '../db/media';
 import { MediaObjectWriteTombstoneRepository } from '../db/media-write-tombstones';
 import { buildExportManifest } from '../export/csv';
 import { resolveFrozenAlbumOrder } from '../export/album-order';
@@ -59,29 +63,43 @@ async function immutableAlbumMediaEntries(
   return resolveFrozenAlbumOrder(rawEntries, entries);
 }
 
-async function clearIncompleteAttempt(bucket: R2Bucket, prefix: string) {
+class ExportRunStopped extends Error {
+  constructor(readonly job: ExportRecord | null) {
+    super('EXPORT_RUN_STOPPED');
+  }
+}
+
+async function clearIncompleteAttempt(
+  bucket: R2Bucket,
+  prefix: string,
+  assertActive: () => Promise<void>,
+) {
   for (;;) {
+    await assertActive();
     const page = await bucket.list({ prefix, limit: 1_000 });
     const keys = page.objects.map(({ key }) => key);
     if (!keys.length) return;
+    await assertActive();
     await bucket.delete(keys);
   }
 }
 
 export async function processExport(
   env: AppEnv,
-  jobId: string,
+  payload: { jobId: string; attempt: number },
   now = new Date(),
   maxPartBytes = MAX_EXPORT_PART_SOURCE_BYTES,
-  claimStartedAt = now.toISOString(),
-) {
+  executionStartedAt = now.toISOString(),
+  clock: () => Date = () => new Date(),
+): Promise<ExportRecord | null> {
   const exports = new ExportsRepository(env.DB);
-  let job = await exports.getById(jobId);
+  let job = await exports.getById(payload.jobId);
   if (!job) return null;
   if (job.state === 'ready') return job;
-  const claim = await exports.claimRunning(jobId, claimStartedAt);
-  if (!claim.owned) return claim.job;
+  const claim = await exports.claimRunning(payload.jobId, payload.attempt, executionStartedAt);
+  if (claim.status === 'lost') return claim.job;
   job = claim.job;
+  const owner: ExportRunOwner = claim.owner;
 
   const baseKey = `events/${job.eventId}/exports/${job.id}/attempt-${job.attempt}`;
   const writeTombstones = new MediaObjectWriteTombstoneRepository(env.DB);
@@ -91,35 +109,51 @@ export async function processExport(
     eventId: job.eventId,
     mediaId: job.id,
     objectKind: 'export',
-    recordedAt: claimStartedAt,
+    recordedAt: executionStartedAt,
   });
+  const assertActive = async () => {
+    const activity = await exports.assertOwnedRunActive(owner);
+    if (activity.status === 'active') return;
+    if (activity.status === 'event-deleted') {
+      const failed = await exports.markOwnedFailed(
+        owner,
+        'EXPORT_EVENT_DELETED',
+        clock().toISOString(),
+      );
+      throw new ExportRunStopped(failed.job);
+    }
+    throw new ExportRunStopped(activity.job);
+  };
   // A callback retry resumes the same Workflow claim after an exception. No
   // Ready inventory exists while the job is Running, so clear that exact
   // deterministic attempt prefix before writing it again. Keep this outside
   // the failure handler: a cleanup error must retry the Workflow callback and
   // must not settle the job as Failed with unknown orphaned objects.
   try {
-    await exports.assertOwnedRunActive(job.id, claimStartedAt);
+    await assertActive();
+    if (claim.status === 'resumed') {
+      await clearIncompleteAttempt(env.MEDIA_BUCKET, `${baseKey}/`, assertActive);
+      await assertActive();
+      if (!await exports.resetOwnedRunProgress(owner, clock().toISOString())) {
+        throw new ExportRunStopped(await exports.getById(job.id));
+      }
+    }
   } catch (error) {
-    const code = error instanceof Error && error.message.startsWith('EXPORT_')
-      ? error.message
-      : 'EXPORT_FAILED';
-    return exports.markFailed(job.id, code);
+    if (error instanceof ExportRunStopped) return error.job;
+    throw error;
   }
-  if (claim.resumed) await clearIncompleteAttempt(env.MEDIA_BUCKET, `${baseKey}/`);
   const manifestObjectKey = `${baseKey}/candidary-export-manifest.csv`;
   const uploadedKeys: string[] = [];
-  let readyWriteAttempted = false;
   try {
     const snapshot = job.kind === 'album'
       ? await immutableAlbumMediaEntries(exports, job.id, job.albumEntriesJson ?? '[]')
-      : job.guestbookEntryCount === null
-        ? await new MediaRepository(env.DB).exportSnapshot(job.eventId, job.snapshotAt)
-        : await immutableMediaEntries(exports, job.id);
+      : await immutableMediaEntries(exports, job.id);
     if (snapshot.length !== job.mediaCount) throw new Error('EXPORT_SNAPSHOT_CHANGED');
     const partitions = partitionExportSnapshot(snapshot, maxPartBytes);
     const storedParts: ReadyExportPart[] = [];
     const photoArchiveByMediaId = new Map<string, GuestbookPhotoArchiveLocation>();
+    let processedMediaCount = 0;
+    let processedBytes = 0;
 
     for (const part of partitions) {
       const entries = [];
@@ -127,9 +161,10 @@ export async function processExport(
         const bucket = media.objectBucketGeneration === 'canonical'
           ? env.CANONICAL_MEDIA_BUCKET
           : env.MEDIA_BUCKET;
+        await assertActive();
         const object = await bucket.get(media.objectKey);
         if (!object?.body) throw new Error('EXPORT_SOURCE_MISSING');
-        await exports.assertOwnedRunActive(job.id, claimStartedAt);
+        await assertActive();
         entries.push({ media, body: object.body });
       }
       part.media.forEach((media, index) => photoArchiveByMediaId.set(media.id, {
@@ -138,7 +173,9 @@ export async function processExport(
       }));
       const name = exportPartName(part.partNumber);
       const objectKey = `${baseKey}/${name}`;
+      await assertActive();
       await inventoryExportWrite(objectKey);
+      await assertActive();
       await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries), {
         httpMetadata: {
           contentType: 'application/zip',
@@ -152,11 +189,21 @@ export async function processExport(
         mediaCount: part.media.length,
         sourceBytes: part.sourceBytes,
       });
+      processedMediaCount += part.media.length;
+      processedBytes += part.sourceBytes;
+      if (!await exports.recordProgress(owner, {
+        processedMediaCount,
+        processedBytes,
+        progressUpdatedAt: clock().toISOString(),
+      })) {
+        throw new ExportRunStopped(await exports.getById(job.id));
+      }
     }
 
     if (partitions.length) {
-      await exports.assertOwnedRunActive(job.id, claimStartedAt);
+      await assertActive();
       await inventoryExportWrite(manifestObjectKey);
+      await assertActive();
       await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions), {
         httpMetadata: {
           contentType: 'text/csv; charset=utf-8',
@@ -167,29 +214,34 @@ export async function processExport(
     }
 
     let guestbook = null;
-    if (job.kind === 'complete' && job.guestbookEntryCount !== null) {
-      if (!job.guestbookEventName || !job.guestbookEventDate
-        || !job.guestbookEventTimezone || !job.guestbookPrompt) {
-        throw new Error('EXPORT_GUESTBOOK_SNAPSHOT_INVALID');
-      }
+    const hasGuestbookSnapshot = job.kind === 'complete'
+      && job.guestbookEntryCount !== null
+      && job.guestbookSharedCount !== null
+      && job.guestbookEventName !== null
+      && job.guestbookEventDate !== null
+      && job.guestbookEventTimezone !== null
+      && job.guestbookPrompt !== null
+      && job.guestbookGalleryVisible !== null;
+    if (hasGuestbookSnapshot) {
       const entries = await immutableGuestbookEntries(env.DB, job.id);
       if (entries.length !== job.guestbookEntryCount) throw new Error('EXPORT_GUESTBOOK_SNAPSHOT_INVALID');
       const htmlObjectKey = `${baseKey}/guestbook.html`;
       const csvObjectKey = `${baseKey}/guestbook-private.csv`;
+      await assertActive();
       await inventoryExportWrite(htmlObjectKey);
       await inventoryExportWrite(csvObjectKey);
       const encoder = new TextEncoder();
       const htmlBytes = encoder.encode(buildGuestbookHtml({
-        eventName: job.guestbookEventName,
-        eventDate: job.guestbookEventDate,
-        eventTimezone: job.guestbookEventTimezone,
-        prompt: job.guestbookPrompt,
+        eventName: job.guestbookEventName!,
+        eventDate: job.guestbookEventDate!,
+        eventTimezone: job.guestbookEventTimezone!,
+        prompt: job.guestbookPrompt!,
         snapshotAt: job.snapshotAt,
         entries,
         photoArchiveByMediaId,
       }));
       const csvBytes = encoder.encode(buildGuestbookPrivateCsv(entries, photoArchiveByMediaId));
-      await exports.assertOwnedRunActive(job.id, claimStartedAt);
+      await assertActive();
       await env.MEDIA_BUCKET.put(htmlObjectKey, htmlBytes, {
         httpMetadata: {
           contentType: 'text/html; charset=utf-8',
@@ -197,7 +249,7 @@ export async function processExport(
         },
       });
       uploadedKeys.push(htmlObjectKey);
-      await exports.assertOwnedRunActive(job.id, claimStartedAt);
+      await assertActive();
       await env.MEDIA_BUCKET.put(csvObjectKey, csvBytes, {
         httpMetadata: {
           contentType: 'text/csv; charset=utf-8',
@@ -214,26 +266,37 @@ export async function processExport(
         csvSha256: await sha256(csvBytes),
       };
     }
-    const completedAt = now.toISOString();
-    await exports.assertOwnedRunActive(job.id, claimStartedAt);
-    readyWriteAttempted = true;
-    return await exports.markReady(
-      job.id,
+    const completedAtDate = clock();
+    const completedAt = completedAtDate.toISOString();
+    await assertActive();
+    const ready = await exports.markReady(
+      owner,
       {
         manifestObjectKey: partitions.length ? manifestObjectKey : null,
         parts: storedParts,
         guestbook,
       },
       completedAt,
-      new Date(now.getTime() + 86_400_000).toISOString(),
+      new Date(completedAtDate.getTime() + 86_400_000).toISOString(),
     );
-  } catch (error) {
-    if (readyWriteAttempted) {
-      const current = await exports.getById(job.id);
-      if (current?.state === 'ready') return current;
+    if (ready.changed) return ready.job;
+    const activity = await exports.assertOwnedRunActive(owner);
+    if (activity.status === 'event-deleted') {
+      return (await exports.markOwnedFailed(
+        owner,
+        'EXPORT_EVENT_DELETED',
+        clock().toISOString(),
+      )).job;
     }
-    if (uploadedKeys.length) await env.MEDIA_BUCKET.delete(uploadedKeys);
+    if (activity.status === 'lost') return activity.job;
+    const failed = await exports.markOwnedFailed(owner, 'EXPORT_FAILED', clock().toISOString());
+    if (failed.changed && uploadedKeys.length) await env.MEDIA_BUCKET.delete(uploadedKeys);
+    return failed.job;
+  } catch (error) {
+    if (error instanceof ExportRunStopped) return error.job;
     const code = error instanceof Error && error.message.startsWith('EXPORT_') ? error.message : 'EXPORT_FAILED';
-    return await exports.markFailed(job.id, code);
+    const failed = await exports.markOwnedFailed(owner, code, clock().toISOString());
+    if (failed.changed && uploadedKeys.length) await env.MEDIA_BUCKET.delete(uploadedKeys);
+    return failed.job;
   }
 }

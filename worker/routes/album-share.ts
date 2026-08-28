@@ -15,8 +15,9 @@ import { getOrCreatePreview } from '../storage/previews';
 export const albumShareRoutes = new Hono<AppBindings>();
 
 const privateNoStore: MiddlewareHandler<AppBindings> = async (context, next) => {
-  await next();
   context.header('Cache-Control', 'private, no-store');
+  context.header('Vary', 'Cookie');
+  await next();
 };
 
 albumShareRoutes.use('/album-share', privateNoStore);
@@ -78,6 +79,7 @@ albumShareRoutes.get('/album-share/media/:mediaId/preview', async (context) => {
     || media.eventId !== session.eventId
     || media.uploadState !== 'stored'
     || media.deletedAt
+    || media.trashedAt
     || !media.favoritedAt) {
     throw albumShareUnavailable();
   }
@@ -89,6 +91,7 @@ albumShareRoutes.get('/album-share/media/:mediaId/preview', async (context) => {
       'Content-Type': object.httpMetadata?.contentType ?? 'image/webp',
       'Content-Length': String(object.size),
       'Cache-Control': 'private, no-store',
+      Vary: 'Cookie',
       'X-Content-Type-Options': 'nosniff',
       'Cross-Origin-Resource-Policy': 'same-origin',
     },

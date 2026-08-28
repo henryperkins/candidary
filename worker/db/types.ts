@@ -31,6 +31,10 @@ export interface EventRecord {
   storedMediaCount: number;
   reservedBytes: number;
   storedBytes: number;
+  // Recently deleted. Held, not delivered: still spending the event's media and
+  // byte capacity so a later Restore cannot be refused for lack of room.
+  recoverableMediaCount: number;
+  recoverableBytes: number;
   guestAccessExpiresAt: string;
   managementAccessExpiresAt: string;
   purgeAfter: string;
@@ -488,7 +492,13 @@ export interface MediaRecord {
   favoritedAt: string | null;
   publishedAt: string | null;
   previewObjectKey: string | null;
+  // Set together with `trashedAt` when the host moves a photo to Recently
+  // deleted: an 0018 Worker reads this as ordinary deletion and stays away from
+  // the bytes, while every current reader compares it against `trashedAt` to
+  // tell a recoverable photo from a permanently deleted one.
   deletedAt: string | null;
+  trashedAt: string | null;
+  restoreUntil: string | null;
 }
 
 export type ExportableMediaRecord = Pick<
@@ -527,6 +537,12 @@ export interface ExportRecord {
   mediaCount: number;
   totalBytes: number;
   attempt: number;
+  executionProtocol: 'legacy' | 'attempt-v2';
+  executionTransition: number;
+  executionStartedAt: string | null;
+  processedMediaCount: number | null;
+  processedBytes: number | null;
+  progressUpdatedAt: string | null;
   errorCode: string | null;
   createdAt: string;
   startedAt: string | null;

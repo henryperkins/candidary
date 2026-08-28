@@ -305,7 +305,7 @@ export function ManagerGuestbookPanel({
     </div>
 
     {view === 'shared' && !galleryVisible && <div className="manager-guestbook__notice">
-      <span>Photo captions are not visible to guests while the gallery is off.</span>
+      <span>Photo captions with a saved Published state are not currently visible to event guests while the Guest gallery is off.</span>
       <button
         type="button"
         className="text-button"

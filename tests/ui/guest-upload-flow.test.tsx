@@ -37,6 +37,59 @@ function deferredTransport(): UploadTransport {
   };
 }
 
+/* The shipped transfer, with only the network stubbed. The bytes leave over XHR so the guest sees
+   progress, and nothing about the request depends on the reservation answer beyond where to put the
+   photo and what to call it. */
+class DeliveringXMLHttpRequest {
+  static requests: Array<{ method: string; url: string; headers: Record<string, string>; body: unknown }> = [];
+
+  status = 200;
+  withCredentials = false;
+  readonly upload = { addEventListener: () => {} };
+  private readonly listeners = new Map<string, Set<() => void>>();
+  private method = '';
+  private url = '';
+  private readonly headers: Record<string, string> = {};
+
+  open(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.headers[name] = value;
+  }
+
+  addEventListener(type: string, listener: () => void) {
+    const listeners = this.listeners.get(type) ?? new Set<() => void>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: () => void) {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  abort() {}
+
+  send(body: unknown) {
+    DeliveringXMLHttpRequest.requests.push({
+      method: this.method,
+      url: this.url,
+      headers: { ...this.headers },
+      body,
+    });
+    for (const listener of this.listeners.get('load') ?? []) listener();
+  }
+}
+
+function uploadJson(data: unknown) {
+  return Promise.resolve(new Response(JSON.stringify({ data, requestId: 'request-a' }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  }));
+}
+
 class TestResizeObserver {
   constructor(private readonly callback: ResizeObserverCallback) {}
   observe(target: Element) {
@@ -51,6 +104,7 @@ class TestResizeObserver {
 
 beforeEach(() => {
   localStorage.clear();
+  DeliveringXMLHttpRequest.requests = [];
   vi.stubGlobal('ResizeObserver', TestResizeObserver);
 });
 afterEach(() => {
@@ -273,6 +327,57 @@ describe('mobile guest photo delivery', () => {
     expect(reserveSignal?.aborted).toBe(true);
     expect(await screen.findByRole('button', { name: 'Retry 1 photo' })).toBeEnabled();
     expect(screen.getByText('Sending was cancelled. Retry when you are ready.')).toBeVisible();
+  });
+
+  /* End to end over the shipped adapter, against the reservation and confirmation answers exactly
+     as the contract writes them. `{ id, mimeType, uploadState }` is everything the server says about
+     the photo; the filename on the card, the bytes on the wire, and the receipt the guest reads all
+     come from the file this device has held since it was chosen. */
+  it('delivers through the shipped adapter on the allowlisted upload answers alone', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal('XMLHttpRequest', DeliveringXMLHttpRequest as unknown as typeof XMLHttpRequest);
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/uploads/batch')) {
+        const sent = JSON.parse(String(init?.body)) as { files: Array<{ idempotencyKey: string }> };
+        return uploadJson({
+          items: sent.files.map(({ idempotencyKey }) => ({
+            idempotencyKey,
+            status: 'accepted',
+            alreadyDelivered: false,
+            media: { id: 'media-a', mimeType: 'image/jpeg', uploadState: 'reserved' },
+            uploadUrl: '/api/event/alex-jordan/uploads/media-a/content',
+            uploadUrlExpiresAt: '2026-09-14T00:10:00.000Z',
+          })),
+        });
+      }
+      if (url.endsWith('/uploads/media-a/finalize')) {
+        return uploadJson({ media: { id: 'media-a', mimeType: 'image/jpeg', uploadState: 'stored' } });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<GuestUploadFlow event={event} slug="alex-jordan" />);
+    await user.type(screen.getByLabelText('Your name'), 'Taylor');
+    fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
+      target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
+    });
+    expect(await screen.findByText('keeper.jpg')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Send 1 photo' }));
+
+    expect(await screen.findByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
+    expect(DeliveringXMLHttpRequest.requests).toHaveLength(1);
+    const transfer = DeliveringXMLHttpRequest.requests[0]!;
+    expect(transfer.method).toBe('PUT');
+    expect(transfer.url).toBe('/api/event/alex-jordan/uploads/media-a/content');
+    expect(transfer.headers['Content-Type']).toBe('image/jpeg');
+    expect((transfer.body as File).name).toBe('keeper.jpg');
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      '/api/event/alex-jordan/uploads/batch',
+      '/api/event/alex-jordan/uploads/media-a/finalize',
+    ]);
   });
 
   it('lets a returning guest reach the camera with one tap', async () => {

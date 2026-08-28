@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { useState } from 'react';
+import { StrictMode, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,7 +31,7 @@ const EVENT: EventView = {
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
   },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
-  reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128,
+  reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',
@@ -174,6 +174,30 @@ describe('event settings editor', () => {
     });
     await settleMicrotasks();
     expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:saved');
+  });
+
+  it('keeps one live Settings queue through StrictMode replay and reports Saved only after adoption', async () => {
+    let release: (() => void) | null = null;
+    const metadata = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return json({ event: { ...EVENT, galleryVisible: false } });
+    }));
+    render(<StrictMode><Harness onSettingsMetadata={metadata} /></StrictMode>);
+
+    fireEvent.click(screen.getByLabelText('Show the optional shared gallery'));
+
+    expect(settingsWrites()).toHaveLength(1);
+    expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:saving');
+    expect(screen.queryByText('Event settings saved')).not.toBeInTheDocument();
+    expect(release).not.toBeNull();
+
+    release!();
+    await settleMicrotasks();
+
+    expect(metadata).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('domain-state')).toHaveTextContent('settings:saved');
+    expect(screen.getByText('Event settings saved')).toBeInTheDocument();
   });
 
   it('trims and persists a valid prompt through the complete serialized payload', async () => {
@@ -346,6 +370,32 @@ describe('event settings editor', () => {
     expect(settingsWrites()).toHaveLength(2);
     expect(name).toHaveValue('Ceremony');
     expect(settingsWrites()[1]!.name).toBe('Ceremony');
+  });
+
+  it('does not adopt a Settings response after its autosave generation retires', async () => {
+    let release: (() => void) | null = null;
+    const onSettingsSaved = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return json({ event: { ...EVENT, galleryVisible: false } });
+    }));
+    const view = render(<StrictMode><EventSettingsEditor
+      event={EVENT}
+      onEventWrite={(request) => request()}
+      onEventRead={(request) => request()}
+      onSettingsSaved={onSettingsSaved}
+      onAutosaveStateChange={() => undefined}
+    /></StrictMode>);
+
+    fireEvent.click(screen.getByLabelText('Show the optional shared gallery'));
+    expect(settingsWrites()).toHaveLength(1);
+    expect(release).not.toBeNull();
+
+    view.unmount();
+    release!();
+    await settleMicrotasks();
+
+    expect(onSettingsSaved).not.toHaveBeenCalled();
   });
 
   it('keeps an explicit baseline reversion made while the older value is in flight', async () => {

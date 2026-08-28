@@ -7,7 +7,7 @@ import { DEFAULT_EVENT_THEME_CONFIG, resolveEventTheme } from '../../shared/even
 import { api, mediaPreview } from '../app/api';
 import { eventThemeStyle } from '../app/event-theme-style';
 import { readGuestName, rememberGuestName } from '../app/guest-name-storage';
-import type { MediaView } from '../app/types';
+import type { GuestContributionMediaView, GuestGalleryMediaView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
@@ -25,6 +25,12 @@ import { GuestUploadFlow } from '../features/uploads/GuestUploadFlow';
    instead of an event. The type cannot police that, so the canonical default stands behind it. This is
    deliberate, not the dead fallback the stylesheet used to carry. */
 const DEFAULT_GUEST_THEME = resolveEventTheme(DEFAULT_EVENT_THEME_CONFIG);
+
+/* What a shared photo is called when its uploader wrote no caption. The gallery used to fall back to
+   the original filename, which is the uploader's device talking — `IMG_4471.HEIC`, or a name they
+   never meant to publish — and it was read aloud to every other guest as the image's alternative
+   text. The photograph is what is being shared; the filename never was. */
+const SHARED_PHOTO_LABEL = 'Shared photo';
 
 function guestLifecycleKey(event: GuestEventView): string {
   return JSON.stringify([
@@ -46,8 +52,8 @@ function guestLifecycleKey(event: GuestEventView): string {
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const { slug = '' } = useParams();
   const [event, setEvent] = useState<GuestEventView | null>(null);
-  const [gallery, setGallery] = useState<MediaView[]>([]);
-  const [contributions, setContributions] = useState<MediaView[]>([]);
+  const [gallery, setGallery] = useState<GuestGalleryMediaView[]>([]);
+  const [contributions, setContributions] = useState<GuestContributionMediaView[]>([]);
   const [opened, setOpened] = useState({ gallery: false, contributions: false });
   const [loaded, setLoaded] = useState({ gallery: false, contributions: false });
   const [failure, setFailure] = useState<LoadFailure | null>(null);
@@ -63,11 +69,11 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   shownEvent.current = event;
 
   const loadGallery = useCallback(async () => {
-    const result = await api<{ media: MediaView[] }>(`/api/event/${slug}/gallery`);
+    const result = await api<{ media: GuestGalleryMediaView[] }>(`/api/event/${slug}/gallery`);
     setGallery(result.media);
   }, [slug]);
   const loadContributions = useCallback(async () => {
-    const result = await api<{ media: MediaView[] }>(`/api/event/${slug}/contributions`);
+    const result = await api<{ media: GuestContributionMediaView[] }>(`/api/event/${slug}/contributions`);
     setContributions(result.media);
   }, [slug]);
   // The same request on mount and behind Try again, so a guest whose reception dropped at the venue
@@ -154,7 +160,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     <h1 className="sr-only">Shared gallery · {event.name}</h1>
     <div className="fullscreen__bar"><Brand compact /><Link className="fullscreen__close" to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
     {gallery.length
-      ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} /><figcaption>{item.caption || item.originalFilename}</figcaption></figure>)}</div>
+      ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || SHARED_PHOTO_LABEL} /><figcaption>{item.caption || SHARED_PHOTO_LABEL}</figcaption></figure>)}</div>
       : <p>No shared photos yet.</p>}
   </main>;
 
@@ -233,7 +239,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
           <summary><span>Shared gallery <small>{event.galleryVisible ? loaded.gallery ? `${gallery.length} shared` : 'Available' : 'Not shared yet'}</small></span><ChevronDown aria-hidden="true" /></summary>
           {opened.gallery && <div className="event-extra__content">
             {event.galleryVisible && gallery.length > 0
-              ? <><div className="secondary-actions"><Link className="text-link" to={`/event/${slug}/fullscreen`}><Expand aria-hidden="true" /> View full screen</Link></div><div className="photo-grid">{gallery.map((item) => <figure key={item.id}><img loading="lazy" src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} /><figcaption><span>{item.caption || item.originalFilename}</span><small>by {item.guestName}</small></figcaption></figure>)}</div></>
+              ? <><div className="secondary-actions"><Link className="text-link" to={`/event/${slug}/fullscreen`}><Expand aria-hidden="true" /> View full screen</Link></div><div className="photo-grid">{gallery.map((item) => <figure key={item.id}><img loading="lazy" src={mediaPreview(item.id)} alt={item.caption || SHARED_PHOTO_LABEL} /><figcaption><span>{item.caption || SHARED_PHOTO_LABEL}</span><small>by {item.guestName}</small></figcaption></figure>)}</div></>
               : <div className="empty-state"><ImagePlus aria-hidden="true" /><h3>{event.galleryVisible ? 'The shared gallery is still quiet.' : 'The host is keeping the gallery private.'}</h3><p>Your delivery still goes straight to the host.</p></div>}
           </div>}
         </details>}

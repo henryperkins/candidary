@@ -62,10 +62,11 @@ const eventColumnNames = [
   'event_start_at', 'photos_open_from',
   'cover_config', 'cover_revision', 'cover_render_set_id',
   'guestbook_prompt',
+  'recoverable_media_count', 'recoverable_bytes',
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// post-cutover verifier refuses a candidate whose ledger is not exactly eighteen.
+// post-cutover verifier refuses a candidate whose ledger is not exactly twenty.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
@@ -73,7 +74,8 @@ const migrationFileNames = [
   '0010_event_start.sql', '0011_release_certifications.sql', '0012_event_cover_storage.sql',
   '0013_guest_message_hardening.sql', '0014_event_cover_invariants.sql',
   '0015_curated_private_guestbook.sql', '0016_host_private_gallery.sql',
-  '0017_event_album.sql', '0018_album_end_to_end.sql',
+  '0017_event_album.sql', '0018_album_end_to_end.sql', '0019_media_recovery.sql',
+  '0020_export_progress.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -92,14 +94,21 @@ const coverIndexRows = [{"tbl":"event_cover_backfill_jobs","idx":"event_cover_ba
 
 const partialUniqueRows = [{"name":"event_cover_receipts_one_preparing_per_event","sql":"CREATE UNIQUE INDEX event_cover_receipts_one_preparing_per_event\n  ON event_cover_publish_receipts (event_id)\n  WHERE status IN ('queued', 'rendering', 'finalizing')\n     OR (status = 'failed' AND retryable = 1)"},{"name":"event_cover_render_sets_one_active_per_event","sql":"CREATE UNIQUE INDEX event_cover_render_sets_one_active_per_event\n  ON event_cover_render_sets (event_id)\n  WHERE state = 'active'"}];
 
-const triggerRows = migrationFileNames.flatMap((name) => {
-  const source = readFileSync(join(process.cwd(), 'migrations', name), 'utf8');
-  return [...source.matchAll(/CREATE TRIGGER\s+([a-z0-9_]+)[\s\S]*?\nEND;/gu)].map((match) => ({
-    name: match[1]!,
-    // sqlite_master keeps the CREATE statement but omits the trailing semicolon.
-    sql: match[0].slice(0, -1),
-  }));
-}).sort((left, right) => left.name.localeCompare(right.name));
+const triggerRowsByName = new Map<string, { name: string; sql: string }>();
+for (const name of migrationFileNames) {
+  // Wrangler strips line comments before SQLite persists CREATE statements.
+  const source = readFileSync(join(process.cwd(), 'migrations', name), 'utf8')
+    .replace(/--.*$/gmu, '');
+  for (const match of source.matchAll(/CREATE TRIGGER\s+([a-z0-9_]+)[\s\S]*?\nEND;/gu)) {
+    triggerRowsByName.set(match[1]!, {
+      name: match[1]!,
+      // sqlite_master keeps the last installed CREATE statement and omits the trailing semicolon.
+      sql: match[0].slice(0, -1),
+    });
+  }
+}
+const triggerRows = [...triggerRowsByName.values()]
+  .sort((left, right) => left.name.localeCompare(right.name));
 
 const promotionMigrationSql = readFileSync(
   join(process.cwd(), 'migrations', '0015_curated_private_guestbook.sql'),
@@ -149,6 +158,8 @@ const guestbookColumns: Record<string, string[]> = {
     'guestbook_csv_object_key', 'guestbook_csv_bytes', 'guestbook_csv_sha256', 'guestbook_entry_count',
     'guestbook_shared_count', 'guestbook_event_name', 'guestbook_event_date', 'guestbook_event_timezone',
     'guestbook_prompt', 'guestbook_gallery_visible', 'kind', 'album_entries_json',
+    'processed_media_count', 'processed_bytes', 'progress_updated_at',
+    'execution_protocol', 'execution_transition', 'execution_started_at',
   ],
   export_media_entries: [
     'export_job_id', 'media_id', 'object_key', 'object_bucket_generation', 'original_filename',
@@ -176,7 +187,7 @@ const guestbookColumns: Record<string, string[]> = {
     'declared_byte_size', 'byte_size', 'width', 'height', 'guest_name', 'caption', 'upload_state',
     'publication_status', 'idempotency_key', 'reservation_expires_at', 'created_at', 'published_at',
     'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
-    'captured_at', 'timeline_at', 'favorited_at',
+    'captured_at', 'timeline_at', 'favorited_at', 'trashed_at', 'restore_until',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
@@ -213,6 +224,7 @@ const guestbookIndexRows = [
   { tbl: 'export_jobs', idx: 'sqlite_autoindex_export_jobs_1', uniq: 1, partial: 0 },
   { tbl: 'export_media_entries', idx: 'export_album_media_position', uniq: 1, partial: 1 },
   { tbl: 'export_media_entries', idx: 'export_media_entries_order', uniq: 0, partial: 0 },
+  { tbl: 'export_media_entries', idx: 'export_media_entries_source_hold', uniq: 0, partial: 0 },
   { tbl: 'export_media_entries', idx: 'sqlite_autoindex_export_media_entries_1', uniq: 1, partial: 0 },
   { tbl: 'guest_message_purge_receipts', idx: 'sqlite_autoindex_guest_message_purge_receipts_1', uniq: 1, partial: 0 },
   { tbl: 'guest_message_rate_events', idx: 'guestbook_rate_event_ip_window', uniq: 0, partial: 0 },
@@ -236,7 +248,7 @@ const guestbookIndexRows = [
 const guestbookSchemaRows = [
   { name: 'events', checks: '1' },
   { name: 'export_guestbook_entries', checks: '1|1|1|1|1|1|1|1' },
-  { name: 'export_jobs', checks: '1|1|1|1|1|1|1|1|1|1|1' },
+  { name: 'export_jobs', checks: '1|1|1|1|1|1|1|1|1|1|1|1|1|1|1' },
   { name: 'export_media_entries', checks: '1|1|1|1|1|1|1' },
   { name: 'guest_message_purge_receipts', checks: '1' },
   { name: 'guest_message_rate_events', checks: '' },
@@ -311,9 +323,87 @@ const albumIndexRows = [
 
 const albumCheckRows = [
   { name: 'event_albums', checks: '1|1' },
-  { name: 'export_jobs', checks: '1|1|1|1|1' },
+  { name: 'export_jobs', checks: '1|1|1|1|1|1|1|1|1' },
   { name: 'export_media_entries', checks: '1' },
 ];
+
+const recoveryColumnRows = [
+  { tbl: 'events', cid: 30, col: 'recoverable_media_count', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+  { tbl: 'events', cid: 31, col: 'recoverable_bytes', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+  { tbl: 'media', cid: 25, col: 'trashed_at', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+  { tbl: 'media', cid: 26, col: 'restore_until', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+];
+
+const recoveryIndexRows = [
+  {
+    name: 'export_media_entries_source_hold',
+    sql: 'CREATE INDEX export_media_entries_source_hold\n'
+      + 'ON export_media_entries(media_id, object_bucket_generation, object_key, export_job_id)',
+  },
+  {
+    name: 'media_recently_deleted_page',
+    sql: 'CREATE INDEX media_recently_deleted_page\n'
+      + 'ON media(event_id, trashed_at DESC, id DESC)\nWHERE trashed_at IS NOT NULL',
+  },
+  {
+    name: 'media_recovery_expiry',
+    sql: 'CREATE INDEX media_recovery_expiry\n'
+      + 'ON media(restore_until, id)\nWHERE trashed_at IS NOT NULL',
+  },
+];
+
+// Captured from sqlite_master after applying the exact 0001-0020 ledger. Keep
+// this independent fixture literal so the verifier's pinned digest is not
+// tested against its own constant.
+const exportJobsTableSql = "CREATE TABLE export_jobs ( id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE, state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'ready', 'failed', 'expired')), snapshot_at TEXT NOT NULL, object_key TEXT, media_count INTEGER NOT NULL CHECK (media_count >= 0), total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0), attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1), error_code TEXT, created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, expires_at TEXT , manifest_object_key TEXT, part_count INTEGER NOT NULL DEFAULT 0 CHECK (part_count >= 0), guestbook_html_object_key TEXT, guestbook_html_bytes INTEGER CHECK (guestbook_html_bytes IS NULL OR guestbook_html_bytes >= 0), guestbook_html_sha256 TEXT, guestbook_csv_object_key TEXT, guestbook_csv_bytes INTEGER CHECK (guestbook_csv_bytes IS NULL OR guestbook_csv_bytes >= 0), guestbook_csv_sha256 TEXT, guestbook_entry_count INTEGER CHECK (guestbook_entry_count IS NULL OR guestbook_entry_count >= 0), guestbook_shared_count INTEGER CHECK ( guestbook_shared_count IS NULL OR (guestbook_shared_count >= 0 AND guestbook_shared_count <= guestbook_entry_count) ), guestbook_event_name TEXT, guestbook_event_date TEXT, guestbook_event_timezone TEXT, guestbook_prompt TEXT CHECK (guestbook_prompt IS NULL OR length(trim(guestbook_prompt)) BETWEEN 1 AND 160), guestbook_gallery_visible INTEGER CHECK (guestbook_gallery_visible IS NULL OR guestbook_gallery_visible IN (0, 1)), kind TEXT NOT NULL DEFAULT 'complete' CHECK (kind IN ('complete', 'album')), album_entries_json TEXT CHECK ( (kind = 'complete' AND album_entries_json IS NULL) OR (kind = 'album' AND album_entries_json IS NOT NULL AND json_valid(album_entries_json) AND json_type(album_entries_json) = 'array') ), processed_media_count INTEGER CHECK (processed_media_count IS NULL OR processed_media_count >= 0), processed_bytes INTEGER CHECK (processed_bytes IS NULL OR processed_bytes >= 0), progress_updated_at TEXT, execution_protocol TEXT NOT NULL DEFAULT 'legacy' CHECK (execution_protocol IN ('legacy', 'attempt-v2')), execution_transition INTEGER NOT NULL DEFAULT 0 CHECK (execution_transition >= 0), execution_started_at TEXT)";
+
+const exportProgressColumnRows = [
+  {
+    cid: 30, name: 'processed_media_count', type: 'INTEGER',
+    notnull: 0, dflt_value: null, pk: 0,
+  },
+  {
+    cid: 31, name: 'processed_bytes', type: 'INTEGER',
+    notnull: 0, dflt_value: null, pk: 0,
+  },
+  {
+    cid: 32, name: 'progress_updated_at', type: 'TEXT',
+    notnull: 0, dflt_value: null, pk: 0,
+  },
+  {
+    cid: 33, name: 'execution_protocol', type: 'TEXT',
+    notnull: 1, dflt_value: "'legacy'", pk: 0,
+  },
+  {
+    cid: 34, name: 'execution_transition', type: 'INTEGER',
+    notnull: 1, dflt_value: '0', pk: 0,
+  },
+  {
+    cid: 35, name: 'execution_started_at', type: 'TEXT',
+    notnull: 0, dflt_value: null, pk: 0,
+  },
+].map((row) => ({ ...row, table_sql: exportJobsTableSql }));
+
+// Captured from sqlite_master after applying the exact 0001-0020 ledger. The
+// fixture stays literal so verifier schema pins are not tested against a value
+// derived from the verifier itself.
+const exportProtocolAdmissionTableSql = "CREATE TABLE export_protocol_admission ( singleton INTEGER PRIMARY KEY CHECK (singleton = 1), state TEXT NOT NULL CHECK (state IN ('legacy-open', 'closed', 'open')), closed_at TEXT, worker_version_id TEXT, admitted_at TEXT, CHECK ( ( state = 'legacy-open' AND closed_at IS NULL AND worker_version_id IS NULL AND admitted_at IS NULL ) OR ( state = 'closed' AND typeof(closed_at) = 'text' AND length(closed_at) = 24 AND substr(closed_at, 12, 2) BETWEEN '00' AND '23' AND strftime('%Y-%m-%dT%H:%M:%fZ', closed_at) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', closed_at) = closed_at AND worker_version_id IS NULL AND admitted_at IS NULL ) OR ( state = 'open' AND typeof(closed_at) = 'text' AND length(closed_at) = 24 AND substr(closed_at, 12, 2) BETWEEN '00' AND '23' AND strftime('%Y-%m-%dT%H:%M:%fZ', closed_at) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', closed_at) = closed_at AND typeof(worker_version_id) = 'text' AND length(worker_version_id) = 36 AND worker_version_id = lower(worker_version_id) AND substr(worker_version_id, 9, 1) = '-' AND substr(worker_version_id, 14, 1) = '-' AND substr(worker_version_id, 19, 1) = '-' AND substr(worker_version_id, 24, 1) = '-' AND length(replace(worker_version_id, '-', '')) = 32 AND replace(worker_version_id, '-', '') NOT GLOB '*[^0-9a-f]*' AND typeof(admitted_at) = 'text' AND length(admitted_at) = 24 AND substr(admitted_at, 12, 2) BETWEEN '00' AND '23' AND strftime('%Y-%m-%dT%H:%M:%fZ', admitted_at) IS NOT NULL AND strftime('%Y-%m-%dT%H:%M:%fZ', admitted_at) = admitted_at AND admitted_at >= closed_at ) ) )";
+
+const exportProtocolAdmissionRows = [
+  { cid: 0, name: 'singleton', type: 'INTEGER', notnull: 0, dflt_value: null, pk: 1 },
+  { cid: 1, name: 'state', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+  { cid: 2, name: 'closed_at', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+  { cid: 3, name: 'worker_version_id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+  { cid: 4, name: 'admitted_at', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+].map((row) => ({
+  ...row,
+  table_sql: exportProtocolAdmissionTableSql,
+  singleton: 1,
+  state: 'legacy-open',
+  closed_at: null,
+  worker_version_id: null,
+  admitted_at: null,
+}));
 
 type ColumnRow = {
   cid: number;
@@ -351,6 +441,8 @@ function terminalRows() {
     type: 'TEXT', notnull: 1,
     dflt_value: "'Share a wish, memory, or moment from the day.'", pk: 0,
   });
+  Object.assign(events[30]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
+  Object.assign(events[31]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
 
   const roster = columns(rosterColumnNames);
   Object.assign(roster[0]!, { type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 });
@@ -394,6 +486,10 @@ function invariantOutput(ledgerNames: string[]): unknown[] {
     resultEnvelope(structuredClone(albumForeignKeyRows)),
     resultEnvelope(structuredClone(albumIndexRows)),
     resultEnvelope(structuredClone(albumCheckRows)),
+    resultEnvelope(structuredClone(recoveryColumnRows)),
+    resultEnvelope(structuredClone(recoveryIndexRows)),
+    resultEnvelope(structuredClone(exportProgressColumnRows)),
+    resultEnvelope(structuredClone(exportProtocolAdmissionRows)),
   ];
 }
 
@@ -592,6 +688,35 @@ describe('fresh local D1 verification', () => {
     }
   });
 
+  it('appends the exact 0020 export columns and legacy-open admission gate as invariants', () => {
+    const statements = READ_ONLY_INVARIANT_QUERY
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+
+    expect(statements).toHaveLength(27);
+    const exportProgressColumns = statements[25]!;
+    expect(exportProgressColumns).toContain("pragma_table_info('export_jobs')");
+    expect(exportProgressColumns).toContain("name = 'export_jobs'");
+    expect(exportProgressColumns).toContain('table_sql');
+    for (const column of [
+      'processed_media_count',
+      'processed_bytes',
+      'progress_updated_at',
+      'execution_protocol',
+      'execution_transition',
+      'execution_started_at',
+    ]) {
+      expect(exportProgressColumns).toContain(`'${column}'`);
+    }
+    const exportAdmission = statements[26]!;
+    expect(exportAdmission).toContain("pragma_table_info('export_protocol_admission')");
+    expect(exportAdmission).toContain("name = 'export_protocol_admission'");
+    expect(exportAdmission).toContain('closed_at');
+    expect(exportAdmission).toContain('worker_version_id');
+    expect(exportAdmission).toContain('admitted_at');
+  });
+
   it('keeps the legacy cover-index envelope at exactly four fields', async () => {
     const statements = READ_ONLY_INVARIANT_QUERY
       .split(';')
@@ -692,12 +817,12 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly eighteen migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly twenty migrations', async () => {
     const candidate = await fixture();
-    const seventeen = candidate.ledgerNames.slice(0, -1);
+    const nineteen = candidate.ledgerNames.slice(0, -1);
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;
-    output[0]!.results = seventeen.map((name, index) => ({ id: index + 1, name }));
-    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), seventeen)).toThrow();
+    output[0]!.results = nineteen.map((name, index) => ({ id: index + 1, name }));
+    expect(() => parseWranglerInvariantOutput(JSON.stringify(output), nineteen)).toThrow();
   });
 
   it('fails closed on any post-cutover Guestbook schema inventory drift', async () => {
@@ -707,6 +832,11 @@ describe('fresh local D1 verification', () => {
       (output) => {
         const rows = (output[13] as { results: Array<{ tbl: string; col: string }> }).results;
         rows.splice(rows.findIndex((row) => row.tbl === 'export_jobs' && row.col === 'guestbook_prompt'), 1);
+      },
+      (output) => {
+        const rows = (output[13] as { results: Array<{ tbl: string; col: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.tbl === 'export_jobs'
+          && row.col === 'processed_media_count'), 1);
       },
       (output) => {
         const rows = (output[13] as { results: Array<{ tbl: string; col: string }> }).results;
@@ -813,6 +943,131 @@ describe('fresh local D1 verification', () => {
       const output = structuredClone(invariantOutput(candidate.ledgerNames));
       mutate(output);
       expect(() => parseWranglerInvariantOutput(JSON.stringify(output), candidate.ledgerNames)).toThrow();
+    }
+  });
+
+  it('fails closed on any 0019 recovery column or exact-index drift', async () => {
+    const candidate = await fixture();
+    const mutations: Array<(output: unknown[]) => void> = [
+      (output) => {
+        const rows = (output[23] as { results: Array<{ tbl: string; col: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.tbl === 'media' && row.col === 'trashed_at'), 1);
+      },
+      (output) => {
+        const rows = (output[23] as { results: Array<{ tbl: string; col: string; notnull: number }> }).results;
+        rows.find((row) => row.tbl === 'events' && row.col === 'recoverable_bytes')!.notnull = 0;
+      },
+      (output) => {
+        const rows = (output[24] as { results: Array<{ name: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.name === 'export_media_entries_source_hold'), 1);
+      },
+      (output) => {
+        const rows = (output[24] as { results: Array<{ name: string; sql: string }> }).results;
+        const sourceHold = rows.find((row) => row.name === 'export_media_entries_source_hold')!;
+        sourceHold.sql = sourceHold.sql.replace(
+          'media_id, object_bucket_generation, object_key, export_job_id',
+          'media_id, object_key, object_bucket_generation, export_job_id',
+        );
+      },
+    ];
+    for (const mutate of mutations) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      mutate(output);
+      expect(() => parseWranglerInvariantOutput(JSON.stringify(output), candidate.ledgerNames)).toThrow();
+    }
+  });
+
+  it('fails closed on any 0020 export progress column, CHECK, or trigger drift', async () => {
+    const candidate = await fixture();
+    const mutations: Array<(output: unknown[]) => void> = [
+      (output) => {
+        const rows = (output[25] as { results: Array<{ name: string }> }).results;
+        rows.splice(rows.findIndex((row) => row.name === 'processed_bytes'), 1);
+      },
+      (output) => {
+        const rows = (output[25] as {
+          results: Array<{ name: string; dflt_value: string | null }>;
+        }).results;
+        rows.find((row) => row.name === 'execution_protocol')!.dflt_value = "'attempt-v2'";
+      },
+      (output) => {
+        const rows = (output[16] as { results: Array<{ name: string; checks: string }> }).results;
+        const row = rows.find((entry) => entry.name === 'export_jobs')!;
+        row.checks = `${row.checks.slice(0, -1)}0`;
+      },
+      (output) => {
+        const rows = (output[22] as { results: Array<{ name: string; checks: string }> }).results;
+        const row = rows.find((entry) => entry.name === 'export_jobs')!;
+        row.checks = `${row.checks.slice(0, -1)}0`;
+      },
+      (output) => {
+        const rows = (output[25] as { results: Array<{ table_sql: string }> }).results;
+        for (const row of rows) {
+          row.table_sql = row.table_sql.replace(
+            'CHECK (execution_transition >= 0)',
+            'CHECK (execution_transition >= 0 OR 1)',
+          );
+        }
+      },
+    ];
+    for (const mutate of mutations) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      mutate(output);
+      expect(() => parseWranglerInvariantOutput(JSON.stringify(output), candidate.ledgerNames)).toThrow();
+    }
+
+    for (const name of [
+      'export_jobs_execution_insert',
+      'export_jobs_execution_update',
+      'export_jobs_progress_insert',
+      'export_jobs_progress_update',
+      'export_protocol_admission_no_delete',
+      'export_protocol_admission_no_insert',
+      'export_protocol_admission_transition',
+      'export_jobs_protocol_admission_insert',
+      'export_jobs_protocol_admission_update',
+    ]) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      const rows = (output[11] as { results: Array<{ name: string; sql: string }> }).results;
+      const trigger = rows.find((row) => row.name === name)!;
+      trigger.sql = trigger.sql.replace('BEFORE', 'AFTER');
+      expect(() => parseWranglerInvariantOutput(
+        JSON.stringify(output),
+        candidate.ledgerNames,
+      )).toThrow(/trigger body/iu);
+    }
+  });
+
+  it('fails closed on admission schema, singleton, or default-state drift', async () => {
+    const candidate = await fixture();
+    const mutations: Array<(rows: Array<Record<string, unknown>>) => void> = [
+      (rows) => { rows.pop(); },
+      (rows) => { rows[0]!.state = 'open'; },
+      (rows) => { rows[0]!.worker_version_id = 'unexpected-version'; },
+      (rows) => {
+        for (const row of rows) {
+          row.table_sql = (row.table_sql as string).replace(
+            "state IN ('legacy-open', 'closed', 'open')",
+            "state IN ('legacy-open', 'closed', 'open', 'bypass')",
+          );
+        }
+      },
+      (rows) => {
+        for (const row of rows) {
+          row.table_sql = (row.table_sql as string).replace(
+            "strftime('%Y-%m-%dT%H:%M:%fZ', closed_at) IS NOT NULL AND ",
+            '',
+          );
+        }
+      },
+    ];
+    for (const mutate of mutations) {
+      const output = structuredClone(invariantOutput(candidate.ledgerNames));
+      mutate((output[26] as { results: Array<Record<string, unknown>> }).results);
+      expect(() => parseWranglerInvariantOutput(
+        JSON.stringify(output),
+        candidate.ledgerNames,
+      )).toThrow(/admission|27 exact results|trigger/iu);
     }
   });
 

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { ManagerGuestbookItem } from '../../shared/contracts';
 import { GuestbookRepository } from '../../worker/db/guestbook';
-import { eventAccess, resetDatabase, testEnv, uploadPending } from './helpers';
+import { eventAccess, resetDatabase, seedExportJob, testEnv, uploadPending } from './helpers';
 
 beforeEach(resetDatabase);
 
@@ -255,10 +255,17 @@ describe('GuestbookRepository', () => {
       UPDATE media SET publication_status = 'published', published_at = ?, created_at = ? WHERE id = ?
     `).bind(createdAt, createdAt, caption.id).run();
     const exportJobId = crypto.randomUUID();
-    await testEnv.DB.prepare(`
-      INSERT INTO export_jobs (id, event_id, state, snapshot_at, media_count, total_bytes, attempt, created_at)
-      VALUES (?, ?, 'queued', ?, 1, 128, 1, ?)
-    `).bind(exportJobId, access.event.id, '2026-09-19T21:00:00.000Z', createdAt).run();
+    // A queued complete job has to be entry-backed since 0019: it freezes its
+    // photo sources and states its Guestbook counts up front. The counts start
+    // at zero because this test is exercising the statements that fill the
+    // Guestbook snapshot, not the creation service that totals it.
+    await seedExportJob({
+      id: exportJobId,
+      eventId: access.event.id,
+      snapshotAt: '2026-09-19T21:00:00.000Z',
+      createdAt,
+      media: [caption],
+    });
 
     const statements = new GuestbookRepository(testEnv.DB).snapshotStatements({
       exportJobId,

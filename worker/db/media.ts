@@ -1,11 +1,18 @@
 import type {
+  GuestContributionMediaView,
+  GuestGalleryMediaView,
   ManagerGalleryMediaView,
   ManagerMediaView,
+  ManagerTrashedMediaView,
   PublicationStatus,
+  UploadMediaView,
 } from '../../shared/contracts';
 import {
   ALBUM_MAX_ENTRIES,
+  MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
+  MEDIA_RECOVERY_CLEANUP_BATCH,
+  MEDIA_RECOVERY_WINDOW_MS,
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
   MEDIA_TIMELINE_SENTINEL,
@@ -19,6 +26,10 @@ import type { GalleryCursor } from '../http/gallery-cursor';
 import type { ManagerMediaCursor } from '../http/media-cursor';
 import type { MediaRecord } from './types';
 import { MediaObjectWriteTombstoneRepository } from './media-write-tombstones';
+import {
+  finalizedMediaObjectKey,
+  legacyMediaPreviewObjectKey,
+} from '../storage/media-keys';
 import {
   assertLegacyPointerCutoverEnabled,
   assertWorkerIngressEnabled,
@@ -50,6 +61,8 @@ export interface MediaRow {
   published_at: string | null;
   preview_object_key: string | null;
   deleted_at: string | null;
+  trashed_at: string | null;
+  restore_until: string | null;
 }
 
 /**
@@ -63,6 +76,162 @@ export interface MediaRow {
  */
 const PHOTO_INTAKE_OPEN_SQL
   = 'uploads_enabled = 1 AND COALESCE(photos_open_from, event_start_at) <= ?';
+
+/**
+ * A row the host moved to Recently deleted.
+ *
+ * `deleted_at = trashed_at` is the whole test. The matching pair is the
+ * compatibility marker an 0018 Worker reads as ordinary deletion, and the exact
+ * equality is what distinguishes a recoverable photo from one that was deleted
+ * permanently — by a guest, by expiry, or by purge — which keeps `deleted_at`
+ * but clears the pair.
+ */
+const RECOVERABLE_ROW_SQL = "(trashed_at IS NOT NULL AND deleted_at = trashed_at)";
+
+/**
+ * A row that holds an album slot: still delivered, or retained in Recently
+ * deleted. Album capacity is charged against this rather than against what is
+ * visible, so trashing a pick cannot appear to free a slot that a Restore will
+ * need back.
+ */
+const ALBUM_SLOT_OWNER_SQL = `(
+  (deleted_at IS NULL AND trashed_at IS NULL)
+  OR ${RECOVERABLE_ROW_SQL}
+)`;
+
+/**
+ * The persisted Album document, rebuilt as the host currently reads it:
+ * sections and still-owned photo entries in their stored order, then every
+ * unplaced pick — active or retained — in timeline order.
+ *
+ * This runs immediately before trashing a pick of a saved album, so the photo
+ * that is about to become an opaque marker has a durable slot to be a marker
+ * *in*. Without it, a pick that had never been saved into the order would come
+ * back from Restore at the end rather than where the host last saw it.
+ */
+const ALBUM_MATERIALIZE_SQL = `
+  UPDATE event_albums
+  SET entries = (
+        SELECT COALESCE(json_group_array(json(doc.value)), '[]')
+        FROM (
+          SELECT entry.value AS value, 0 AS bucket, entry.key AS ord, '' AS tie
+          FROM json_each(
+            CASE WHEN json_valid(event_albums.entries) THEN event_albums.entries ELSE '[]' END
+          ) AS entry
+          WHERE (
+            json_extract(entry.value, '$.kind') = 'section'
+            OR EXISTS (
+              SELECT 1 FROM media AS m
+              WHERE m.id = json_extract(entry.value, '$.mediaId')
+                AND m.event_id = event_albums.event_id
+                AND m.upload_state = 'stored'
+                AND m.favorited_at IS NOT NULL
+                AND (
+                  (m.deleted_at IS NULL AND m.trashed_at IS NULL)
+                  OR (m.trashed_at IS NOT NULL AND m.deleted_at = m.trashed_at)
+                )
+            )
+          )
+          AND entry.key = (
+            SELECT min(first.key) FROM json_each(
+              CASE WHEN json_valid(event_albums.entries) THEN event_albums.entries ELSE '[]' END
+            ) AS first
+            WHERE json_extract(first.value, '$.kind') = json_extract(entry.value, '$.kind')
+              AND COALESCE(
+                json_extract(first.value, '$.mediaId'), json_extract(first.value, '$.id')
+              ) IS COALESCE(
+                json_extract(entry.value, '$.mediaId'), json_extract(entry.value, '$.id')
+              )
+          )
+          UNION ALL
+          SELECT json_object('kind', 'photo', 'mediaId', m.id), 1, 0,
+            m.timeline_at || '|' || m.id
+          FROM media AS m
+          WHERE m.event_id = event_albums.event_id
+            AND m.upload_state = 'stored'
+            AND m.favorited_at IS NOT NULL
+            AND (
+              (m.deleted_at IS NULL AND m.trashed_at IS NULL)
+              OR (m.trashed_at IS NOT NULL AND m.deleted_at = m.trashed_at)
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(
+                CASE WHEN json_valid(event_albums.entries) THEN event_albums.entries ELSE '[]' END
+              ) AS placed
+              WHERE json_extract(placed.value, '$.kind') = 'photo'
+                AND json_extract(placed.value, '$.mediaId') = m.id
+            )
+          ORDER BY bucket, ord, tie
+        ) AS doc
+      ),
+      revision = revision + 1,
+      updated_at = ?1
+  WHERE event_id = ?2
+    AND revision = ?3
+    AND saved_at IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM media AS target
+      WHERE target.id = ?4 AND target.event_id = ?2
+        AND target.upload_state = 'stored'
+        AND target.deleted_at IS NULL AND target.trashed_at IS NULL
+        AND target.favorited_at IS NOT NULL
+    )
+`;
+
+/**
+ * The target is safely placed: either this album has nothing to remember, the
+ * photo is not a pick, or the stored order already names it. Trash is refused
+ * otherwise, so a lost materialization cannot leave a marker with no slot.
+ */
+const ALBUM_SLOT_SETTLED_SQL = `(
+  NOT EXISTS (
+    SELECT 1 FROM event_albums AS a
+    WHERE a.event_id = media.event_id AND a.saved_at IS NOT NULL
+  )
+  OR media.favorited_at IS NULL
+  OR EXISTS (
+    SELECT 1 FROM event_albums AS a,
+      json_each(CASE WHEN json_valid(a.entries) THEN a.entries ELSE '[]' END) AS entry
+    WHERE a.event_id = media.event_id
+      AND json_extract(entry.value, '$.kind') = 'photo'
+      AND json_extract(entry.value, '$.mediaId') = media.id
+  )
+)`;
+
+/**
+ * Drops a photo's exact retained slot and cover reference and advances the
+ * revision, so an editor composed against the previous document cannot save the
+ * terminal photo back in. Chained on `changes() = 1` behind the transition that
+ * made it terminal.
+ */
+const ALBUM_MARKER_REMOVAL_SQL = `
+  UPDATE event_albums
+  SET entries = (
+        SELECT COALESCE(json_group_array(json(entry.value)), '[]')
+        FROM json_each(
+          CASE WHEN json_valid(event_albums.entries) THEN event_albums.entries ELSE '[]' END
+        ) AS entry
+        WHERE NOT (
+          json_extract(entry.value, '$.kind') = 'photo'
+          AND json_extract(entry.value, '$.mediaId') = ?1
+        )
+      ),
+      cover_media_id = CASE WHEN cover_media_id = ?1 THEN NULL ELSE cover_media_id END,
+      revision = revision + 1,
+      updated_at = ?3
+  WHERE event_id = ?2
+    AND (
+      cover_media_id = ?1
+      OR EXISTS (
+        SELECT 1 FROM json_each(
+          CASE WHEN json_valid(entries) THEN entries ELSE '[]' END
+        ) AS present
+        WHERE json_extract(present.value, '$.kind') = 'photo'
+          AND json_extract(present.value, '$.mediaId') = ?1
+      )
+    )
+    AND changes() = 1
+`;
 
 export interface ReserveMediaRecord {
   id: string;
@@ -175,6 +344,8 @@ function mapMedia(row: MediaRow): MediaRecord {
     publishedAt: row.published_at,
     previewObjectKey: row.preview_object_key,
     deletedAt: row.deleted_at,
+    trashedAt: row.trashed_at,
+    restoreUntil: row.restore_until,
   };
 }
 
@@ -219,6 +390,63 @@ function mapPromotion(row: MediaObjectPromotionRow): MediaObjectPromotion {
  */
 function previewAvailable(uploadState: MediaRecord['uploadState']): boolean {
   return uploadState === 'stored';
+}
+
+/**
+ * A published photo, as another guest reads it.
+ *
+ * There is no `originalFilename` here on purpose. A filename is the uploader's
+ * device talking — `IMG_4471.HEIC`, or worse, a name — and the shared gallery
+ * says `Shared photo` instead. Nothing about storage, size, type, moderation, or
+ * album membership crosses this boundary either.
+ */
+export function guestGalleryMediaView(media: Pick<
+  MediaRecord,
+  'id' | 'guestName' | 'caption' | 'uploadState'
+>): GuestGalleryMediaView {
+  return {
+    id: media.id,
+    guestName: media.guestName,
+    caption: media.caption,
+    previewAvailable: previewAvailable(media.uploadState),
+  };
+}
+
+/**
+ * A guest's own contribution. The filename and the transfer state are theirs to
+ * see; the object key, the bytes, the reservation, and the idempotency key are
+ * not, and never were needed to render the row.
+ */
+export function guestContributionMediaView(media: Pick<
+  MediaRecord,
+  'id' | 'originalFilename' | 'caption' | 'uploadState' | 'createdAt'
+>): GuestContributionMediaView {
+  if (media.uploadState === 'deleted') {
+    throw new Error('A deleted contribution is not listed.');
+  }
+  return {
+    id: media.id,
+    originalFilename: media.originalFilename,
+    caption: media.caption,
+    uploadState: media.uploadState,
+    previewAvailable: previewAvailable(media.uploadState),
+    createdAt: media.createdAt,
+  };
+}
+
+/**
+ * What the browser upload queue needs to drive one photo through reserve,
+ * transfer, and confirm — three fields, all of which it already knew.
+ */
+export function uploadMediaView(media: Pick<
+  MediaRecord,
+  'id' | 'mimeType' | 'uploadState'
+>): UploadMediaView {
+  return {
+    id: media.id,
+    mimeType: media.mimeType,
+    uploadState: media.uploadState,
+  };
 }
 
 export function managerMediaView(media: Pick<
@@ -312,6 +540,54 @@ function mapGalleryMediaRow(row: MediaRow): ManagerGalleryMediaView {
   });
 }
 
+/**
+ * Recently deleted, as the host reads it. Deliberately not a `ManagerMediaView`
+ * minus a few fields: a retained photo has no preview, no original download, and
+ * no storage identity on the wire at all. What it has is a name, a guest, the
+ * caption it carried, and the server's answer about how long Restore lasts.
+ */
+export function managerTrashedMediaView(media: Pick<
+  MediaRecord,
+  'id' | 'originalFilename' | 'guestName' | 'caption' | 'trashedAt' | 'restoreUntil'
+>): ManagerTrashedMediaView {
+  if (media.trashedAt === null || media.restoreUntil === null) {
+    throw new Error('A Recently deleted photo requires both recovery markers.');
+  }
+  return {
+    id: media.id,
+    originalFilename: media.originalFilename,
+    guestName: media.guestName,
+    caption: media.caption,
+    trashedAt: media.trashedAt,
+    restoreUntil: media.restoreUntil,
+  };
+}
+
+export interface TrashedMediaOptions {
+  cursor?: { trashedAt: string; id: string } | undefined;
+  limit?: number | undefined;
+}
+
+export interface TrashedMediaPage {
+  media: ManagerTrashedMediaView[];
+  nextCursor: { trashedAt: string; id: string } | null;
+}
+
+/**
+ * The exact object aliases one guarded batch won the right to delete.
+ *
+ * Nothing else may delete media bytes. A key is absent from this claim when an
+ * accepted export still holds it, when a recoverable photo still owns it, or
+ * when another pass already claimed it — and in every one of those cases the
+ * bytes stay put and the existing tombstone janitor owns them.
+ */
+export interface MediaObjectDeletionClaim {
+  mediaId: string;
+  eventId: string;
+  legacyKeys: string[];
+  canonicalKeys: string[];
+}
+
 export interface ManagerMediaOptions {
   status?: PublicationStatus;
   guestName?: string;
@@ -353,6 +629,7 @@ export function buildManagerMediaQuery(
     "upload_state = 'stored'",
     'stored_at IS NOT NULL',
     'deleted_at IS NULL',
+    'trashed_at IS NULL',
   ];
   const bindings: unknown[] = [eventId];
 
@@ -433,6 +710,7 @@ export class MediaRepository {
       'event_id = ?',
       "upload_state = 'stored'",
       'deleted_at IS NULL',
+      'trashed_at IS NULL',
     ];
     const bindings: unknown[] = [eventId];
 
@@ -496,7 +774,7 @@ export class MediaRepository {
             ELSE COALESCE(favorited_at, ?)
           END
       WHERE id = ? AND event_id = ?
-        AND upload_state = 'stored' AND deleted_at IS NULL
+        AND upload_state = 'stored' AND deleted_at IS NULL AND trashed_at IS NULL
       RETURNING *
     `).bind(favoritedAt, favoritedAt, mediaId, eventId).all<MediaRow>();
     const row = result.results[0];
@@ -550,6 +828,7 @@ export class MediaRepository {
             WHERE media.event_id = ?
               AND media.upload_state = 'stored'
               AND media.deleted_at IS NULL
+              AND media.trashed_at IS NULL
               AND media.favorited_at IS NULL
           ),
           capacity(allowed) AS MATERIALIZED (
@@ -557,8 +836,8 @@ export class MediaRepository {
               (SELECT COUNT(*) FROM media
                 WHERE event_id = ?
                   AND upload_state = 'stored'
-                  AND deleted_at IS NULL
-                  AND favorited_at IS NOT NULL)
+                  AND favorited_at IS NOT NULL
+                  AND ${ALBUM_SLOT_OWNER_SQL})
               + (${sectionCountSql})
               + (SELECT COUNT(*) FROM eligible)
             ) <= ?
@@ -587,14 +866,15 @@ export class MediaRepository {
           (SELECT COUNT(*) FROM media
             WHERE event_id = ?
               AND upload_state = 'stored'
-              AND deleted_at IS NULL
-              AND favorited_at IS NOT NULL)
+              AND favorited_at IS NOT NULL
+              AND ${ALBUM_SLOT_OWNER_SQL})
             + (${sectionCountSql}) AS used,
           (SELECT COUNT(*)
             FROM media INNER JOIN requested ON requested.id = media.id
             WHERE media.event_id = ?
               AND media.upload_state = 'stored'
               AND media.deleted_at IS NULL
+              AND media.trashed_at IS NULL
               AND media.favorited_at IS NULL) AS remaining
       `).bind(requested, eventId, eventId, eventId),
     ]);
@@ -657,6 +937,7 @@ export class MediaRepository {
         WHERE event_id = ?
           AND upload_state = 'stored'
           AND deleted_at IS NULL
+          AND trashed_at IS NULL
           AND ${changing}
           AND id IN (${chunk.map(() => '?').join(', ')})
         RETURNING
@@ -673,6 +954,7 @@ export class MediaRepository {
     const predicates = [
       "upload_state = 'stored'",
       'deleted_at IS NULL',
+      'trashed_at IS NULL',
       'timeline_at = ?',
     ];
     const bindings: unknown[] = [MEDIA_TIMELINE_SENTINEL];
@@ -696,6 +978,7 @@ export class MediaRepository {
         SELECT id FROM media
         WHERE upload_state = 'stored'
           AND deleted_at IS NULL
+          AND trashed_at IS NULL
           AND timeline_at = ?
           ${predicate}
         LIMIT ?
@@ -707,17 +990,31 @@ export class MediaRepository {
   async listGallery(eventId: string): Promise<MediaRecord[]> {
     const result = await this.db.prepare(`
       SELECT * FROM media
-      WHERE event_id = ? AND upload_state = 'stored' AND publication_status = 'published' AND deleted_at IS NULL
+      WHERE event_id = ? AND upload_state = 'stored' AND publication_status = 'published'
+        AND deleted_at IS NULL AND trashed_at IS NULL
       ORDER BY published_at ASC, created_at ASC
     `).bind(eventId).all<MediaRow>();
     return result.results.map(mapMedia);
+  }
+
+  async countPublishedForGallerySummary(eventId: string): Promise<number> {
+    const row = await this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM media
+      WHERE event_id = ?
+        AND upload_state = 'stored'
+        AND publication_status = 'published'
+        AND deleted_at IS NULL
+        AND trashed_at IS NULL
+    `).bind(eventId).first<{ count: number }>();
+    return row?.count ?? 0;
   }
 
   async exportSnapshot(eventId: string, snapshotAt: string): Promise<MediaRecord[]> {
     const result = await this.db.prepare(`
       SELECT * FROM media
       WHERE event_id = ? AND upload_state = 'stored'
-        AND deleted_at IS NULL AND created_at <= ?
+        AND deleted_at IS NULL AND trashed_at IS NULL AND created_at <= ?
       ORDER BY created_at ASC, id ASC
     `).bind(eventId, snapshotAt).all<MediaRow>();
     return result.results.map(mapMedia);
@@ -1328,12 +1625,23 @@ export class MediaRepository {
     claimToken: string,
     handedOffAt: string,
   ): Promise<boolean> {
+    // "The row still points here." A photo in Recently deleted does — it is still
+    // `stored`, still at the same key, and still owns its objects — so this must
+    // read the recovery pair rather than `deleted_at IS NULL` alone. Treating a
+    // retained photo as pointerless would send this handoff to suppress the row's
+    // *current* canonical key, which 0019's recoverable-owner guard correctly
+    // aborts; the promotion would then sit in `cleanup_pending` forever, and the
+    // event purge — which waits on exactly that fence — could never finish.
     const activePointerSql = `
       EXISTS (
         SELECT 1 FROM media AS m
         JOIN events AS e ON e.id = m.event_id AND e.deleted_at IS NULL
         WHERE m.id = p.media_id AND m.event_id = p.event_id
-          AND m.upload_state = 'stored' AND m.deleted_at IS NULL
+          AND m.upload_state = 'stored'
+          AND (
+            (m.trashed_at IS NULL AND m.deleted_at IS NULL)
+            OR (m.trashed_at IS NOT NULL AND m.deleted_at = m.trashed_at)
+          )
           AND m.object_key = CASE p.final_pointer_committed
             WHEN 1 THEN p.final_object_key ELSE p.source_object_key END
           AND m.object_bucket_generation = CASE p.final_pointer_committed
@@ -1351,7 +1659,22 @@ export class MediaRepository {
               WHERE p.media_id = media.id AND p.media_id = ?
                 AND p.state = 'cleanup_pending' AND p.claim_token = ?
             )
-        `).bind(mediaId, mediaId, claimToken),
+            AND NOT EXISTS (
+              SELECT 1 FROM media_object_promotions AS p
+              JOIN events AS e ON e.id = p.event_id AND e.deleted_at IS NULL
+              WHERE p.media_id = media.id AND p.media_id = ?
+                AND p.state = 'cleanup_pending' AND p.claim_token = ?
+                AND p.final_pointer_committed = 0
+                AND media.event_id = p.event_id
+                AND media.upload_state = 'stored'
+                AND (
+                  (media.trashed_at IS NULL AND media.deleted_at IS NULL)
+                  OR (media.trashed_at IS NOT NULL AND media.deleted_at = media.trashed_at)
+                )
+                AND media.object_bucket_generation = p.source_bucket_generation
+                AND media.object_key = p.source_object_key
+            )
+        `).bind(mediaId, mediaId, claimToken, mediaId, claimToken),
         this.db.prepare(`
           UPDATE media_object_write_tombstones AS target
           SET suppression_started_at = COALESCE(suppression_started_at, ?),
@@ -1371,6 +1694,22 @@ export class MediaRepository {
                       target.object_kind = 'final'
                       AND target.bucket_generation = p.final_bucket_generation
                       AND target.object_key = p.final_object_key
+                    )
+                  )
+                  OR (
+                    p.final_pointer_committed = 0
+                    AND ${activePointerSql}
+                    AND NOT (
+                      target.bucket_generation = p.source_bucket_generation
+                      AND target.object_key = p.source_object_key
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM media AS current_media
+                      WHERE current_media.id = p.media_id
+                        AND current_media.event_id = p.event_id
+                        AND current_media.preview_object_key IS NOT NULL
+                        AND target.bucket_generation = 'legacy'
+                        AND target.object_key = current_media.preview_object_key
                     )
                   )
                   OR NOT ${activePointerSql}
@@ -1414,6 +1753,65 @@ export class MediaRepository {
                       AND pending_target.object_key = p.final_object_key
                     )
                     AND pending_target.suppression_started_at IS NULL
+                )
+              )
+              OR (
+                p.final_pointer_committed = 0
+                AND ${activePointerSql}
+                AND EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS source_target
+                  WHERE source_target.bucket_generation = p.source_bucket_generation
+                    AND source_target.object_key = p.source_object_key
+                    AND source_target.event_id = p.event_id
+                    AND source_target.media_id = p.media_id
+                    AND source_target.suppression_started_at IS NULL
+                )
+                AND EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS final_target
+                  WHERE final_target.bucket_generation = p.final_bucket_generation
+                    AND final_target.object_key = p.final_object_key
+                    AND final_target.event_id = p.event_id
+                    AND final_target.media_id = p.media_id
+                )
+                AND EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS preview_target
+                  WHERE preview_target.bucket_generation = 'legacy'
+                    AND preview_target.object_key =
+                    ('events/' || p.event_id || '/previews/' || p.media_id || '.webp')
+                    AND preview_target.event_id = p.event_id
+                    AND preview_target.media_id = p.media_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM media AS current_media
+                  WHERE current_media.id = p.media_id
+                    AND current_media.event_id = p.event_id
+                    AND current_media.preview_object_key IS NOT NULL
+                    AND NOT EXISTS (
+                      SELECT 1 FROM media_object_write_tombstones AS current_preview
+                      WHERE current_preview.bucket_generation = 'legacy'
+                        AND current_preview.object_key = current_media.preview_object_key
+                        AND current_preview.event_id = p.event_id
+                        AND current_preview.media_id = p.media_id
+                        AND current_preview.suppression_started_at IS NULL
+                    )
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM media_object_write_tombstones AS unsettled_target
+                  WHERE unsettled_target.event_id = p.event_id
+                    AND unsettled_target.media_id = p.media_id
+                    AND unsettled_target.object_kind NOT IN ('export', 'cover')
+                    AND CASE WHEN (
+                      unsettled_target.bucket_generation = p.source_bucket_generation
+                      AND unsettled_target.object_key = p.source_object_key
+                    ) OR EXISTS (
+                      SELECT 1 FROM media AS current_media
+                      WHERE current_media.id = p.media_id
+                        AND current_media.event_id = p.event_id
+                        AND current_media.preview_object_key IS NOT NULL
+                        AND unsettled_target.bucket_generation = 'legacy'
+                        AND unsettled_target.object_key = current_media.preview_object_key
+                    ) THEN unsettled_target.suppression_started_at IS NOT NULL
+                      ELSE unsettled_target.suppression_started_at IS NULL END
                 )
               )
               OR (
@@ -1720,7 +2118,8 @@ export class MediaRepository {
   async listContributions(eventId: string, sessionId: string): Promise<MediaRecord[]> {
     const result = await this.db.prepare(`
       SELECT * FROM media
-      WHERE event_id = ? AND uploader_session_id = ? AND deleted_at IS NULL
+      WHERE event_id = ? AND uploader_session_id = ?
+        AND deleted_at IS NULL AND trashed_at IS NULL
       ORDER BY created_at ASC
     `).bind(eventId, sessionId).all<MediaRow>();
     return result.results.map(mapMedia);
@@ -1739,15 +2138,19 @@ export class MediaRepository {
 
   private async capacityError(eventId: string): Promise<ApiError> {
     const event = await this.db.prepare(`
-      SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes
+      SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes,
+        recoverable_media_count, recoverable_bytes
       FROM events WHERE id = ?
     `).bind(eventId).first<{
       reserved_media_count: number;
       stored_media_count: number;
       reserved_bytes: number;
       stored_bytes: number;
+      recoverable_media_count: number;
+      recoverable_bytes: number;
     }>();
-    if (event && event.reserved_media_count + event.stored_media_count >= MAX_EVENT_MEDIA) {
+    if (event && event.reserved_media_count + event.stored_media_count
+      + event.recoverable_media_count >= MAX_EVENT_MEDIA) {
       return new ApiError('EVENT_MEDIA_LIMIT', `This event has reached its ${MAX_EVENT_MEDIA}-image limit.`, 409);
     }
     return new ApiError('EVENT_STORAGE_LIMIT', 'This event has reached its storage limit.', 409);
@@ -1878,8 +2281,8 @@ export class MediaRepository {
           WHERE id = ?
             AND deleted_at IS NULL
             AND ${PHOTO_INTAKE_OPEN_SQL}
-            AND reserved_media_count + stored_media_count < ?
-            AND reserved_bytes + stored_bytes + ? <= ?
+            AND reserved_media_count + stored_media_count + recoverable_media_count < ?
+            AND reserved_bytes + stored_bytes + recoverable_bytes + ? <= ?
         `).bind(input.declaredByteSize, input.eventId, input.createdAt, MAX_EVENT_MEDIA, input.declaredByteSize, MAX_EVENT_BYTES),
         this.db.prepare(`
           INSERT INTO media (
@@ -1957,16 +2360,24 @@ export class MediaRepository {
 
     if (pending.length > 0) {
       const event = await this.db.prepare(`
-        SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes
+        SELECT reserved_media_count, stored_media_count, reserved_bytes, stored_bytes,
+          recoverable_media_count, recoverable_bytes
         FROM events WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
       `).bind(eventId, reservedAt).first<{
         reserved_media_count: number;
         stored_media_count: number;
         reserved_bytes: number;
         stored_bytes: number;
+        recoverable_media_count: number;
+        recoverable_bytes: number;
       }>();
-      let usedCount = (event?.reserved_media_count ?? MAX_EVENT_MEDIA) + (event?.stored_media_count ?? 0);
-      let usedBytes = (event?.reserved_bytes ?? MAX_EVENT_BYTES) + (event?.stored_bytes ?? 0);
+      // Recently deleted still counts. A photo the host can still restore has
+      // not released its slot or its bytes, so planning a batch against space it
+      // only looks like it freed is how a later Restore would fail.
+      let usedCount = (event?.reserved_media_count ?? MAX_EVENT_MEDIA)
+        + (event?.stored_media_count ?? 0) + (event?.recoverable_media_count ?? 0);
+      let usedBytes = (event?.reserved_bytes ?? MAX_EVENT_BYTES)
+        + (event?.stored_bytes ?? 0) + (event?.recoverable_bytes ?? 0);
       let capacityError: ApiError | null = null;
       const accepted: Array<{ index: number; input: ReserveMediaRecord }> = [];
       for (const candidate of pending) {
@@ -1995,8 +2406,8 @@ export class MediaRepository {
               SET reserved_media_count = reserved_media_count + ?,
                   reserved_bytes = reserved_bytes + ?
               WHERE id = ? AND deleted_at IS NULL AND ${PHOTO_INTAKE_OPEN_SQL}
-                AND reserved_media_count + stored_media_count + ? <= ?
-                AND reserved_bytes + stored_bytes + ? <= ?
+                AND reserved_media_count + stored_media_count + recoverable_media_count + ? <= ?
+                AND reserved_bytes + stored_bytes + recoverable_bytes + ? <= ?
             `).bind(accepted.length, totalBytes, eventId, reservedAt, accepted.length, MAX_EVENT_MEDIA, totalBytes, MAX_EVENT_BYTES),
             ...accepted.map(({ input }) => this.db.prepare(`
               INSERT INTO media (
@@ -2171,7 +2582,8 @@ export class MediaRepository {
   ): Promise<MediaRecord> {
     const result = await this.db.prepare(`
       UPDATE media SET publication_status = ?, published_at = ?
-      WHERE id = ? AND upload_state = 'stored' AND publication_status = ? AND deleted_at IS NULL
+      WHERE id = ? AND upload_state = 'stored' AND publication_status = ?
+        AND deleted_at IS NULL AND trashed_at IS NULL
     `).bind(target, target === 'published' ? changedAt : null, id, expected).run();
     if ((result.meta.changes ?? 0) !== 1) {
       throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo changed since you last viewed it. Refresh and try again.', 409);
@@ -2200,6 +2612,7 @@ export class MediaRepository {
         AND upload_state = 'stored'
         AND publication_status = ?${expectedSlot}
         AND deleted_at IS NULL
+        AND trashed_at IS NULL
         AND (
           SELECT COUNT(*)
           FROM media AS eligible
@@ -2208,6 +2621,7 @@ export class MediaRepository {
             AND eligible.upload_state = 'stored'
             AND eligible.publication_status = ?${expectedSlot}
             AND eligible.deleted_at IS NULL
+            AND eligible.trashed_at IS NULL
         ) = ?${countSlot}
     `).bind(
       target,
@@ -2239,7 +2653,7 @@ export class MediaRepository {
   async setPreviewObjectKey(id: string, previewObjectKey: string): Promise<MediaRecord> {
     const result = await this.db.prepare(`
       UPDATE media SET preview_object_key = ?
-      WHERE id = ? AND upload_state = 'stored' AND deleted_at IS NULL
+      WHERE id = ? AND upload_state = 'stored' AND deleted_at IS NULL AND trashed_at IS NULL
         AND object_bucket_generation = 'legacy'
       RETURNING *
     `).bind(previewObjectKey, id).all<MediaRow>();
@@ -2267,6 +2681,424 @@ export class MediaRepository {
     return (await this.getById(id))!;
   }
 
+  /**
+   * Recently deleted, newest first.
+   *
+   * The only listing allowed to read trashed rows. `restore_until` is returned
+   * exactly as stored: whether Restore is still offered is the caller's
+   * comparison against it, not a flag this page invents.
+   */
+  async listTrashed(eventId: string, options: TrashedMediaOptions = {}): Promise<TrashedMediaPage> {
+    const limit = Math.max(1, Math.min(
+      MANAGER_MEDIA_MAX_PAGE_SIZE,
+      Math.trunc(options.limit ?? MANAGER_MEDIA_PAGE_SIZE),
+    ));
+    const predicates = [
+      'event_id = ?',
+      "upload_state = 'stored'",
+      RECOVERABLE_ROW_SQL,
+    ];
+    const bindings: unknown[] = [eventId];
+    if (options.cursor) {
+      predicates.push('(trashed_at < ? OR (trashed_at = ? AND id < ?))');
+      bindings.push(options.cursor.trashedAt, options.cursor.trashedAt, options.cursor.id);
+    }
+    bindings.push(limit + 1);
+    const result = await this.db.prepare(`
+      SELECT id, original_filename, guest_name, caption, trashed_at, restore_until
+      FROM media
+      WHERE ${predicates.join(' AND ')}
+      ORDER BY trashed_at DESC, id DESC
+      LIMIT ?
+    `).bind(...bindings).all<MediaRow>();
+    const pageRows = result.results.slice(0, limit);
+    const last = pageRows[pageRows.length - 1];
+    return {
+      media: pageRows.map((row) => managerTrashedMediaView({
+        id: row.id,
+        originalFilename: row.original_filename,
+        guestName: row.guest_name,
+        caption: row.caption,
+        trashedAt: row.trashed_at,
+        restoreUntil: row.restore_until,
+      })),
+      nextCursor: result.results.length > limit && last
+        ? { trashedAt: last.trashed_at!, id: last.id }
+        : null,
+    };
+  }
+
+  /**
+   * Expired recoverable photos whose exact current source has no active export hold.
+   *
+   * Filtering the hold in D1 is the fairness property: a permanent held prefix
+   * cannot consume the Worker's bounded result window and starve later work.
+   * `permanentlyDeleteTrashed` repeats this proof when it commits, because a
+   * queued export can acquire a hold after this read.
+   */
+  async listExpiredTrashed(
+    now: string,
+    limit = MEDIA_RECOVERY_CLEANUP_BATCH,
+  ): Promise<MediaRecord[]> {
+    const result = await this.db.prepare(`
+      SELECT * FROM media
+      WHERE upload_state = 'stored' AND ${RECOVERABLE_ROW_SQL} AND restore_until <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM export_media_entries AS e
+          JOIN export_jobs AS j ON j.id = e.export_job_id
+          WHERE e.media_id = media.id
+            AND e.object_bucket_generation = media.object_bucket_generation
+            AND e.object_key = media.object_key
+            AND j.state IN ('queued', 'running')
+        )
+      ORDER BY restore_until ASC, id ASC
+      LIMIT ?
+    `).bind(now, Math.max(1, Math.trunc(limit))).all<MediaRow>();
+    return result.results.map(mapMedia);
+  }
+
+  /** A capped diagnostic sample of expired photos currently held by exports. */
+  async countExpiredTrashedHeld(
+    now: string,
+    limit = MEDIA_RECOVERY_CLEANUP_BATCH,
+  ): Promise<number> {
+    return await this.db.prepare(`
+      SELECT count(*) AS count FROM (
+        SELECT 1 FROM media
+        WHERE upload_state = 'stored' AND ${RECOVERABLE_ROW_SQL} AND restore_until <= ?
+          AND EXISTS (
+            SELECT 1 FROM export_media_entries AS e
+            JOIN export_jobs AS j ON j.id = e.export_job_id
+            WHERE e.media_id = media.id
+              AND e.object_bucket_generation = media.object_bucket_generation
+              AND e.object_key = media.object_key
+              AND j.state IN ('queued', 'running')
+          )
+        ORDER BY restore_until ASC, id ASC
+        LIMIT ?
+      )
+    `).bind(now, Math.max(1, Math.trunc(limit))).first<number>('count') ?? 0;
+  }
+
+  /**
+   * Move one delivered photo to Recently deleted.
+   *
+   * Nothing physical happens. The bytes stay, the object inventory stays, and
+   * publication, album position, and favorite all stay exactly as they were —
+   * which is what makes Restore a restoration rather than a re-upload. What
+   * changes is which bucket of the event's capacity the photo is charged to,
+   * and the fact that every ordinary read now skips it.
+   *
+   * `restore_until` is computed inside the statement from the event's own live
+   * expiry values, so the deadline a host is shown can never outlive the
+   * authorization that would be needed to act on it. The exact deadline does not
+   * exist until this transition is accepted.
+   */
+  async trashStored(eventId: string, mediaId: string, now: string): Promise<MediaRecord> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.getById(mediaId);
+      if (!current || current.eventId !== eventId) {
+        throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
+      }
+      if (current.trashedAt !== null) {
+        throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is already in Recently deleted.', 409);
+      }
+      if (current.uploadState !== 'stored' || current.deletedAt !== null) {
+        throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409);
+      }
+
+      const album = await this.db.prepare(`
+        SELECT revision, saved_at FROM event_albums WHERE event_id = ?
+      `).bind(eventId).first<{ revision: number; saved_at: string | null }>();
+      const materialize = album?.saved_at !== null && album !== null && current.favoritedAt !== null;
+
+      const statements = [];
+      if (materialize) {
+        statements.push(this.db.prepare(ALBUM_MATERIALIZE_SQL)
+          .bind(now, eventId, album.revision, mediaId));
+      }
+      const transitionIndex = statements.length;
+      statements.push(
+        this.db.prepare(`
+          UPDATE media
+          SET trashed_at = ?1,
+              deleted_at = ?1,
+              restore_until = (
+                SELECT min(?2, e.management_access_expires_at, e.purge_after)
+                FROM events AS e WHERE e.id = media.event_id
+              )
+          WHERE id = ?3 AND event_id = ?4
+            AND upload_state = 'stored'
+            AND deleted_at IS NULL
+            AND trashed_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM events AS e
+              WHERE e.id = media.event_id
+                AND e.deleted_at IS NULL
+                AND e.management_access_expires_at > ?1
+                AND e.purge_after > ?1
+            )
+            AND ${ALBUM_SLOT_SETTLED_SQL}
+          RETURNING id
+        `).bind(
+          now,
+          new Date(Date.parse(now) + MEDIA_RECOVERY_WINDOW_MS).toISOString(),
+          mediaId,
+          eventId,
+        ),
+        this.db.prepare(`
+          UPDATE events
+          SET stored_media_count = stored_media_count - 1,
+              stored_bytes = stored_bytes - ?,
+              recoverable_media_count = recoverable_media_count + 1,
+              recoverable_bytes = recoverable_bytes + ?
+          WHERE id = ? AND changes() = 1
+        `).bind(current.byteSize ?? 0, current.byteSize ?? 0, eventId),
+      );
+
+      let results: D1Result[];
+      try {
+        results = await this.db.batch(statements);
+      } catch (error) {
+        // D1 may lose the response after the whole batch commits. This is
+        // success only for the exact transition this call requested; a row
+        // trashed by another request (or any ambiguous/corrupt shape) must not
+        // turn an unrelated database error into a fresh successful response.
+        let committed: MediaRecord | null;
+        try {
+          committed = await this.getById(mediaId);
+        } catch {
+          throw error;
+        }
+        const requestedAt = Date.parse(now);
+        const restoreUntil = committed?.restoreUntil === null || committed?.restoreUntil === undefined
+          ? Number.NaN
+          : Date.parse(committed.restoreUntil);
+        if (committed
+          && committed.eventId === eventId
+          && committed.uploadState === 'stored'
+          && committed.trashedAt === now
+          && committed.deletedAt === now
+          && Number.isFinite(requestedAt)
+          && Number.isFinite(restoreUntil)
+          && restoreUntil > requestedAt) {
+          return committed;
+        }
+        throw error;
+      }
+      if ((results[transitionIndex]?.results?.length ?? 0) === 1) {
+        const trashed = await this.getById(mediaId);
+        if (!trashed) throw new Error('A trashed media row disappeared.');
+        return trashed;
+      }
+      if (materialize && (results[0]?.meta.changes ?? 0) !== 1) continue;
+      const winner = await this.getById(mediaId);
+      if (winner && (winner.uploadState !== 'stored' || winner.deletedAt !== null)) {
+        throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409);
+      }
+    }
+    throw new ApiError(
+      'MEDIA_STATE_CONFLICT',
+      'This photo changed while it was being removed. Try again.',
+      409,
+    );
+  }
+
+  /**
+   * Bring one photo back from Recently deleted.
+   *
+   * The predicate is the exact inverse of permanent cleanup's, so a Restore that
+   * races the expiry sweep either wins outright or changes nothing. Publication,
+   * album membership, and album position were never surrendered, so there is
+   * nothing to reinstate: clearing the three markers is the whole restoration.
+   */
+  async restoreTrashed(eventId: string, mediaId: string, now: string): Promise<MediaRecord> {
+    const current = await this.getById(mediaId);
+    if (!current || current.eventId !== eventId) {
+      throw new ApiError('RESOURCE_FORBIDDEN', 'This photo belongs to a different event.', 403);
+    }
+    if (current.uploadState !== 'stored'
+      || current.trashedAt === null
+      || current.deletedAt !== current.trashedAt) {
+      throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo can no longer be restored.', 409);
+    }
+    const results = await this.db.batch([
+      this.db.prepare(`
+        UPDATE media
+        SET trashed_at = NULL, restore_until = NULL, deleted_at = NULL
+        WHERE id = ?1 AND event_id = ?2
+          AND upload_state = 'stored'
+          AND ${RECOVERABLE_ROW_SQL}
+          AND restore_until > ?3
+          AND EXISTS (
+            SELECT 1 FROM events AS e
+            WHERE e.id = media.event_id
+              AND e.deleted_at IS NULL
+              AND e.management_access_expires_at > ?3
+              AND e.purge_after > ?3
+          )
+        RETURNING id
+      `).bind(mediaId, eventId, now),
+      this.db.prepare(`
+        UPDATE events
+        SET stored_media_count = stored_media_count + 1,
+            stored_bytes = stored_bytes + ?,
+            recoverable_media_count = recoverable_media_count - 1,
+            recoverable_bytes = recoverable_bytes - ?
+        WHERE id = ? AND changes() = 1
+      `).bind(current.byteSize ?? 0, current.byteSize ?? 0, eventId),
+    ]);
+    if ((results[0]?.results?.length ?? 0) === 1) {
+      const restored = await this.getById(mediaId);
+      if (!restored) throw new Error('A restored media row disappeared.');
+      return restored;
+    }
+    throw new ApiError(
+      'MEDIA_STATE_CONFLICT',
+      'This photo can no longer be restored.',
+      409,
+    );
+  }
+
+  /**
+   * The end of recovery: an expired retained photo becomes permanently deleted.
+   *
+   * Refused while an accepted export still holds its exact source, which is why
+   * an expired row can sit in Recently deleted reading `Recovery expired ·
+   * cleanup pending` — the deadline passed, but the bytes are still owed to a
+   * job the host already accepted. R2 deletion is a separate claim.
+   */
+  async permanentlyDeleteTrashed(mediaId: string, now: string): Promise<MediaRecord | null> {
+    const current = await this.getById(mediaId);
+    if (!current || current.trashedAt === null) return null;
+    const results = await this.db.batch([
+      this.db.prepare(`
+        UPDATE media
+        SET upload_state = 'deleted', deleted_at = ?1, trashed_at = NULL, restore_until = NULL
+        WHERE id = ?2
+          AND upload_state = 'stored'
+          AND ${RECOVERABLE_ROW_SQL}
+          AND restore_until <= ?1
+          AND NOT EXISTS (
+            SELECT 1 FROM export_media_entries AS e
+            JOIN export_jobs AS j ON j.id = e.export_job_id
+            WHERE e.media_id = media.id
+              AND e.object_bucket_generation = media.object_bucket_generation
+              AND e.object_key = media.object_key
+              AND j.state IN ('queued', 'running')
+          )
+        RETURNING id
+      `).bind(now, mediaId),
+      this.db.prepare(`
+        UPDATE events
+        SET recoverable_media_count = recoverable_media_count - 1,
+            recoverable_bytes = recoverable_bytes - ?
+        WHERE id = ? AND changes() = 1
+      `).bind(current.byteSize ?? 0, current.eventId),
+      this.db.prepare(ALBUM_MARKER_REMOVAL_SQL).bind(mediaId, current.eventId, now),
+    ]);
+    if ((results[0]?.results?.length ?? 0) !== 1) return null;
+    return (await this.getById(mediaId))!;
+  }
+
+  /**
+   * Win the right to delete a photo's bytes, and report exactly which keys.
+   *
+   * Every physical retirement path goes through here. The suppression transition
+   * is the claim: a key an active export holds, or a recoverable photo owns, or
+   * another pass already suppressed, simply does not appear in the result, and
+   * its bytes stay for the existing tombstone janitor to collect once the reason
+   * is gone. Nothing about this is best-effort — a key absent from the claim is
+   * a key this caller is not allowed to delete.
+   */
+  async claimMediaObjectDeletion(media: MediaRecord, claimedAt: string): Promise<MediaObjectDeletionClaim> {
+    const aliases: Array<{ bucket: 'legacy' | 'canonical'; key: string; kind: 'source' | 'final' | 'preview' }> = [
+      { bucket: media.objectBucketGeneration, key: media.objectKey, kind: 'source' },
+      {
+        bucket: 'canonical',
+        key: finalizedMediaObjectKey(media.eventId, media.id),
+        kind: 'final',
+      },
+      {
+        bucket: 'legacy',
+        key: legacyMediaPreviewObjectKey(media.eventId, media.id),
+        kind: 'preview',
+      },
+    ];
+    if (media.previewObjectKey) {
+      aliases.push({ bucket: 'legacy', key: media.previewObjectKey, kind: 'preview' });
+    }
+
+    const statements = aliases.map((alias) => this.db.prepare(`
+      INSERT OR IGNORE INTO media_object_write_tombstones (
+        bucket_generation, object_key, event_id, media_id, object_kind,
+        next_check_at, created_at, updated_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
+    `).bind(alias.bucket, alias.key, media.eventId, media.id, alias.kind, claimedAt));
+
+    statements.push(this.db.prepare(`
+      UPDATE media_object_write_tombstones AS target
+      SET suppression_started_at = ?1, next_check_at = min(next_check_at, ?1), updated_at = ?1
+      WHERE target.event_id = ?2
+        AND target.media_id = ?3
+        AND target.object_kind NOT IN ('export', 'cover')
+        AND target.suppression_started_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM media AS m
+          WHERE m.id = ?3 AND m.event_id = ?2
+            AND m.upload_state = 'deleted'
+            AND m.deleted_at IS NOT NULL
+            AND m.trashed_at IS NULL
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM export_media_entries AS e
+          JOIN export_jobs AS j ON j.id = e.export_job_id
+          WHERE e.object_bucket_generation = target.bucket_generation
+            AND e.object_key = target.object_key
+            AND j.state IN ('queued', 'running')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM media_object_promotions AS p
+          WHERE p.media_id = ?3 AND p.event_id = ?2
+        )
+    `).bind(claimedAt, media.eventId, media.id));
+
+    statements.push(this.db.prepare(`
+      SELECT bucket_generation, object_key FROM media_object_write_tombstones
+      WHERE event_id = ?1 AND media_id = ?2
+        AND object_kind NOT IN ('export', 'cover')
+        AND suppression_started_at = ?3
+    `).bind(media.eventId, media.id, claimedAt));
+
+    const results = await this.db.batch(statements);
+    const claimed = (results.at(-1)?.results ?? []) as Array<{
+      bucket_generation: 'legacy' | 'canonical';
+      object_key: string;
+    }>;
+    return {
+      mediaId: media.id,
+      eventId: media.eventId,
+      legacyKeys: claimed.filter((row) => row.bucket_generation === 'legacy').map((row) => row.object_key),
+      canonicalKeys: claimed.filter((row) => row.bucket_generation === 'canonical').map((row) => row.object_key),
+    };
+  }
+
+  /**
+   * Permanent deletion, and the only path a guest's own removal takes.
+   *
+   * A guest deleting their own photo is immediate and final — that promise
+   * predates recovery and is not weakened by it. The transition therefore
+   * accepts two shapes: an ordinary active row, whose reserved or active stored
+   * counters it releases, and a photo the host had already moved to Recently
+   * deleted, whose recoverable counters it releases instead while clearing the
+   * pair and keeping a terminal `deleted_at`. Neither order double-counts:
+   * trash-first still lets the guest finish, and guest-first makes the host's
+   * compare-and-set lose with no delta at all.
+   *
+   * Physical cleanup is a separate claim. This never deletes bytes, so an
+   * accepted export holding the exact source keeps its copy while the row
+   * disappears from every projection at once.
+   */
   async delete(id: string, deletedAt: string): Promise<MediaRecord> {
     // The observed state can change between the read and CAS (for example,
     // reserved -> stored finalization). Retry against the winner so a 200
@@ -2276,55 +3108,44 @@ export class MediaRepository {
       if (!current) throw new ApiError('MEDIA_STATE_CONFLICT', 'This photo no longer exists.', 404);
       if (current.uploadState === 'deleted') return current;
 
+      const fromTrash = current.trashedAt !== null;
       const counterType = current.uploadState;
       const results = await this.db.batch([
-        this.db.prepare(`
-          UPDATE media SET upload_state = 'deleted', deleted_at = ?
-          WHERE id = ? AND upload_state = ? AND deleted_at IS NULL
-          RETURNING id
-        `).bind(deletedAt, id, counterType),
+        fromTrash
+          ? this.db.prepare(`
+              UPDATE media
+              SET upload_state = 'deleted', deleted_at = ?1,
+                  trashed_at = NULL, restore_until = NULL
+              WHERE id = ?2 AND upload_state = 'stored' AND ${RECOVERABLE_ROW_SQL}
+              RETURNING id
+            `).bind(deletedAt, id)
+          : this.db.prepare(`
+              UPDATE media SET upload_state = 'deleted', deleted_at = ?
+              WHERE id = ? AND upload_state = ? AND deleted_at IS NULL AND trashed_at IS NULL
+              RETURNING id
+            `).bind(deletedAt, id, counterType),
         this.db.prepare(`
           UPDATE events SET
             reserved_media_count = reserved_media_count - ?,
             reserved_bytes = reserved_bytes - ?,
             stored_media_count = stored_media_count - ?,
-            stored_bytes = stored_bytes - ?
+            stored_bytes = stored_bytes - ?,
+            recoverable_media_count = recoverable_media_count - ?,
+            recoverable_bytes = recoverable_bytes - ?
           WHERE id = ? AND changes() = 1
         `).bind(
-          counterType === 'reserved' ? 1 : 0,
-          counterType === 'reserved' ? current.declaredByteSize : 0,
-          counterType === 'stored' ? 1 : 0,
-          counterType === 'stored' ? current.byteSize ?? 0 : 0,
+          !fromTrash && counterType === 'reserved' ? 1 : 0,
+          !fromTrash && counterType === 'reserved' ? current.declaredByteSize : 0,
+          !fromTrash && counterType === 'stored' ? 1 : 0,
+          !fromTrash && counterType === 'stored' ? current.byteSize ?? 0 : 0,
+          fromTrash ? 1 : 0,
+          fromTrash ? current.byteSize ?? 0 : 0,
           current.eventId,
         ),
-        this.db.prepare(`
-          UPDATE media_object_write_tombstones AS target
-          SET suppression_started_at = COALESCE(suppression_started_at, ?),
-              next_check_at = min(next_check_at, ?), updated_at = ?
-          WHERE target.event_id = ? AND target.media_id = ?
-            AND target.object_kind NOT IN ('export', 'cover')
-            AND EXISTS (
-              SELECT 1 FROM media AS m
-              WHERE m.id = ? AND m.event_id = ?
-                AND m.upload_state = 'deleted' AND m.deleted_at = ?
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM media_object_promotions AS p
-              WHERE p.media_id = ? AND p.event_id = ?
-            )
-            AND changes() = 1
-        `).bind(
-          deletedAt,
-          deletedAt,
-          deletedAt,
-          current.eventId,
-          id,
-          id,
-          current.eventId,
-          deletedAt,
-          id,
-          current.eventId,
-        ),
+        // The album cannot keep a slot for a photograph that is gone for good.
+        // Advancing the revision in the same batch is what stops an editor
+        // composed a moment ago from saving the terminal entry back in.
+        this.db.prepare(ALBUM_MARKER_REMOVAL_SQL).bind(id, current.eventId, deletedAt),
       ]);
       if ((results[0]?.results?.length ?? 0) === 1) return (await this.getById(id))!;
       const winner = await this.getById(id);

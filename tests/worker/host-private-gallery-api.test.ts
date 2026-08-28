@@ -2,7 +2,15 @@ import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../worker/app';
-import { eventAccess, origin, resetDatabase, testEnv, writeHeaders } from './helpers';
+import {
+  eventAccess,
+  origin,
+  resetDatabase,
+  testEnv,
+  trashMedia,
+  uploadPending,
+  writeHeaders,
+} from './helpers';
 
 beforeEach(resetDatabase);
 afterEach(() => {
@@ -41,7 +49,7 @@ async function seedStored(
       reservation_expires_at, created_at, stored_at, captured_at, timeline_at,
       favorited_at, deleted_at
     ) VALUES (?, ?, ?, ?, 'canonical', ?, 'image/jpeg', 1024, 1024, 800, 600,
-      ?, ?, 'stored', 'unpublished', ?, ?, ?, ?, NULL, ?, ?, ?)
+      ?, ?, ?, 'unpublished', ?, ?, ?, ?, NULL, ?, ?, ?)
   `).bind(
     id,
     access.event.id,
@@ -50,6 +58,7 @@ async function seedStored(
     options.filename ?? `seed-${index}.jpg`,
     options.guestName ?? 'Avery Stone',
     options.caption ?? null,
+    options.deletedAt === null || options.deletedAt === undefined ? 'stored' : 'deleted',
     `seed-${index}`,
     '2026-09-19T00:00:00.000Z',
     '2026-09-19T00:00:00.000Z',
@@ -65,6 +74,22 @@ function gallery(access: Access, query = '') {
   return createApp().request(`/api/manage/events/${access.event.id}/gallery${query}`, {
     headers: { cookie: access.manager.cookie },
   }, testEnv);
+}
+
+function album(access: Access) {
+  return createApp().request(`/api/manage/events/${access.event.id}/album`, {
+    headers: { cookie: access.manager.cookie },
+  }, testEnv);
+}
+
+async function galleryIds(access: Access, query = ''): Promise<string[]> {
+  const response = await gallery(access, query);
+  if (response.status !== 200) {
+    throw new Error(`Gallery read failed: ${response.status} ${await response.text()}`);
+  }
+  return (await response.json<any>()).data.media
+    .map((media: { id: string }) => media.id)
+    .sort();
 }
 
 function decodeCursorPayload(cursor: string): unknown {
@@ -261,6 +286,52 @@ describe('host private gallery API', () => {
     const ready = await gallery(access);
     expect(ready.status).toBe(200);
     expect((await ready.json<any>()).data.media).toHaveLength(1);
+  });
+
+  it('removes a trashed photo from the timeline, search, and album, and returns it on restore', async () => {
+    const access = await eventAccess();
+    const jose = await uploadPending(access, 'trash-jose', 'First dance', 'Jose');
+    const maya = await uploadPending(access, 'trash-maya', 'Cake', 'Maya');
+    for (const id of [jose.id, maya.id]) {
+      const picked = await createApp().request(
+        `/api/manage/events/${access.event.id}/media/${id}/favorite`,
+        {
+          method: 'PUT',
+          headers: writeHeaders(access.manager),
+          body: JSON.stringify({ favorite: true }),
+        },
+        testEnv,
+      );
+      expect(picked.status).toBe(200);
+    }
+    expect((await (await album(access)).json<any>()).data.album)
+      .toMatchObject({ photoCount: 2, retainedCount: 0 });
+
+    const trashed = await trashMedia(access, jose.id);
+    expect(trashed).toMatchObject({ id: jose.id, guestName: 'Jose' });
+
+    expect(await galleryIds(access)).toEqual([maya.id]);
+    expect(await galleryIds(access, '?query=jose')).toEqual([]);
+    // The album keeps the slot and loses the photograph. Closing the gap would
+    // rearrange the host's album around a photo they can still bring back.
+    expect((await (await album(access)).json<any>()).data.album)
+      .toMatchObject({ photoCount: 1, retainedCount: 1 });
+
+    const restored = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${jose.id}/restore`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(restored.status).toBe(200);
+    expect((await restored.json<any>()).data.media).toMatchObject({
+      id: jose.id,
+      uploadState: 'stored',
+    });
+
+    expect(await galleryIds(access)).toEqual([jose.id, maya.id].sort());
+    expect(await galleryIds(access, '?query=jose')).toEqual([jose.id]);
+    expect((await (await album(access)).json<any>()).data.album)
+      .toMatchObject({ photoCount: 2, retainedCount: 0 });
   });
 
   it('writes and clears a favorite idempotently with CSRF and origin guards', async () => {

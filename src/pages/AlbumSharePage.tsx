@@ -6,6 +6,7 @@ import { PageHeader } from '../components/Brand';
 import {
   exchangeAlbumShare,
   fetchPublicAlbum,
+  publicAlbumPreview,
 } from '../features/gallery/album-share-api';
 import { PublicAlbum } from '../features/gallery/PublicAlbum';
 
@@ -116,6 +117,10 @@ export function AlbumSharePage() {
             <h1>This album is not available.</h1>
             <p>Ask the host for a new link, and they can share the album with you.</p>
           </main>
-        : <PublicAlbum album={state.album} />}
+        : <PublicAlbum
+            album={state.album}
+            imageSource={publicAlbumPreview}
+            variant="page"
+          />}
   </div>;
 }

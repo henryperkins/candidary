@@ -29,7 +29,7 @@ const MANAGED_EVENT = {
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
   },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
-  storedMediaCount: 3, storedBytes: 128,
+  storedMediaCount: 3, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', purgeAfter: '2026-12-19T00:00:00Z',
   eventTimezone: 'America/Chicago',
   eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
@@ -50,6 +50,15 @@ function managerFetch(pages: Record<string, MediaPage>, event: Record<string, un
       const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
       return json(pages[cursor] ?? { media: [], nextCursor: null });
     }
+    if (url.endsWith('/gallery/summary')) return json({
+      summary: {
+        albumPhotoCount: 0,
+        albumEntryCount: 0,
+        albumLink: { active: false, sharedAt: null },
+        guestGalleryVisible: event.galleryVisible !== false,
+        guestGalleryPublishedCount: 0,
+      },
+    });
     if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
     if (url.includes('/messages')) return json({ messages: [] });
     if (url.endsWith('/exports')) return json({ exports: [] });
@@ -301,7 +310,7 @@ describe('manager settings autosave guards', () => {
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
     expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
-    await user.click(await screen.findByRole('button', { name: 'Shared' }));
+    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
     expect(within(screen.getByRole('group', { name: 'Publication status' }))
       .getByRole('button', { name: 'Unpublished' })).toHaveClass('active');
   });
@@ -375,11 +384,13 @@ describe('manager settings autosave guards', () => {
 
     const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
     await user.click(nav.getByRole('button', { name: 'RSVP' }));
+    let prompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
     await user.click(await screen.findByRole('button', { name: 'Add guests' }));
     await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
 
-    const prompt = await screen.findByRole('region', { name: 'Your pending work is not saved' });
+    prompt = await screen.findByRole('region', { name: 'Your pending work is not saved' });
     expect(within(prompt).getByText(/Settings or appearance changes are also unconfirmed/u)).toBeVisible();
     releaseSettings!();
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Add guests' })).toBeVisible());
@@ -395,6 +406,8 @@ describe('manager settings autosave guards', () => {
 
     const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
     await user.click(nav.getByRole('button', { name: 'RSVP' }));
+    const settingsPrompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(settingsPrompt).getByRole('button', { name: 'Leave now' }));
     const notice = await screen.findByRole('region', { name: 'Unsaved settings' });
     await user.click(await screen.findByRole('button', { name: 'Add guests' }));
     await user.type(screen.getByLabelText('Guest names or spreadsheet data'), 'Taylor Morgan');
@@ -410,6 +423,8 @@ describe('manager settings autosave guards', () => {
       .getByRole('button', { name: 'Open settings' }));
     prompt = await screen.findByRole('region', { name: 'Your pending work is not saved' });
     await user.click(within(prompt).getByRole('button', { name: 'Discard draft' }));
+    prompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(prompt).getByRole('button', { name: 'Stay and fix settings' }));
     expect(await screen.findByRole('heading', { name: 'Settings' })).toHaveFocus();
     const settingsNotice = screen.getByRole('region', { name: 'Unsaved settings' });
     expect(settingsNotice).toBeVisible();
@@ -474,6 +489,36 @@ describe('manager settings autosave guards', () => {
     await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Manager sections' })).not.toBeInTheDocument());
   });
 
+  it('keeps an exact in-app Manager destination blocked until unrelated Settings work confirms', async () => {
+    let release: (() => void) | null = null;
+    const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/settings') && String(init?.method).toUpperCase() === 'PATCH') {
+        await new Promise<void>((resolve) => { release = resolve; });
+        return json({ event: { ...MANAGED_EVENT, moderationRequired: false } });
+      }
+      return fetchMock(input);
+    }));
+    const router = createAppRouter(['/manage/event/event-a?section=settings']);
+    const user = typist();
+    render(<RouterProvider router={router} />);
+    await screen.findByRole('heading', { name: 'Settings' });
+
+    await user.click(screen.getByLabelText('Review guestbook notes before sharing'));
+    await waitFor(() => expect(release).not.toBeNull());
+    await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
+      .getByRole('button', { name: /gallery/i }));
+
+    expect(await screen.findByRole('region', { name: /not saved yet/i })).toBeVisible();
+    expect(router.state.location.search).toBe('?section=settings');
+    expect(screen.getByRole('heading', { name: 'Settings' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Gallery' })).not.toBeInTheDocument();
+
+    release!();
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
+  });
+
   it('always offers Leave now, so a stalled network cannot trap the host', async () => {
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -495,6 +540,50 @@ describe('manager settings autosave guards', () => {
 
     await user.click(leaveNow);
     await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Manager sections' })).not.toBeInTheDocument());
+  });
+
+  it('returns to the existing Settings prompt after Album preparation is ready', async () => {
+    const fallback = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/album/share') && method === 'GET') return json({ share: null });
+      if (url.endsWith('/album') && method === 'GET') return json({ album: {
+        revision: 0,
+        saved: true,
+        title: 'Album',
+        description: '',
+        coverMediaId: null,
+        effectiveCoverMediaId: null,
+        entries: [],
+        photoCount: 0,
+        sectionCount: 0,
+        totalBytes: 0,
+      } });
+      return fallback(input);
+    }));
+    const user = typist();
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await openSettings(user);
+    await user.clear(screen.getByLabelText('Event name'));
+
+    const navigation = within(screen.getByRole('navigation', { name: 'Manager sections' }));
+    await user.click(navigation.getByRole('button', { name: /gallery/i }));
+    const settingsPrompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(settingsPrompt).getByRole('button', { name: 'Leave now' }));
+    await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: /^Album/ }));
+    await user.click(screen.getByRole('link', { name: 'Candidary home' }));
+
+    const prompt = await screen.findByRole('region', {
+      name: 'Event settings is not saved yet',
+    });
+    expect(within(prompt).getByRole('button', { name: 'Leave now' })).toBeEnabled();
+    expect(within(prompt).getByRole('button', { name: 'Stay and fix settings' })).toBeEnabled();
+    expect(within(prompt).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(within(prompt).queryByRole('button', {
+      name: 'Discard unsent Album changes and leave',
+    })).not.toBeInTheDocument();
   });
 
   it('offers a way back to Settings when the draft cannot be saved', async () => {
@@ -523,25 +612,21 @@ describe('manager settings autosave guards', () => {
     await user.clear(screen.getByLabelText('Event name'));
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /gallery/i }));
+    const leavePrompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(leavePrompt).getByRole('button', { name: 'Leave now' }));
 
     const notice = await screen.findByRole('region', { name: 'Unsaved settings' });
     expect(within(notice).getByRole('alert')).toHaveTextContent(
       'Event settings has a change that cannot be saved yet.',
     );
     await user.click(within(notice).getByRole('button', { name: 'Open settings' }));
+    const repairPrompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(repairPrompt).getByRole('button', { name: 'Stay and fix settings' }));
     expect(screen.getByRole('heading', { name: 'Settings' })).toHaveFocus();
     expect(screen.getByRole('textbox', { name: /Event name/u })).toBeVisible();
-
-    const managerNav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
-    await user.click(managerNav.getByRole('button', { name: /gallery/i }));
-    const settingsButton = managerNav.getByRole('button', { name: /settings/i });
-    await user.click(settingsButton);
-    // The repair transfer is one-shot. Ordinary section navigation keeps
-    // focus on the navigation control the host used.
-    expect(settingsButton).toHaveFocus();
   });
 
-  it('keeps autosave access recovery visible when opening Settings and clears it on recovery', async () => {
+  it('keeps autosave access recovery visible while resolving a blocked Manager destination', async () => {
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
     let releaseFailure: (() => void) | null = null;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -561,14 +646,14 @@ describe('manager settings autosave guards', () => {
     await waitFor(() => expect(releaseFailure).not.toBeNull());
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /gallery/i }));
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
     releaseFailure!();
 
-    const autosaveNotice = await screen.findByRole('region', { name: 'Unsaved settings' });
     expect(await screen.findByRole('region', { name: 'Manager notice' }))
       .toHaveTextContent('This session has expired.');
     expect(screen.getByRole('region', { name: 'Recover manager access' })).toBeVisible();
 
-    await user.click(within(autosaveNotice).getByRole('button', { name: 'Open settings' }));
+    await user.click(within(prompt).getByRole('button', { name: 'Stay and fix settings' }));
 
     expect(screen.getByRole('region', { name: 'Manager notice' }))
       .toHaveTextContent('This session has expired.');
@@ -625,7 +710,7 @@ describe('manager settings autosave guards', () => {
       .toBeGreaterThan(0));
   });
 
-  it('does not let an intake read opened before an RSVP write restore an older event', async () => {
+  it('does not let an Intake poll opened before an RSVP write restore an older event', async () => {
     const staleEvent = { ...MANAGED_EVENT, name: 'Stale intake event', rsvpRosterVersion: 7 };
     const freshEvent = { ...MANAGED_EVENT, name: 'Fresh RSVP event', rsvpRosterVersion: 8 };
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
@@ -663,12 +748,13 @@ describe('manager settings autosave guards', () => {
       }
       return fetchMock(input);
     }));
+    const intervals = vi.spyOn(window, 'setInterval');
     const user = typist();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     await screen.findByRole('heading', { name: 'Live intake' });
 
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Morgan');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    const poll = intervals.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0] as (() => void) | undefined;
+    poll?.();
     await waitFor(() => expect(releaseStaleRead).not.toBeNull());
 
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
@@ -766,6 +852,8 @@ describe('manager settings autosave guards', () => {
     await waitFor(() => expect(releaseSettings).not.toBeNull());
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: 'Share' }));
+    const prompt = await screen.findByRole('region', { name: /not saved yet/i });
+    await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
     await user.click(screen.getByRole('button', { name: 'Disable printed event QR' }));
     const confirmation = screen.getByRole('group', { name: 'Disable printed event QR' });
     await user.type(within(confirmation).getByLabelText('Confirm event name'), MANAGED_EVENT.name);
@@ -773,11 +861,11 @@ describe('manager settings autosave guards', () => {
       name: `Disable printed event QR for ${MANAGED_EVENT.name}`,
     }));
 
-    await waitFor(() => expect(screen.getByText('Guest uploads paused')).toBeVisible());
+    await waitFor(() => expect(screen.getByText('Photo delivery paused')).toBeVisible());
     releaseSettings!();
     await waitFor(() => expect(screen.getByText('Event settings saved')).toBeInTheDocument());
 
-    expect(screen.getByText('Guest uploads paused')).toBeVisible();
+    expect(screen.getByText('Photo delivery paused')).toBeVisible();
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /settings/i }));
     // The stop is irreversible, so the panel explains it rather than offering a

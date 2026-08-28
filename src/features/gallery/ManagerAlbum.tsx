@@ -8,6 +8,7 @@ import {
   Link,
   Plus,
   Star,
+  Trash2,
   X,
 } from 'lucide-react';
 import {
@@ -15,13 +16,22 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
+import { createPortal, flushSync } from 'react-dom';
 
 import { ClientApiError, mediaPreview } from '../../app/api';
+import { useDeadlineClock } from '../../app/use-deadline-clock';
+import {
+  formatRetentionDate,
+  TIME_UNAVAILABLE,
+  type EventTimeDisplay,
+} from '../../app/event-date-time';
 import type { ExportDownloadView, ExportView } from '../../app/types';
 import { AutosaveStatus, autosaveStatusText } from '../../components/AutosaveStatus';
+import { CopyableLinkCard } from '../../components/CopyableLinkCard';
 import { ErrorState, LoadingState, describeLoadFailure } from '../../components/States';
 import type { LoadFailure } from '../../components/States';
 import {
@@ -34,19 +44,24 @@ import {
 import type {
   AlbumEntryView,
   AlbumMetadataInput,
+  AlbumRetainedSlotView,
   AlbumShareStatus,
   AlbumView,
 } from '../../../shared/contracts';
 import {
   fetchAlbum,
   moveEntryTo,
+  runAlbumInverse,
   saveAlbumOrder,
   setAlbumPicks,
   startAlbum,
   toEntryInput,
+  type AlbumInversePayload,
+  type AlbumInverseState,
 } from './album-api';
 import { AlbumPreview } from './AlbumPreview';
 import { AlbumExportControl } from './AlbumExportControl';
+import type { ExportCurrentSource } from './export-control-status';
 import { fetchAlbumShare, shareAlbum, stopAlbumShare } from './album-share-api';
 import { galleryPhotoTitle } from './gallery-timeline';
 import {
@@ -56,15 +71,33 @@ import {
   type AutosaveState,
   type DomainAutosaveState,
 } from '../settings/autosave-queue';
-import { UndoBar, useUndo } from './undo';
+import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
 
 interface ManagerAlbumProps {
   eventId: string;
   active: boolean;
+  /**
+   * The event's IANA zone. A recovery deadline read in the browser's zone is a
+   * different day for half the world, so without it the album says **Time
+   * unavailable** rather than a plausible instant in the wrong place.
+   */
+  eventTimezone?: string;
   onGoToLibrary(): void;
   /** Raised whenever membership changes here, so Library's `Album picks (n)` stays true. */
   onPicksChanged(): void;
+  /** Manager-owned invalidation used after mount-independent inverse work. */
+  invalidateGalleryAfterMutation(): void;
+  /** Raised only after a confirmed mutation changes an audience-facing summary field. */
+  onAudienceChanged?(): void;
+  /**
+   * Take the host to Intake's Recently deleted filter.
+   *
+   * Album never stores that destination itself: the retained slot is a marker in
+   * this document, and where Recently deleted lives is the Manager's business.
+   */
+  onOpenRecentlyDeleted?(): void;
   exportJob?: ExportView;
+  exportSource: ExportCurrentSource;
   activeExport?: ExportView;
   exportDownload?: ExportDownloadView;
   onPrepareExport(): Promise<void>;
@@ -75,8 +108,17 @@ interface ManagerAlbumProps {
   onAnnouncement?(message: string): void;
 }
 
+export type AlbumLeavePreparation =
+  | { status: 'ready' }
+  | { status: 'waiting' }
+  | { status: 'invalid'; field: string }
+  | { status: 'failed'; message: string };
+
 export interface ManagerAlbumHandle {
-  prepareToLeave(): Promise<boolean>;
+  prepareToLeave(): Promise<AlbumLeavePreparation>;
+  retryPendingAlbumChanges(): Promise<AlbumLeavePreparation>;
+  discardPendingAlbumChanges(): void;
+  restoreLeaveFocus(outcome: AlbumLeavePreparation): void;
 }
 
 type AlbumDraft = {
@@ -84,6 +126,11 @@ type AlbumDraft = {
   title: string;
   description: string;
   coverMediaId: string | null;
+};
+
+type CreateShareSnapshot = {
+  photoCount: number;
+  publishedCaptionCount: number;
 };
 
 const INITIAL_DRAFT: AlbumDraft = {
@@ -97,12 +144,69 @@ function errorMessage(caught: unknown, fallback: string): string {
   return caught instanceof Error && caught.message ? caught.message : fallback;
 }
 
+type AlbumPhotoEntry = Extract<AlbumEntryView, { kind: 'photo' }>;
+type AlbumRetainedEntry = Extract<AlbumEntryView, { kind: 'photo-retained' }>;
+
+/** What the marker says everywhere it appears. It is deliberately not a photo's name. */
+const RETAINED_SLOT_NAME = 'Recently deleted photo';
+const RETAINED_SLOT_EXPIRED = 'Recovery expired · cleanup pending';
+
+function isPhotoEntry(entry: AlbumEntryView): entry is AlbumPhotoEntry {
+  return entry.kind === 'photo';
+}
+
+function isRetainedEntry(entry: AlbumEntryView): entry is AlbumRetainedEntry {
+  return entry.kind === 'photo-retained';
+}
+
+/**
+ * The media a slot holds, whether the photograph is visible or retained.
+ *
+ * A retained slot and the photo it stands for are the same place in the album, so
+ * they share one key: trashing and a timely Restore change what the slot shows,
+ * never where it sits.
+ */
+function entryMediaId(entry: AlbumEntryView): string | null {
+  if (isPhotoEntry(entry)) return entry.photo.id;
+  if (isRetainedEntry(entry)) return entry.slot.mediaId;
+  return null;
+}
+
 function entryKey(entry: AlbumEntryView): string {
-  return entry.kind === 'section' ? `section:${entry.id}` : `photo:${entry.photo.id}`;
+  const mediaId = entryMediaId(entry);
+  return mediaId === null
+    ? `section:${(entry as Extract<AlbumEntryView, { kind: 'section' }>).id}`
+    : `photo:${mediaId}`;
 }
 
 function entryName(entry: AlbumEntryView): string {
-  return entry.kind === 'section' ? entry.heading : galleryPhotoTitle(entry.photo);
+  if (isPhotoEntry(entry)) return galleryPhotoTitle(entry.photo);
+  if (isRetainedEntry(entry)) return RETAINED_SLOT_NAME;
+  return entry.heading;
+}
+
+/**
+ * Whether Restore is still on offer.
+ *
+ * The server's `state` is the answer, and the deadline is checked as well because an
+ * editor left open all afternoon would otherwise keep offering a recovery that has
+ * already lapsed.
+ */
+function retainedSlotExpired(slot: AlbumRetainedSlotView, now = Date.now()): boolean {
+  if (slot.state === 'expired-cleanup-pending') return true;
+  const deadline = Date.parse(slot.restoreUntil);
+  return Number.isFinite(deadline) && deadline <= now;
+}
+
+function retentionDisplay(iso: string, eventTimezone: string | undefined): EventTimeDisplay {
+  const value = eventTimezone ? formatRetentionDate(iso, eventTimezone) : null;
+  return value === null ? { value: TIME_UNAVAILABLE, dateTime: null } : { value, dateTime: iso };
+}
+
+function RetentionInstant({ display }: { display: EventTimeDisplay }) {
+  return display.dateTime
+    ? <time dateTime={display.dateTime}>{display.value}</time>
+    : <>{display.value}</>;
 }
 
 function draftFromAlbum(album: AlbumView): AlbumDraft {
@@ -116,6 +220,21 @@ function draftFromAlbum(album: AlbumView): AlbumDraft {
 
 function canonicalSectionHeading(heading: string): string {
   return heading.trim() || 'New section';
+}
+
+function emptySectionIds(entries: readonly AlbumEntryView[]): Set<string> {
+  const empty = new Set<string>();
+  let pendingSectionId: string | null = null;
+  for (const entry of entries) {
+    if (entry.kind === 'section') {
+      if (pendingSectionId !== null) empty.add(pendingSectionId);
+      pendingSectionId = entry.id;
+    } else if (entry.kind === 'photo') {
+      pendingSectionId = null;
+    }
+  }
+  if (pendingSectionId !== null) empty.add(pendingSectionId);
+  return empty;
 }
 
 function canonicalDraft(draft: AlbumDraft): AlbumDraft {
@@ -202,22 +321,6 @@ function removedEntryContext(entries: readonly AlbumEntryView[], key: string): R
   };
 }
 
-function restoreEntry(entries: readonly AlbumEntryView[], context: RemovedEntryContext): AlbumEntryView[] {
-  const key = entryKey(context.entry);
-  if (entries.some((entry) => entryKey(entry) === key)) return [...entries];
-  const nextIndex = context.nextKey
-    ? entries.findIndex((entry) => entryKey(entry) === context.nextKey)
-    : -1;
-  if (nextIndex >= 0) return [...entries.slice(0, nextIndex), context.entry, ...entries.slice(nextIndex)];
-  const previousIndex = context.previousKey
-    ? entries.findIndex((entry) => entryKey(entry) === context.previousKey)
-    : -1;
-  const insertion = previousIndex >= 0
-    ? previousIndex + 1
-    : Math.min(context.index, entries.length);
-  return [...entries.slice(0, insertion), context.entry, ...entries.slice(insertion)];
-}
-
 type AnchorPreference = 'previous' | 'next';
 
 type AlbumIntentOperation =
@@ -253,6 +356,7 @@ type AlbumIntentOperation =
 interface JournalledAlbumOperation {
   cursor: number;
   operation: AlbumIntentOperation;
+  audienceChangeAlreadyConfirmed: boolean;
 }
 
 interface AlbumQueueSnapshot {
@@ -260,15 +364,252 @@ interface AlbumQueueSnapshot {
   operationCursor: number;
 }
 
+type AlbumUndoInput = 'keyboard' | 'pointer';
+
+function undoInputFromClickDetail(detail: number): AlbumUndoInput {
+  return detail === 0 ? 'keyboard' : 'pointer';
+}
+
+interface CapturedAlbumDraft {
+  readonly entries: AlbumInverseState['entries'];
+  readonly title: string;
+  readonly description: string;
+  readonly coverMediaId: string | null;
+}
+
+interface QueuedAlbumInverseBase {
+  readonly cursor: number;
+  readonly key: string;
+  readonly forward: CapturedAlbumDraft;
+  readonly restored: CapturedAlbumDraft;
+  readonly message: string;
+  readonly input: AlbumUndoInput;
+  readonly fallback: HTMLElement | null;
+  sentRevision: number | null;
+  preState: AlbumInverseState | null;
+}
+
+type QueuedAlbumInverse =
+  | (QueuedAlbumInverseBase & { readonly kind: 'order' })
+  | (QueuedAlbumInverseBase & { readonly kind: 'photo'; readonly mediaId: string });
+
+type QueuedAlbumInverseRequest =
+  | {
+    readonly kind: 'order';
+    readonly restored: CapturedAlbumDraft;
+    readonly message: string;
+    readonly input: AlbumUndoInput;
+    readonly fallback: HTMLElement | null;
+  }
+  | {
+    readonly kind: 'photo';
+    readonly mediaId: string;
+    readonly restored: CapturedAlbumDraft;
+    readonly message: string;
+    readonly input: AlbumUndoInput;
+    readonly fallback: HTMLElement | null;
+  };
+
+type QueuedInverseClassification =
+  | { readonly kind: 'offer'; readonly payload: AlbumInversePayload }
+  | { readonly kind: 'pre-state' }
+  | { readonly kind: 'unrelated' };
+
+function captureAlbumDraft(draft: AlbumDraft): CapturedAlbumDraft {
+  const canonical = canonicalDraft(draft);
+  return {
+    entries: toEntryInput(canonical.entries).map((entry) => ({ ...entry })),
+    title: canonical.title,
+    description: canonical.description,
+    coverMediaId: canonical.coverMediaId,
+  };
+}
+
+function inverseStateFromCapture(
+  captured: CapturedAlbumDraft,
+  revision: number,
+  saved: boolean,
+): AlbumInverseState {
+  return {
+    revision,
+    saved,
+    entries: captured.entries.map((entry) => ({ ...entry })),
+    title: captured.title,
+    description: captured.description,
+    coverMediaId: captured.coverMediaId,
+  };
+}
+
+function inverseStateFromAlbum(album: AlbumView): AlbumInverseState {
+  return {
+    revision: album.revision,
+    saved: album.saved,
+    entries: toEntryInput(album.entries),
+    title: album.title,
+    description: album.description,
+    coverMediaId: album.coverMediaId,
+  };
+}
+
+function sameInverseState(left: AlbumInverseState, right: AlbumInverseState): boolean {
+  return left.revision === right.revision
+    && left.saved === right.saved
+    && left.title === right.title
+    && left.description === right.description
+    && left.coverMediaId === right.coverMediaId
+    && JSON.stringify(left.entries) === JSON.stringify(right.entries);
+}
+
+function frozenInverseState(state: AlbumInverseState): AlbumInverseState {
+  const entries = Object.freeze(state.entries.map((entry) => Object.freeze({ ...entry })));
+  return Object.freeze({ ...state, entries });
+}
+
+function frozenAlbumInverse(payload: AlbumInversePayload): AlbumInversePayload {
+  if (payload.kind === 'order') {
+    return Object.freeze({
+      kind: payload.kind,
+      forward: frozenInverseState(payload.forward),
+      restored: frozenInverseState(payload.restored),
+    });
+  }
+  if (payload.kind === 'membership') {
+    return Object.freeze({
+      kind: payload.kind,
+      mediaIds: Object.freeze([...payload.mediaIds]),
+      forward: frozenInverseState(payload.forward),
+      restored: frozenInverseState(payload.restored),
+    });
+  }
+  return Object.freeze({
+    kind: payload.kind,
+    mediaIds: Object.freeze([...payload.mediaIds]),
+    forward: frozenInverseState(payload.forward),
+    membershipRestored: frozenInverseState(payload.membershipRestored),
+    restored: frozenInverseState(payload.restored),
+  });
+}
+
+function mountIndependentAlbumInverse(
+  eventId: string,
+  payload: AlbumInversePayload,
+  invalidateGalleryAfterMutation: () => void,
+): () => Promise<void> {
+  const frozenPayload = frozenAlbumInverse(payload);
+  return async () => {
+    try {
+      await runAlbumInverse(eventId, frozenPayload);
+    } finally {
+      invalidateGalleryAfterMutation();
+    }
+  };
+}
+
+function partialPhotoState(preState: AlbumInverseState, mediaId: string): AlbumInverseState {
+  return {
+    ...preState,
+    entries: preState.entries.filter((entry) => (
+      entry.kind !== 'photo' || entry.mediaId !== mediaId
+    )),
+    coverMediaId: preState.coverMediaId === mediaId ? null : preState.coverMediaId,
+  };
+}
+
+function classifyQueuedInverse(
+  candidate: QueuedAlbumInverse,
+  album: AlbumView,
+): QueuedInverseClassification {
+  if (candidate.sentRevision === null || candidate.preState === null) {
+    return { kind: 'unrelated' };
+  }
+  const canonical = inverseStateFromAlbum(album);
+  const forward = inverseStateFromCapture(candidate.forward, candidate.sentRevision + 1, true);
+  const restored = inverseStateFromCapture(candidate.restored, candidate.sentRevision + 2, true);
+
+  if (sameInverseState(canonical, forward)) {
+    if (candidate.kind === 'order') {
+      return { kind: 'offer', payload: { kind: 'order', forward, restored } };
+    }
+    const membershipRestored: AlbumInverseState = {
+      ...forward,
+      entries: [...forward.entries, { kind: 'photo', mediaId: candidate.mediaId }],
+    };
+    return {
+      kind: 'offer',
+      payload: {
+        kind: 'membership-order',
+        mediaIds: [candidate.mediaId],
+        forward,
+        membershipRestored,
+        restored,
+      },
+    };
+  }
+
+  if (candidate.kind === 'photo') {
+    if (sameInverseState(canonical, candidate.preState)) return { kind: 'pre-state' };
+    const partial = partialPhotoState(candidate.preState, candidate.mediaId);
+    if (sameInverseState(canonical, partial)) {
+      return {
+        kind: 'offer',
+        payload: {
+          kind: 'membership',
+          mediaIds: [candidate.mediaId],
+          forward: partial,
+          restored: candidate.preState,
+        },
+      };
+    }
+  }
+
+  return { kind: 'unrelated' };
+}
+
+interface AlbumReconnectFailureOwner {
+  queue: AutosaveQueue<AlbumQueueSnapshot>;
+  lifecycle: number;
+  attempt: number;
+  draftGeneration: number;
+  canonicalKey: string;
+}
+
+const ALBUM_NETWORK_SAVE_MESSAGE = 'Check your connection, then try saving the Album again.';
+
 interface RejectedAlbumDraft {
   snapshot: AlbumQueueSnapshot;
   intent: string;
 }
 
+/**
+ * Every media id holding a photo position, retained slots included.
+ *
+ * The cover is validated against this set, so trashing the chosen cover does not
+ * quietly drop the host's choice: the reference survives, a timely Restore brings
+ * the same photograph back as the cover, and starring another photo is the one
+ * thing that replaces it.
+ */
 function livePhotoIds(entries: readonly AlbumEntryView[]): Set<string> {
-  return new Set(entries.flatMap((entry) => (
-    entry.kind === 'photo' ? [entry.photo.id] : []
-  )));
+  return new Set(entries.flatMap((entry) => {
+    const mediaId = entryMediaId(entry);
+    return mediaId === null ? [] : [mediaId];
+  }));
+}
+
+/**
+ * The timeline order, with retained slots kept.
+ *
+ * Only Start empty clears picks and markers. Reset to timeline order is an ordinary
+ * edit, so it sorts the photographs it can date and keeps the opaque slots — which
+ * carry no timeline of their own — after them rather than dropping them.
+ */
+function timelineOrderedEntries(entries: readonly AlbumEntryView[]): AlbumEntryView[] {
+  const photos = entries
+    .filter(isPhotoEntry)
+    .sort((left, right) => (
+      left.photo.timelineAt.localeCompare(right.photo.timelineAt)
+      || left.photo.id.localeCompare(right.photo.id)
+    ));
+  return [...photos, ...entries.filter(isRetainedEntry)];
 }
 
 function normalizeDraftCover(draft: AlbumDraft): AlbumDraft {
@@ -301,19 +642,26 @@ function anchoredEntry(
   return [...without.slice(0, insertion), entry, ...without.slice(insertion)];
 }
 
+/** Photo and retained slots by media id, so a slot that changed kind resolves to the live one. */
+function canonicalSlotsById(entries: readonly AlbumEntryView[]): Map<string, AlbumEntryView> {
+  return new Map(entries.flatMap((entry) => {
+    const mediaId = entryMediaId(entry);
+    return mediaId === null ? [] : [[mediaId, entry] as const];
+  }));
+}
+
 function mergeReplacementEntries(
   requested: readonly AlbumEntryView[],
   canonical: readonly AlbumEntryView[],
 ): AlbumEntryView[] {
-  const canonicalPhotos = new Map(canonical.flatMap((entry) => (
-    entry.kind === 'photo' ? [[entry.photo.id, entry] as const] : []
-  )));
+  const canonicalPhotos = canonicalSlotsById(canonical);
   const placed = new Set<string>();
   let entries = requested.flatMap((entry): AlbumEntryView[] => {
     const key = entryKey(entry);
     if (placed.has(key)) return [];
-    if (entry.kind === 'photo') {
-      const live = canonicalPhotos.get(entry.photo.id);
+    const mediaId = entryMediaId(entry);
+    if (mediaId !== null) {
+      const live = canonicalPhotos.get(mediaId);
       if (!live) return [];
       placed.add(key);
       return [live];
@@ -346,9 +694,7 @@ function replayAlbumOperations(
   operations: readonly JournalledAlbumOperation[],
 ): AlbumDraft {
   const canonical = draftFromAlbum(canonicalAlbum);
-  const canonicalPhotos = new Map(canonical.entries.flatMap((entry) => (
-    entry.kind === 'photo' ? [[entry.photo.id, entry] as const] : []
-  )));
+  const canonicalPhotos = canonicalSlotsById(canonical.entries);
   let next = canonical;
   for (const { operation } of operations) {
     switch (operation.kind) {
@@ -368,10 +714,11 @@ function replayAlbumOperations(
         break;
       case 'move-entry': {
         const existing = next.entries.find((entry) => entryKey(entry) === operation.key);
+        const movedMediaId = entryMediaId(operation.entry);
         const entry = existing
-          ?? (operation.entry.kind === 'photo'
-            ? canonicalPhotos.get(operation.entry.photo.id)
-            : operation.entry);
+          ?? (movedMediaId === null
+            ? operation.entry
+            : canonicalPhotos.get(movedMediaId));
         if (entry) next = {
           ...next,
           entries: anchoredEntry(
@@ -385,9 +732,10 @@ function replayAlbumOperations(
         break;
       }
       case 'insert-entry': {
-        const entry = operation.entry.kind === 'photo'
-          ? canonicalPhotos.get(operation.entry.photo.id)
-          : operation.entry;
+        const insertedMediaId = entryMediaId(operation.entry);
+        const entry = insertedMediaId === null
+          ? operation.entry
+          : canonicalPhotos.get(insertedMediaId);
         if (entry) next = {
           ...next,
           entries: anchoredEntry(
@@ -431,14 +779,7 @@ function replayAlbumOperations(
       case 'reset-entries':
         next = normalizeDraftCover({
           ...next,
-          entries: next.entries
-            .filter((entry): entry is Extract<AlbumEntryView, { kind: 'photo' }> => (
-              entry.kind === 'photo'
-            ))
-            .sort((left, right) => (
-              left.photo.timelineAt.localeCompare(right.photo.timelineAt)
-              || left.photo.id.localeCompare(right.photo.id)
-            )),
+          entries: timelineOrderedEntries(next.entries),
         });
         break;
       case 'replace-draft':
@@ -453,19 +794,19 @@ function replayAlbumOperations(
 }
 
 function mergeCanonicalMembership(current: AlbumDraft, canonical: AlbumView): AlbumDraft {
-  const canonicalPhotos = new Map(canonical.entries.flatMap((entry) => (
-    entry.kind === 'photo' ? [[entry.photo.id, entry] as const] : []
-  )));
+  const canonicalPhotos = canonicalSlotsById(canonical.entries);
   const placed = new Set<string>();
   const entries = current.entries.flatMap((entry): AlbumEntryView[] => {
-    if (entry.kind === 'section') return [entry];
-    const live = canonicalPhotos.get(entry.photo.id);
+    const mediaId = entryMediaId(entry);
+    if (mediaId === null) return [entry];
+    const live = canonicalPhotos.get(mediaId);
     if (!live) return [];
-    placed.add(entry.photo.id);
+    placed.add(mediaId);
     return [live];
   });
   for (const entry of canonical.entries) {
-    if (entry.kind === 'photo' && !placed.has(entry.photo.id)) entries.push(entry);
+    const mediaId = entryMediaId(entry);
+    if (mediaId !== null && !placed.has(mediaId)) entries.push(entry);
   }
   const liveIds = new Set(canonicalPhotos.keys());
   return {
@@ -485,9 +826,14 @@ function mergeCanonicalMembership(current: AlbumDraft, canonical: AlbumView): Al
 export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(function ManagerAlbum({
   eventId,
   active,
+  eventTimezone,
   onGoToLibrary,
   onPicksChanged,
+  invalidateGalleryAfterMutation,
+  onAudienceChanged,
+  onOpenRecentlyDeleted,
   exportJob,
+  exportSource,
   activeExport,
   exportDownload,
   onPrepareExport,
@@ -508,18 +854,33 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const [previewOpen, setPreviewOpen] = useState(false);
   const [share, setShare] = useState<AlbumShareStatus>(null);
   const [sharePending, setSharePending] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [copyUnavailable, setCopyUnavailable] = useState(false);
+  const [createShareSnapshot, setCreateShareSnapshot] = useState<CreateShareSnapshot | null>(null);
+  const [createShareError, setCreateShareError] = useState<string | null>(null);
+  const [createShareRecoveryRequest, setCreateShareRecoveryRequest] = useState(0);
+  const [createShareReturnFocusRequest, setCreateShareReturnFocusRequest] = useState(0);
+  const [shareCopyFocusRequest, setShareCopyFocusRequest] = useState(0);
+  const [confirmingStopShare, setConfirmingStopShare] = useState(false);
+  const [stopShareError, setStopShareError] = useState<string | null>(null);
+  const [stopShareFocusRequest, setStopShareFocusRequest] = useState(0);
+  const [confirmHost] = useState(() => {
+    const element = document.createElement('div');
+    element.dataset.albumConfirmHost = 'true';
+    return element;
+  });
   const [recoveryFocusRequest, setRecoveryFocusRequest] = useState(0);
   const [pendingPickIds, setPendingPickIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pendingOperationCount, setPendingOperationCount] = useState(0);
   const [failedPreviewIds, setFailedPreviewIds] = useState<ReadonlySet<string>>(() => new Set());
   const [reconciliationFailure, setReconciliationFailure] = useState<LoadFailure | null>(null);
 
-  const undo = useUndo();
+  const undo = useManagerUndo();
+  const dismissUndo = undo.dismiss;
   const rootRef = useRef<HTMLDivElement>(null);
+  const leaveHeadingRef = useRef<HTMLHeadingElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLOListElement>(null);
+  const lastFocusedEntryKey = useRef<string | null>(null);
+  const selectSectionKey = useRef<string | null>(null);
   const draftRef = useRef<AlbumDraft>(INITIAL_DRAFT);
   const revisionRef = useRef(0);
   const loadGeneration = useRef(0);
@@ -528,11 +889,20 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const conflictEpoch = useRef(0);
   const dragKey = useRef<string | null>(null);
   const refocusKey = useRef<string | null>(null);
-  const copyTimer = useRef<number | null>(null);
-  const copyPending = useRef<number | null>(null);
-  const shareCredentialGeneration = useRef(0);
+  const shareConfirmRef = useRef<HTMLDivElement>(null);
+  const cancelCreateShareRef = useRef<HTMLButtonElement>(null);
+  const keepSharingRef = useRef<HTMLButtonElement>(null);
+  const createShareOriginRef = useRef<HTMLElement | null>(null);
+  const stopShareOriginRef = useRef<HTMLElement | null>(null);
+  const createShareErrorRef = useRef<HTMLParagraphElement>(null);
+  const stopShareErrorRef = useRef<HTMLParagraphElement>(null);
+  const shareActionRef = useRef<HTMLButtonElement>(null);
+  const shareCopyRef = useRef<HTMLButtonElement>(null);
+  const shareHeadingRef = useRef<HTMLParagraphElement>(null);
   const shareRequestGeneration = useRef(0);
   const shareOperationPending = useRef(false);
+  const currentShare = useRef<AlbumShareStatus>(null);
+  const createShareOpen = useRef(false);
   const draftGeneration = useRef(0);
   const canonicalTrusted = useRef(true);
   const reconciliationFailureRef = useRef<LoadFailure | null>(null);
@@ -540,21 +910,146 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const coverIntentGeneration = useRef(0);
   const operationCursor = useRef(0);
   const operationJournal = useRef<JournalledAlbumOperation[]>([]);
+  const pendingInverse = useRef<QueuedAlbumInverse | null>(null);
+  const canonicalAlbumRef = useRef<AlbumView | null>(null);
+  const pendingStartInverse = useRef<{
+    message: string;
+    input: AlbumUndoInput;
+    payload: AlbumInversePayload;
+  } | null>(null);
   const loadCanonicalRef = useRef<((rejected: RejectedAlbumDraft) => Promise<AlbumView>) | null>(null);
   const queueRef = useRef<AutosaveQueue<AlbumQueueSnapshot> | null>(null);
   const queueLifecycle = useRef(0);
+  const reconnectAttempt = useRef(0);
+  const reconnectFailureOwnerRef = useRef<AlbumReconnectFailureOwner | null>(null);
+  const audienceChangedRef = useRef(onAudienceChanged);
 
-  const restoreAlbumEditorFocus = useCallback(() => {
-    rootRef.current?.querySelector<HTMLElement>(
-      '#album-title, .album-order-heading button:not(:disabled), .album-exits button:not(:disabled)',
-    )?.focus();
+  useLayoutEffect(() => {
+    audienceChangedRef.current = onAudienceChanged;
+  }, [onAudienceChanged]);
+
+  const adoptShare = useCallback((next: AlbumShareStatus) => {
+    currentShare.current = next;
+    setShare(next);
   }, []);
+
+  function focusUndoFallback(fallback: HTMLElement | null): void {
+    fallback?.focus({ preventScroll: true });
+  }
+
+  function fallbackForEntryKey(key: string | null): HTMLElement | null {
+    if (key === null) return null;
+    const entry = listRef.current?.querySelector<HTMLElement>(
+      `[data-entry-key="${CSS.escape(key)}"]`,
+    );
+    for (const selector of [
+      '.album-entry__remove:not(:disabled)',
+      '.album-entry__cover:not(:disabled)',
+      '.album-entry__move-earlier:not(:disabled)',
+      '.album-entry__move-later:not(:disabled)',
+      'input:not(:disabled)',
+      'button:not(:disabled)',
+    ]) {
+      const control = entry?.querySelector<HTMLElement>(selector);
+      if (control) return control;
+    }
+    return null;
+  }
+
+  function fallbackForRemovedEntry(context: RemovedEntryContext): HTMLElement | null {
+    const orderedKeys = [context.nextKey, context.previousKey];
+    for (const key of orderedKeys) {
+      const fallback = fallbackForEntryKey(key);
+      if (fallback) return fallback;
+    }
+    return leaveHeadingRef.current;
+  }
+
+  function presentAlbumInverse(
+    message: string,
+    input: AlbumUndoInput,
+    fallback: HTMLElement | null,
+    payload: AlbumInversePayload,
+  ): boolean {
+    return undo.present({
+      eventId,
+      message,
+      durationMs: UNDO_WINDOW_MS,
+      input,
+      run: mountIndependentAlbumInverse(
+        eventId,
+        payload,
+        invalidateGalleryAfterMutation,
+      ),
+    }, { fallback });
+  }
+
+  function presentPendingStartAlbumInverse(): void {
+    const pending = pendingStartInverse.current;
+    if (!pending) return;
+    const fallback = titleRef.current
+      ?? rootRef.current?.querySelector<HTMLElement>(
+        '.album-order-heading button:not(:disabled), .album-exits button:not(:disabled)',
+      )
+      ?? leaveHeadingRef.current;
+    if (!fallback) return;
+    pendingStartInverse.current = null;
+    focusUndoFallback(fallback);
+    presentAlbumInverse(pending.message, pending.input, fallback, pending.payload);
+  }
+
+  function classifyAndPresentQueuedInverse(
+    candidate: QueuedAlbumInverse,
+    canonical: AlbumView,
+  ): QueuedInverseClassification['kind'] | 'suppressed' {
+    if (pendingInverse.current !== candidate || operationCursor.current !== candidate.cursor) {
+      return 'suppressed';
+    }
+    const classification = classifyQueuedInverse(candidate, canonical);
+    pendingInverse.current = null;
+    if (classification.kind === 'offer') {
+      presentAlbumInverse(
+        candidate.message,
+        candidate.input,
+        candidate.fallback,
+        classification.payload,
+      );
+    } else if (classification.kind === 'unrelated') {
+      invalidateGalleryAfterMutation();
+    }
+    return classification.kind;
+  }
 
   if (queueRef.current === null) {
     queueRef.current = createAutosaveQueue<AlbumQueueSnapshot>({
       baselineKey: 'album:not-loaded',
       debounceMs: AUTOSAVE_DEBOUNCE_MS,
       async save(snapshot, sent) {
+        const inverseCandidate = pendingInverse.current;
+        if (
+          inverseCandidate
+          && inverseCandidate.cursor === snapshot.operationCursor
+          && inverseCandidate.key === sent.key
+          && operationCursor.current === inverseCandidate.cursor
+        ) {
+          inverseCandidate.sentRevision = revisionRef.current;
+          inverseCandidate.preState = inverseStateFromCapture(
+            inverseCandidate.restored,
+            revisionRef.current,
+            true,
+          );
+        }
+        const includedOperations = operationJournal.current.filter(
+          ({ cursor }) => cursor <= snapshot.operationCursor,
+        );
+        // Membership writes notify immediately because their associated Album
+        // save can still fail. A queue settlement only stays silent when every
+        // operation it owns has already been notified; a coalesced metadata,
+        // section, or order operation keeps its own confirmed-save callback.
+        const audienceChangeNeedsNotification = includedOperations.length === 0
+          || includedOperations.some(({ audienceChangeAlreadyConfirmed }) => (
+            !audienceChangeAlreadyConfirmed
+          ));
         const sentDraft = snapshot.draft;
         try {
           const result = await saveAlbumOrder(
@@ -563,12 +1058,14 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
             toEntryInput(sentDraft.entries),
             draftMetadata(sentDraft),
           );
+          reconnectFailureOwnerRef.current = null;
           // This assignment is synchronous and happens before the queue can start
           // a coalesced successor from the resolved outcome.
           revisionRef.current = result.album.revision;
           operationJournal.current = operationJournal.current.filter(
             ({ cursor }) => cursor > snapshot.operationCursor,
           );
+          canonicalAlbumRef.current = result.album;
           setAlbum(result.album);
           if (draftIntent(draftRef.current) === sent.intent) {
             const confirmed = draftFromAlbum(result.album);
@@ -576,6 +1073,8 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
             draftRef.current = confirmed;
             setDraft(confirmed);
           }
+          if (inverseCandidate) classifyAndPresentQueuedInverse(inverseCandidate, result.album);
+          if (audienceChangeNeedsNotification) audienceChangedRef.current?.();
           return { status: 'confirmed', key: draftKey(draftFromAlbum(result.album)) };
         } catch (caught) {
           if (!(caught instanceof ClientApiError) || caught.code !== 'REVISION_CONFLICT') throw caught;
@@ -588,6 +1087,24 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
         }
       },
       describeFailure(caught) {
+        if (!(caught instanceof ClientApiError)) {
+          const activeQueue = queueRef.current;
+          if (caught instanceof TypeError && activeQueue) {
+            const owner: AlbumReconnectFailureOwner = {
+              queue: activeQueue,
+              lifecycle: queueLifecycle.current,
+              attempt: reconnectAttempt.current + 1,
+              draftGeneration: draftGeneration.current,
+              canonicalKey: draftKey(canonicalDraft(draftRef.current)),
+            };
+            reconnectAttempt.current = owner.attempt;
+            reconnectFailureOwnerRef.current = owner;
+          } else {
+            reconnectFailureOwnerRef.current = null;
+          }
+          return { message: ALBUM_NETWORK_SAVE_MESSAGE, retryable: true };
+        }
+        reconnectFailureOwnerRef.current = null;
         const failure = describeLoadFailure(caught, 'manager', 'The album could not be saved.');
         setNotice(failure.message);
         return {
@@ -600,6 +1117,9 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     });
   }
   const queue = queueRef.current;
+  const deadlineNow = useDeadlineClock(draft.entries.flatMap((entry) => (
+    isRetainedEntry(entry) ? [entry.slot.restoreUntil] : []
+  )));
 
   const adoptCanonical = useCallback((next: AlbumView, resetQueue = false) => {
     const nextDraft = draftFromAlbum(next);
@@ -607,6 +1127,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     revisionRef.current = next.revision;
     draftGeneration.current += 1;
     draftRef.current = nextDraft;
+    canonicalAlbumRef.current = next;
     setAlbum(next);
     setDraft(nextDraft);
     operationJournal.current = [];
@@ -657,8 +1178,17 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       canonicalTrusted.current = true;
       reconciliationFailureRef.current = null;
       setReconciliationFailure(null);
+      canonicalAlbumRef.current = result.album;
       setAlbum(result.album);
       queue.adoptBaseline(draftKey(canonical));
+      const inverseCandidate = pendingInverse.current;
+      let usedManagerInvalidation = false;
+      if (inverseCandidate?.cursor === rejected.snapshot.operationCursor) {
+        usedManagerInvalidation = classifyAndPresentQueuedInverse(
+          inverseCandidate,
+          result.album,
+        ) === 'unrelated';
+      }
       const replay = operationJournal.current.filter(
         ({ cursor }) => cursor > rejected.snapshot.operationCursor,
       );
@@ -686,6 +1216,10 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
           },
         }, true);
       }
+      // Canonical conflict recovery is a distinct authoritative adoption. The
+      // fail-closed unrelated branch already invalidated every Manager owner;
+      // avoid scheduling a duplicate audience read in that case.
+      if (!usedManagerInvalidation) audienceChangedRef.current?.();
       return result.album;
     } catch (caught) {
       if (generation === loadGeneration.current) {
@@ -708,17 +1242,24 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     void loadCanonical(controller.signal).catch(() => {});
     void fetchAlbumShare(eventId, controller.signal).then(
       (result) => {
-        if (shareGeneration === shareRequestGeneration.current) setShare(result.share);
+        if (shareGeneration !== shareRequestGeneration.current) return;
+        adoptShare(result.share);
+        if (result.share && createShareOpen.current) {
+          createShareOpen.current = false;
+          setCreateShareSnapshot(null);
+          setCreateShareError(null);
+          setCreateShareReturnFocusRequest((current) => current + 1);
+        }
       },
       (caught: unknown) => {
         if (shareGeneration === shareRequestGeneration.current
           && !(caught instanceof DOMException && caught.name === 'AbortError')) {
-          setNotice(errorMessage(caught, 'The album sharing status could not be loaded.'));
+          setNotice(errorMessage(caught, 'The Album link status could not be loaded.'));
         }
       },
     );
     return () => controller.abort();
-  }, [active, eventId, loadCanonical]);
+  }, [active, adoptShare, eventId, loadCanonical]);
 
   useEffect(() => {
     queueLifecycle.current += 1;
@@ -730,21 +1271,99 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       queueMicrotask(() => {
         if (queueLifecycle.current !== cleanupGeneration) return;
         queue.dispose();
-        if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
       });
     };
   }, [queue]);
 
-  useEffect(() => {
-    if (copyTimer.current !== null) {
-      window.clearTimeout(copyTimer.current);
-      copyTimer.current = null;
+  /**
+   * The same containment the viewer and Cover Studio use. `aria-modal` on its own
+   * leaves the editor behind either confirmation tabbable and readable. Both link
+   * lifecycle decisions use this same containment contract.
+   */
+  useLayoutEffect(() => {
+    if (!confirmingStopShare && createShareSnapshot === null) return;
+    document.body.append(confirmHost);
+    const inerted: HTMLElement[] = [];
+    for (const sibling of Array.from(document.body.children)) {
+      if (sibling === confirmHost || !(sibling instanceof HTMLElement)) continue;
+      if (sibling.dataset.galleryLiveHost === 'true') continue;
+      if (sibling.hasAttribute('inert')) continue;
+      sibling.setAttribute('inert', '');
+      inerted.push(sibling);
     }
-    shareCredentialGeneration.current += 1;
-    copyPending.current = null;
-    setCopied(false);
-    setCopyUnavailable(false);
-  }, [share?.url]);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      for (const sibling of inerted) sibling.removeAttribute('inert');
+      document.body.style.overflow = previousOverflow;
+      confirmHost.remove();
+    };
+  }, [confirmHost, confirmingStopShare, createShareSnapshot]);
+
+  useEffect(() => {
+    if (createShareSnapshot !== null) cancelCreateShareRef.current?.focus();
+    else if (confirmingStopShare) keepSharingRef.current?.focus();
+  }, [confirmingStopShare, createShareSnapshot]);
+
+  useEffect(() => {
+    if (createShareError) createShareErrorRef.current?.focus();
+    else if (stopShareError) stopShareErrorRef.current?.focus();
+  }, [createShareError, stopShareError]);
+
+  useEffect(() => {
+    if (createShareRecoveryRequest === 0 || createShareSnapshot !== null) return;
+    focusBlockingRecovery(queue.state());
+  }, [createShareRecoveryRequest, createShareSnapshot, queue]);
+
+  useEffect(() => {
+    if (createShareReturnFocusRequest === 0 || createShareSnapshot !== null || sharePending) return;
+    createShareOriginRef.current?.focus();
+    createShareOriginRef.current = null;
+  }, [createShareReturnFocusRequest, createShareSnapshot, sharePending]);
+
+  useEffect(() => {
+    if (shareCopyFocusRequest === 0) return;
+    shareCopyRef.current?.focus();
+  }, [shareCopyFocusRequest]);
+
+  /**
+   * Where a host lands once the link is gone: on the action that makes a new one, or
+   * — when there is nothing to share yet — on the heading of the section they were in.
+   */
+  useEffect(() => {
+    if (stopShareFocusRequest === 0) return;
+    const replacement = shareActionRef.current;
+    if (replacement && !replacement.disabled) replacement.focus();
+    else shareHeadingRef.current?.focus();
+  }, [stopShareFocusRequest]);
+
+  useEffect(() => {
+    if (!confirmingStopShare && createShareSnapshot === null) return;
+    const onKeyDown = (pressed: KeyboardEvent) => {
+      if (pressed.key === 'Escape') {
+        pressed.preventDefault();
+        if (createShareSnapshot !== null) cancelCreateShare();
+        else keepSharing();
+        return;
+      }
+      if (pressed.key !== 'Tab') return;
+      const focusable = shareConfirmRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+      );
+      const first = focusable?.[0];
+      const last = focusable?.[focusable.length - 1];
+      if (!first || !last) return;
+      if (pressed.shiftKey && document.activeElement === first) {
+        pressed.preventDefault();
+        last.focus();
+      } else if (!pressed.shiftKey && document.activeElement === last) {
+        pressed.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [confirmingStopShare, createShareSnapshot]);
 
   useEffect(() => {
     const blockingField = titleIsInvalid(draft)
@@ -772,36 +1391,87 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     if (announcement) onAnnouncement?.(announcement);
   }, [announcement, onAnnouncement]);
 
-  useEffect(() => {
-    if (undo.error) onAnnouncement?.(undo.error);
-  }, [onAnnouncement, undo.error]);
-
-  function recordOperations(operations: readonly AlbumIntentOperation[]) {
+  const recordOperations = useCallback((
+    operations: readonly AlbumIntentOperation[],
+    audienceChangeAlreadyConfirmed = false,
+  ) => {
+    if (operations.length > 0) dismissUndo();
     for (const operation of operations) {
       operationCursor.current += 1;
-      operationJournal.current.push({ cursor: operationCursor.current, operation });
+      operationJournal.current.push({
+        cursor: operationCursor.current,
+        operation,
+        audienceChangeAlreadyConfirmed,
+      });
     }
-  }
+  }, [dismissUndo]);
 
-  function applyDraft(
+  const applyDraft = useCallback((
     next: AlbumDraft,
     immediate = false,
     operations: readonly AlbumIntentOperation[] = [],
-  ) {
-    recordOperations(operations);
+    options: {
+      audienceChangeAlreadyConfirmed?: boolean;
+      inverse?: QueuedAlbumInverseRequest;
+    } = {},
+  ) => {
+    const cursorBeforeOperations = operationCursor.current;
+    recordOperations(operations, options.audienceChangeAlreadyConfirmed);
+    if (
+      operationCursor.current > cursorBeforeOperations
+      && pendingInverse.current
+      && pendingInverse.current.cursor < operationCursor.current
+    ) {
+      pendingInverse.current = null;
+    }
     draftGeneration.current += 1;
     draftRef.current = next;
     setDraft(next);
     const canonical = canonicalDraft(next);
+    const key = draftKey(canonical);
+    if (options.inverse) {
+      pendingInverse.current = {
+        ...options.inverse,
+        cursor: operationCursor.current,
+        key,
+        forward: captureAlbumDraft(canonical),
+        sentRevision: null,
+        preState: null,
+      };
+    }
     queue.submit({
-      key: draftKey(canonical),
+      key,
       intent: draftIntent(next),
       snapshot: titleIsInvalid(next) ? null : {
         draft: canonical,
         operationCursor: operationCursor.current,
       },
     }, immediate);
-  }
+  }, [queue, recordOperations]);
+
+  useLayoutEffect(() => {
+    const retryOnReconnect = () => {
+      const owner = reconnectFailureOwnerRef.current;
+      if (!owner) return;
+      const current = canonicalDraft(draftRef.current);
+      if (
+        reconnectFailureOwnerRef.current !== owner
+        || owner.queue !== queue
+        || queueRef.current !== owner.queue
+        || queueLifecycle.current !== owner.lifecycle
+        || reconnectAttempt.current !== owner.attempt
+        || owner.queue.state().status !== 'failed'
+        || draftGeneration.current !== owner.draftGeneration
+        || titleIsInvalid(current)
+        || draftKey(current) !== owner.canonicalKey
+      ) return;
+      reconnectFailureOwnerRef.current = null;
+      applyDraft(draftRef.current, true);
+    };
+
+    window.addEventListener('online', retryOnReconnect);
+    return () => window.removeEventListener('online', retryOnReconnect);
+  }, [applyDraft, queue]);
 
   function trackOperation<T>(operation: () => Promise<T>): Promise<T> {
     const running = operation();
@@ -812,28 +1482,6 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       setPendingOperationCount(pendingOperations.current.size);
     }).catch(() => {});
     return running;
-  }
-
-  async function confirmUndoPersistence(
-    beforeConflict: number,
-    fallback: string,
-    requireTrustedCanonical = true,
-  ) {
-    queue.flush();
-    const state = await queue.waitForSettled();
-    if (
-      state.status !== 'saved'
-      || conflictEpoch.current !== beforeConflict
-      || loadFailureRef.current !== null
-      || (requireTrustedCanonical && !canonicalTrusted.current)
-    ) {
-      const message = state.failure?.message
-        ?? reconciliationFailureRef.current?.message
-        ?? loadFailureRef.current?.message
-        ?? fallback;
-      focusBlockingRecovery(state);
-      throw new Error(message);
-    }
   }
 
   function focusBlockingRecovery(state: AutosaveState) {
@@ -871,7 +1519,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     recovery.focus();
   }, [recoveryFocusRequest]);
 
-  const settleDraft = useCallback(async () => {
+  const settleDraft = useCallback(async ({ focusRecovery = true }: { focusRecovery?: boolean } = {}): Promise<AlbumLeavePreparation> => {
     const beforeConflict = conflictEpoch.current;
     queue.flush();
     while (pendingOperations.current.size > 0) {
@@ -879,15 +1527,95 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     }
     queue.flush();
     const state = await queue.waitForSettled();
-    const ready = state.status === 'saved'
+    let outcome: AlbumLeavePreparation;
+    if (state.status === 'invalid') {
+      outcome = { status: 'invalid', field: 'Album title' };
+    } else if (state.status === 'saved'
       && conflictEpoch.current === beforeConflict
       && loadFailureRef.current === null
-      && canonicalTrusted.current;
-    if (!ready) focusBlockingRecovery(state);
-    return ready;
+      && canonicalTrusted.current) {
+      outcome = { status: 'ready' };
+    } else {
+      outcome = {
+        status: 'failed',
+        message: state.failure?.message
+          ?? reconciliationFailureRef.current?.message
+          ?? loadFailureRef.current?.message
+          ?? (conflictEpoch.current !== beforeConflict
+            ? 'The Album changed while leaving was being prepared. Try again.'
+            : 'The Album could not be confirmed. Try again.'),
+      };
+    }
+    if (outcome.status !== 'ready' && focusRecovery) {
+      focusBlockingRecovery(state);
+    } else if (outcome.status === 'failed') {
+      // A prompt owns focus during imperative leave preparation, but a
+      // credential/lifecycle refusal still belongs to Manager's established
+      // access-recovery surface. Re-reporting it after dismissal keeps an exit
+      // attempt from demoting a terminal access fact into a futile local Retry.
+      if (reconciliationFailureRef.current && !reconciliationFailureRef.current.retryable) {
+        onAccessFailure?.(reconciliationFailureRef.current);
+      } else if (state.failure?.escalation) {
+        onAccessFailure?.(state.failure.escalation);
+      } else if (loadFailureRef.current && !loadFailureRef.current.retryable) {
+        onAccessFailure?.(loadFailureRef.current);
+      }
+    }
+    return outcome;
+  }, [onAccessFailure, queue]);
+
+  const discardPendingAlbumChanges = useCallback(() => {
+    draftGeneration.current += 1;
+    operationJournal.current = [];
+    pendingInverse.current = null;
+    pendingStartInverse.current = null;
+    reconnectAttempt.current += 1;
+    reconnectFailureOwnerRef.current = null;
+    queue.discardPending();
   }, [queue]);
 
-  useImperativeHandle(ref, () => ({ prepareToLeave: settleDraft }), [settleDraft]);
+  const retryPendingAlbumChanges = useCallback(async () => {
+    if (reconciliationFailureRef.current?.retryable) {
+      await retryMembershipRefresh();
+      return settleDraft({ focusRecovery: false });
+    }
+    if (loadFailureRef.current?.retryable) {
+      try {
+        await loadCanonical();
+      } catch {
+        // `loadCanonical` has already classified and retained the newest
+        // failure. The terminal leave outcome below owns its presentation.
+      }
+      return settleDraft({ focusRecovery: false });
+    }
+    const state = queue.state();
+    if (
+      state.status === 'failed'
+      && state.failure?.retryable === true
+      && !titleIsInvalid(draftRef.current)
+    ) {
+      // Retry the queue's current draft through its existing immediate-submit
+      // path. The leave coordinator observes the resulting settlement; it does
+      // not own another save mechanism.
+      applyDraft(draftRef.current, true);
+    }
+    return settleDraft({ focusRecovery: false });
+  }, [applyDraft, loadCanonical, queue, settleDraft]);
+
+  const restoreLeaveFocus = useCallback((outcome: AlbumLeavePreparation) => {
+    if (outcome.status === 'invalid') {
+      titleRef.current?.focus();
+      return;
+    }
+    leaveHeadingRef.current?.focus();
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    prepareToLeave: () => settleDraft({ focusRecovery: false }),
+    retryPendingAlbumChanges,
+    discardPendingAlbumChanges,
+    restoreLeaveFocus,
+  }), [discardPendingAlbumChanges, restoreLeaveFocus, retryPendingAlbumChanges, settleDraft]);
 
   useEffect(() => {
     const key = refocusKey.current;
@@ -899,6 +1627,19 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
         + `[data-entry-key="${CSS.escape(key)}"] .album-entry__move-later:not(:disabled)`,
       )
       ?.focus();
+  }, [draft.entries]);
+
+  useLayoutEffect(() => {
+    const key = selectSectionKey.current;
+    if (!key) return;
+    selectSectionKey.current = null;
+    const frame = window.requestAnimationFrame(() => {
+      const input = listRef.current
+        ?.querySelector<HTMLInputElement>(`[data-entry-key="${CSS.escape(key)}"] input`);
+      input?.focus();
+      input?.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [draft.entries]);
 
   function move(from: number, to: number) {
@@ -934,8 +1675,18 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       id: crypto.randomUUID(),
       heading: 'New section',
     };
-    const entries = [...current.entries, section];
+    const anchorIndex = lastFocusedEntryKey.current === null
+      ? -1
+      : current.entries.findIndex((entry) => entryKey(entry) === lastFocusedEntryKey.current);
+    const insertionIndex = anchorIndex >= 0 ? anchorIndex + 1 : current.entries.length;
+    const entries = [
+      ...current.entries.slice(0, insertionIndex),
+      section,
+      ...current.entries.slice(insertionIndex),
+    ];
     const context = removedEntryContext(entries, entryKey(section));
+    lastFocusedEntryKey.current = entryKey(section);
+    selectSectionKey.current = entryKey(section);
     applyDraft({ ...current, entries }, false, context ? [{
       kind: 'insert-entry',
       entry: section,
@@ -943,12 +1694,9 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       nextKey: context.nextKey,
       prefer: 'previous',
     }] : []);
-    setAnnouncement('Section added at the end.');
-    window.requestAnimationFrame(() => {
-      listRef.current
-        ?.querySelector<HTMLInputElement>(`[data-entry-key="${CSS.escape(entryKey(section))}"] input`)
-        ?.select();
-    });
+    setAnnouncement(anchorIndex >= 0
+      ? `Section added at position ${insertionIndex + 1} of ${entries.length}.`
+      : `Section added at the end, position ${entries.length} of ${entries.length}.`);
   }
 
   function renameSection(id: string, heading: string) {
@@ -991,64 +1739,61 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     }]);
   }
 
-  function removeSection(id: string) {
+  function removeSection(id: string, clickDetail: number) {
+    if (!undo.canPresent) return;
     const before = draftRef.current;
     const context = removedEntryContext(before.entries, `section:${id}`);
     if (!context) return;
     const nextEntries = before.entries.filter((entry) => entry.kind !== 'section' || entry.id !== id);
     if (nextEntries.length === before.entries.length) return;
-    applyDraft({ ...before, entries: nextEntries }, false, [{
+    const fallback = fallbackForRemovedEntry(context);
+    focusUndoFallback(fallback);
+    const message = 'Section removed.';
+    applyDraft({ ...before, entries: nextEntries }, true, [{
       kind: 'remove-entry',
       key: `section:${id}`,
-    }]);
-    setAnnouncement('Section removed.');
-    undo.present({
-      message: 'Section removed.',
-      run: async () => {
-        const beforeConflict = conflictEpoch.current;
-        const current = draftRef.current;
-        const entries = restoreEntry(current.entries, context);
-        const restored = removedEntryContext(entries, entryKey(context.entry));
-        applyDraft({ ...current, entries }, true, restored ? [{
-          kind: 'insert-entry',
-          entry: context.entry,
-          previousKey: restored.previousKey,
-          nextKey: restored.nextKey,
-          prefer: context.nextKey ? 'next' : 'previous',
-        }] : []);
-        await confirmUndoPersistence(beforeConflict, 'The section could not be restored. Try Undo again.');
-        setAnnouncement('Change undone.');
+    }], {
+      inverse: {
+        kind: 'order',
+        restored: captureAlbumDraft(before),
+        message,
+        input: undoInputFromClickDetail(clickDetail),
+        fallback,
       },
     });
+    setAnnouncement(message);
   }
 
-  function resetOrder() {
+  function resetOrder(clickDetail: number) {
+    if (!undo.canPresent) return;
     const before = draftRef.current;
-    const photos = before.entries
-      .filter((entry): entry is Extract<AlbumEntryView, { kind: 'photo' }> => entry.kind === 'photo')
-      .sort((left, right) => (
-        left.photo.timelineAt.localeCompare(right.photo.timelineAt)
-        || left.photo.id.localeCompare(right.photo.id)
-      ));
-    const liveIds = new Set(photos.map((entry) => entry.photo.id));
-    applyDraft({
+    const entries = timelineOrderedEntries(before.entries);
+    const liveIds = livePhotoIds(entries);
+    const retained = entries.filter(isRetainedEntry).length;
+    const next = {
       ...before,
-      entries: photos,
+      entries,
       coverMediaId: before.coverMediaId && liveIds.has(before.coverMediaId)
         ? before.coverMediaId
         : null,
-    }, false, [{ kind: 'reset-entries' }]);
-    const message = 'Album order reset to the timeline. Sections were removed.';
-    setAnnouncement(message);
-    undo.present({
-      message,
-      run: async () => {
-        const beforeConflict = conflictEpoch.current;
-        applyDraft(before, true, [{ kind: 'replace-draft', draft: before }]);
-        await confirmUndoPersistence(beforeConflict, 'The album order could not be restored. Try Undo again.');
-        setAnnouncement('Change undone.');
+    };
+    if (draftKey(next) === draftKey(before)) return;
+    const fallback = fallbackForEntryKey(entries[0] ? entryKey(entries[0]) : null)
+      ?? leaveHeadingRef.current;
+    focusUndoFallback(fallback);
+    const message = retained > 0
+      ? `Album order reset to the timeline. Sections were removed, and ${retained} recently deleted photo${retained === 1 ? '' : 's'} moved to the end.`
+      : 'Album order reset to the timeline. Sections were removed.';
+    applyDraft(next, true, [{ kind: 'reset-entries' }], {
+      inverse: {
+        kind: 'order',
+        restored: captureAlbumDraft(before),
+        message,
+        input: undoInputFromClickDetail(clickDetail),
+        fallback,
       },
     });
+    setAnnouncement(message);
   }
 
   async function refreshAfterMembership(fallback: string) {
@@ -1072,11 +1817,41 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       if (generation !== draftGeneration.current || !['saved', 'failed', 'invalid'].includes(queue.state().status)) {
         continue;
       }
+      const inverseCandidate = pendingInverse.current;
+      if (
+        inverseCandidate?.kind === 'photo'
+        && inverseCandidate.cursor === operationCursor.current
+      ) {
+        const classification = classifyQueuedInverse(inverseCandidate, refreshed.album);
+        pendingInverse.current = null;
+        if (classification.kind === 'unrelated') {
+          canonicalTrusted.current = false;
+          setNotice('The Album changed while the photo removal was being confirmed. Reload the Album before changing it again.');
+          invalidateGalleryAfterMutation();
+          return true;
+        }
+        adoptCanonical(refreshed.album, true);
+        if (classification.kind === 'offer') {
+          presentAlbumInverse(
+            inverseCandidate.message,
+            inverseCandidate.input,
+            inverseCandidate.fallback,
+            classification.payload,
+          );
+        }
+        canonicalTrusted.current = true;
+        reconciliationFailureRef.current = null;
+        setReconciliationFailure(null);
+        setNotice(null);
+        onAccessFailure?.(null);
+        return true;
+      }
       if (queue.state().status === 'saved') {
         adoptCanonical(refreshed.album);
       } else {
         const merged = mergeCanonicalMembership(draftRef.current, refreshed.album);
         revisionRef.current = refreshed.album.revision;
+        canonicalAlbumRef.current = refreshed.album;
         setAlbum(refreshed.album);
         draftGeneration.current += 1;
         draftRef.current = merged;
@@ -1097,72 +1872,55 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     await trackOperation(() => refreshAfterMembership(failure.message));
   }
 
-  async function removePhoto(entry: Extract<AlbumEntryView, { kind: 'photo' }>) {
+  async function removePhoto(
+    entry: Extract<AlbumEntryView, { kind: 'photo' }>,
+    clickDetail: number,
+  ) {
     const photoId = entry.photo.id;
-    if (pendingPickIds.has(photoId)) return;
-    const before = draftRef.current;
-    const context = removedEntryContext(before.entries, `photo:${photoId}`);
+    if (!undo.canPresent || pendingPickIds.has(photoId)) return;
+    const context = removedEntryContext(draftRef.current.entries, `photo:${photoId}`);
     if (!context) return;
-    const restoreExplicitCover = before.coverMediaId === photoId;
-    const coverIntentAtRemoval = coverIntentGeneration.current;
+    const fallback = fallbackForRemovedEntry(context);
+    // Claim the single recovery slot before the direct membership request can
+    // yield; otherwise an older inverse could start and reject this replacement.
+    undo.dismiss();
+    focusUndoFallback(fallback);
     setPendingPickIds((current) => new Set(current).add(photoId));
     try {
       await setAlbumPicks(eventId, [photoId], false);
+      const audienceChanged = audienceChangedRef.current;
+      audienceChanged?.();
       canonicalTrusted.current = false;
       const current = draftRef.current;
+      const currentContext = removedEntryContext(current.entries, `photo:${photoId}`);
+      if (!currentContext) {
+        await refreshAfterMembership('The photo was removed from Album, but the Album could not be refreshed. Try again in a moment.');
+        onPicksChanged();
+        return;
+      }
       const next: AlbumDraft = {
         ...current,
         entries: current.entries.filter((item) => item.kind !== 'photo' || item.photo.id !== photoId),
         coverMediaId: current.coverMediaId === photoId ? null : current.coverMediaId,
       };
-      applyDraft(next, true, [{ kind: 'remove-entry', key: `photo:${photoId}` }]);
-      const title = galleryPhotoTitle(entry.photo);
-      const message = '1 photo removed from the album. The original is still delivered.';
-      setAnnouncement(message);
-      undo.present({
-        message,
-        run: () => trackOperation(async () => {
-          const beforeConflict = conflictEpoch.current;
-          await setAlbumPicks(eventId, [photoId], true);
-          canonicalTrusted.current = false;
-          const latest = draftRef.current;
-          const entries = restoreEntry(latest.entries, context);
-          const coverMediaId = restoreExplicitCover
-            && coverIntentGeneration.current === coverIntentAtRemoval
-            && latest.coverMediaId === null
-            ? photoId
-            : latest.coverMediaId;
-          const restored = removedEntryContext(entries, entryKey(context.entry));
-          const operations: AlbumIntentOperation[] = restored ? [{
-            kind: 'insert-entry',
-            entry: context.entry,
-            previousKey: restored.previousKey,
-            nextKey: restored.nextKey,
-            prefer: context.nextKey ? 'next' : 'previous',
-          }] : [];
-          if (coverMediaId !== latest.coverMediaId) {
-            operations.push({ kind: 'set-cover', value: coverMediaId });
-          }
-          applyDraft({
-            ...latest,
-            entries,
-            coverMediaId,
-          }, true, operations);
-          await confirmUndoPersistence(beforeConflict, 'The photo could not be restored. Try Undo again.', false);
-          const refreshed = await refreshAfterMembership('The photo is back, but the album could not be refreshed. Try again in a moment.');
-          if (!refreshed || !canonicalTrusted.current || conflictEpoch.current !== beforeConflict) {
-            throw new Error(reconciliationFailureRef.current?.message
-              ?? 'The restored album is not confirmed yet. Try Undo again.');
-          }
-          onPicksChanged();
-          setAnnouncement(`${title} is back in the album.`);
-        }),
+      const message = '1 photo removed from Album. The delivered photo remains.';
+      applyDraft(next, true, [{ kind: 'remove-entry', key: `photo:${photoId}` }], {
+        audienceChangeAlreadyConfirmed: audienceChanged !== undefined,
+        inverse: {
+          kind: 'photo',
+          mediaId: photoId,
+          restored: captureAlbumDraft(current),
+          message,
+          input: undoInputFromClickDetail(clickDetail),
+          fallback,
+        },
       });
+      setAnnouncement(message);
       await queue.waitForSettled();
-      await refreshAfterMembership('The photo was removed, but the album could not be refreshed. Use Undo or try again in a moment.');
+      await refreshAfterMembership('The photo was removed from Album, but the Album could not be refreshed. Use Undo or try again in a moment.');
       onPicksChanged();
     } catch (caught) {
-      setNotice(errorMessage(caught, 'That photo could not be removed from the album.'));
+      setNotice(errorMessage(caught, 'That photo could not be removed from Album.'));
     } finally {
       setPendingPickIds((current) => {
         const next = new Set(current);
@@ -1172,129 +1930,207 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     }
   }
 
-  async function choose(start: 'from-picks' | 'empty') {
-    if (starting) return;
+  async function choose(start: 'from-picks' | 'empty', clickDetail: number) {
+    if (starting || !undo.canPresent) return;
     const before = draftRef.current;
+    const capturedBefore = captureAlbumDraft(before);
+    undo.dismiss();
     setStarting(true);
     try {
       const result = await startAlbum(eventId, start);
-      adoptCanonical(result.album, true);
-      onPicksChanged();
       if (!result.started) {
-        setAnnouncement('The album was already started. The current version is open now.');
+        adoptCanonical(result.album, true);
+        audienceChangedRef.current?.();
+        onPicksChanged();
+        setAnnouncement('The Album was already started. The current version is open now.');
         return;
       }
       if (start === 'empty') {
         const message = result.cleared.length > 0
-          ? 'The album starts empty. The hearts were cleared.'
-          : 'The album starts empty.';
+          ? 'The Album starts empty. The Album picks were cleared.'
+          : 'The Album starts empty.';
         setAnnouncement(message);
-        if (result.cleared.length === 0) return;
-        undo.present({
-          message,
-          run: () => trackOperation(async () => {
-            const beforeConflict = conflictEpoch.current;
-            await setAlbumPicks(eventId, result.cleared, true);
-            canonicalTrusted.current = false;
-            onPicksChanged();
-            const latest = draftRef.current;
-            let restoredEntries = latest.entries;
-            for (const entry of before.entries) {
-              if (entry.kind !== 'photo' || !result.cleared.includes(entry.photo.id)) continue;
-              const context = removedEntryContext(before.entries, entryKey(entry));
-              if (context) restoredEntries = restoreEntry(restoredEntries, context);
-            }
-            const restored: AlbumDraft = {
-              ...latest,
-              entries: restoredEntries,
-              coverMediaId: latest.coverMediaId ?? before.coverMediaId,
+        const forward = inverseStateFromAlbum(result.album);
+        const cleared = new Set(result.cleared);
+        const capturedLiveIds = before.entries
+          .filter(isPhotoEntry)
+          .map((entry) => entry.photo.id);
+        const exactForward = forward.saved
+          && forward.entries.length === 0
+          && forward.title === capturedBefore.title
+          && forward.description === capturedBefore.description
+          && forward.coverMediaId === null
+          && cleared.size === result.cleared.length
+          && cleared.size === capturedLiveIds.length
+          && capturedLiveIds.every((mediaId) => cleared.has(mediaId));
+        if (result.cleared.length > 0 && exactForward) {
+            const membershipRestored = inverseStateFromCapture(
+              capturedBefore,
+              forward.revision,
+              true,
+            );
+            const restored = inverseStateFromCapture(
+              capturedBefore,
+              forward.revision + 1,
+              true,
+            );
+            pendingStartInverse.current = {
+              message,
+              input: undoInputFromClickDetail(clickDetail),
+              payload: {
+                kind: 'membership-order',
+                mediaIds: [...result.cleared],
+                forward,
+                membershipRestored,
+                restored,
+              },
             };
-            applyDraft(restored, true, [{ kind: 'replace-draft', draft: restored }]);
-            await confirmUndoPersistence(beforeConflict, 'The album picks could not be restored. Try Undo again.', false);
-            const refreshed = await refreshAfterMembership('The hearts are back, but the album could not be refreshed.');
-            if (!refreshed || !canonicalTrusted.current || conflictEpoch.current !== beforeConflict) {
-              throw new Error(reconciliationFailureRef.current?.message
-                ?? 'The restored album is not confirmed yet. Try Undo again.');
-            }
-            setAnnouncement('Change undone.');
-          }),
-        });
+        } else if (capturedLiveIds.length > 0 || result.cleared.length > 0) {
+          invalidateGalleryAfterMutation();
+        }
       } else {
-        setAnnouncement(`The album starts from ${result.album.photoCount} favorited photo${result.album.photoCount === 1 ? '' : 's'}.`);
+        setAnnouncement(`The Album starts from ${result.album.photoCount} picked photo${result.album.photoCount === 1 ? '' : 's'}.`);
       }
+      if (pendingStartInverse.current) {
+        // Leave preparation is awaiting this tracked mutation. Commit the editor
+        // before that promise can resume, then hand the frozen offer to Manager;
+        // otherwise automatic batching can unmount Album before its layout work.
+        flushSync(() => adoptCanonical(result.album, true));
+        presentPendingStartAlbumInverse();
+      } else {
+        adoptCanonical(result.album, true);
+      }
+      audienceChangedRef.current?.();
+      onPicksChanged();
     } catch (caught) {
-      setNotice(errorMessage(caught, 'The album could not be started.'));
+      setNotice(errorMessage(caught, 'The Album could not be started.'));
     } finally {
       setStarting(false);
     }
   }
 
   async function togglePreview() {
-    if (!(await settleDraft())) return;
+    if ((await settleDraft()).status !== 'ready') return;
     setPreviewOpen((current) => !current);
   }
 
-  async function toggleShare() {
+  function requestCreateShare() {
+    if (currentShare.current || shareOperationPending.current || createShareOpen.current) return;
+    const active = document.activeElement;
+    createShareOriginRef.current = active instanceof HTMLElement ? active : null;
+    const current = draftRef.current;
+    createShareOpen.current = true;
+    setCreateShareError(null);
+    setCreateShareSnapshot({
+      photoCount: current.entries.filter(isPhotoEntry).length,
+      publishedCaptionCount: current.entries.filter((entry) => (
+        entry.kind === 'photo'
+        && entry.photo.publicationStatus === 'published'
+        && Boolean(entry.photo.caption?.trim())
+      )).length,
+    });
+  }
+
+  function cancelCreateShare() {
     if (shareOperationPending.current) return;
-    const activeShare = share;
-    if (!activeShare && !(await settleDraft())) return;
+    createShareOpen.current = false;
+    setCreateShareSnapshot(null);
+    setCreateShareError(null);
+    setCreateShareReturnFocusRequest((current) => current + 1);
+  }
+
+  /**
+   * Opening either link confirmation sends nothing — not a credential request,
+   * not a revocation, and not a draft flush. Only its explicit answer can write.
+   */
+  function requestStopShare() {
+    if (!currentShare.current || shareOperationPending.current) return;
+    const active = document.activeElement;
+    stopShareOriginRef.current = active instanceof HTMLElement ? active : null;
+    setStopShareError(null);
+    setConfirmingStopShare(true);
+  }
+
+  function keepSharing() {
     if (shareOperationPending.current) return;
+    setConfirmingStopShare(false);
+    setStopShareError(null);
+    stopShareOriginRef.current?.focus();
+    stopShareOriginRef.current = null;
+  }
+
+  async function confirmStopShare() {
+    // Two taps on one destructive control are one revocation. The ref is checked and
+    // set synchronously, before any await, so the second activation cannot slip past.
+    if (shareOperationPending.current || !currentShare.current) return;
     const operationGeneration = ++shareRequestGeneration.current;
     shareOperationPending.current = true;
     setSharePending(true);
+    setStopShareError(null);
     try {
-      if (activeShare) {
-        await stopAlbumShare(eventId);
-        if (operationGeneration === shareRequestGeneration.current) setShare(null);
-        setAnnouncement('Album sharing stopped.');
-      } else {
-        const result = await shareAlbum(eventId);
-        if (operationGeneration === shareRequestGeneration.current) setShare(result.share);
-        setAnnouncement('Album link is ready.');
-      }
+      await stopAlbumShare(eventId);
+      audienceChangedRef.current?.();
+      if (operationGeneration === shareRequestGeneration.current) adoptShare(null);
+      setConfirmingStopShare(false);
+      stopShareOriginRef.current = null;
       setNotice(null);
+      setAnnouncement('The Album link was stopped. People with the old link cannot open it now, and the Album itself is unchanged.');
+      setStopShareFocusRequest((current) => current + 1);
     } catch (caught) {
-      setNotice(errorMessage(caught, activeShare ? 'Album sharing could not be stopped.' : 'The album could not be shared.'));
+      setStopShareError(errorMessage(caught, 'The Album link could not be stopped.'));
     } finally {
       shareOperationPending.current = false;
       setSharePending(false);
     }
   }
 
-  async function copyShareLink() {
-    if (!share || copyPending.current !== null) return;
-    const credentialGeneration = shareCredentialGeneration.current;
-    copyPending.current = credentialGeneration;
-    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    setCopied(false);
-    setCopyUnavailable(false);
+  async function confirmCreateShare() {
+    if (shareOperationPending.current || currentShare.current || !createShareOpen.current) return;
+    shareOperationPending.current = true;
+    setSharePending(true);
+    setCreateShareError(null);
     try {
-      if (!navigator.clipboard) throw new Error('Clipboard unavailable');
-      await navigator.clipboard.writeText(share.url);
-      if (credentialGeneration !== shareCredentialGeneration.current) return;
-      setCopied(true);
-      setAnnouncement('Album link copied.');
-      copyTimer.current = window.setTimeout(() => {
-        copyTimer.current = null;
-        if (credentialGeneration === shareCredentialGeneration.current) setCopied(false);
-      }, 2_200);
-    } catch {
-      if (credentialGeneration !== shareCredentialGeneration.current) return;
-      setCopyUnavailable(true);
-      setAnnouncement('Copy unavailable. Select the album link instead.');
+      const ready = await settleDraft({ focusRecovery: false });
+      if (ready.status !== 'ready') {
+        createShareOpen.current = false;
+        setCreateShareSnapshot(null);
+        setCreateShareError(null);
+        createShareOriginRef.current = null;
+        setCreateShareRecoveryRequest((current) => current + 1);
+        return;
+      }
+      // The initial status read can settle while the draft does. A fetched active
+      // share is authoritative and turns this confirmed attempt into no operation.
+      if (currentShare.current || !createShareOpen.current) return;
+      const operationGeneration = ++shareRequestGeneration.current;
+      const result = await shareAlbum(eventId);
+      audienceChangedRef.current?.();
+      if (operationGeneration !== shareRequestGeneration.current) return;
+      adoptShare(result.share);
+      createShareOpen.current = false;
+      setCreateShareSnapshot(null);
+      setCreateShareError(null);
+      createShareOriginRef.current = null;
+      setNotice(null);
+      setAnnouncement('Album link is Live.');
+      setShareCopyFocusRequest((current) => current + 1);
+    } catch (caught) {
+      setCreateShareError(errorMessage(caught, 'The Album link could not be created.'));
     } finally {
-      if (copyPending.current === credentialGeneration) copyPending.current = null;
+      shareOperationPending.current = false;
+      setSharePending(false);
     }
   }
 
   const prepareAlbumExport = useCallback(async () => {
-    if (!(await settleDraft())) return;
+    if ((await settleDraft()).status !== 'ready') return;
     await onPrepareExport();
   }, [onPrepareExport, settleDraft]);
 
   if (loading && !hasLoaded.current) return <LoadingState label="Opening the album…" live={false} />;
   if (loadFailure) {
     return <div className="gallery-album" ref={rootRef}>
+      <h3 className="section-label" ref={leaveHeadingRef} tabIndex={-1}>Album</h3>
       <ErrorState
         message={loadFailure.message}
         recoveryHint={loadFailure.recoveryHint}
@@ -1303,16 +2139,32 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     </div>;
   }
 
-  const photos = draft.entries.filter(
-    (entry): entry is Extract<AlbumEntryView, { kind: 'photo' }> => entry.kind === 'photo',
-  );
+  const photos = draft.entries.filter(isPhotoEntry);
   const photoCount = photos.length;
+  const emptySections = emptySectionIds(draft.entries);
+  const retainedSlots = draft.entries.filter(isRetainedEntry);
+  const retainedCount = retainedSlots.length;
   const explicitCover = draft.coverMediaId
     ? photos.find((entry) => entry.photo.id === draft.coverMediaId)?.photo ?? null
     : null;
+  /**
+   * The cover the host chose is in Recently deleted.
+   *
+   * The reference is kept rather than silently dropped, so a timely Restore returns
+   * the same photograph to the cover; until then `effectiveCover` falls through to
+   * the first visible photo, which is what a recipient would actually see.
+   */
+  const coverRetainedSlot: AlbumRetainedSlotView | null = draft.coverMediaId === null
+    ? null
+    : retainedSlots.find((entry) => entry.slot.mediaId === draft.coverMediaId)?.slot
+      ?? (album?.coverRetained?.mediaId === draft.coverMediaId ? album.coverRetained : null);
+  const coverRetainedExpired = coverRetainedSlot !== null && retainedSlotExpired(coverRetainedSlot, deadlineNow);
+  const coverRetainedDeadline = coverRetainedSlot
+    ? retentionDisplay(coverRetainedSlot.restoreUntil, eventTimezone)
+    : null;
   const effectiveCover = explicitCover ?? photos[0]?.photo ?? null;
   const effectiveCoverId = effectiveCover?.id ?? null;
-  const needsReconciliation = album !== null && !album.saved && photoCount > 0;
+  const needsReconciliation = album !== null && !album.saved && (photoCount + retainedCount) > 0;
   const invalidTitle = titleIsInvalid(draft);
   const visibleAutosave = effectiveAlbumAutosaveState(
     autosave,
@@ -1323,6 +2175,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
 
   let photoPosition = 0;
   return <div className="gallery-album" ref={rootRef}>
+    <h3 className="section-label" ref={leaveHeadingRef} tabIndex={-1}>Album</h3>
     {notice && <div className="manager-action-error" role="alert">
       <div className="manager-action-error__summary">
         <div className="manager-action-error__alert">
@@ -1347,12 +2200,12 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       ? <>
           <p className="album-not-started">Not started yet</p>
           <section className="album-reconcile" aria-labelledby="album-reconcile-title">
-            <p className="section-label">Before albums, there were favorites</p>
+            <p className="section-label">Earlier Album picks</p>
             <h3 id="album-reconcile-title">
-              {photoCount} photo{photoCount === 1 ? ' was' : 's were'} favorited before this album existed.
+              {photoCount + retainedCount} photo{photoCount + retainedCount === 1 ? ' was' : 's were'} picked before this Album existed.
             </h3>
             <p>
-              Album picks are the same hearts you already used, so this album can start from them —
+              These Album picks carry forward, so this Album can start from them —
               in the order the photos arrived, with the first as the cover. Nothing is published
               either way, and you can add or remove photos afterwards.
             </p>
@@ -1360,17 +2213,17 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
               <button
                 type="button"
                 className="button button--primary"
-                disabled={starting}
-                onClick={() => { void trackOperation(() => choose('from-picks')); }}
-              >Start the album from {photoCount === 1 ? 'it' : 'them'}</button>
+                disabled={starting || !undo.canPresent}
+                onClick={(click) => { void trackOperation(() => choose('from-picks', click.detail)); }}
+              >Start the Album from {photoCount + retainedCount === 1 ? 'it' : 'them'}</button>
               <button
                 type="button"
                 className="button button--secondary"
-                disabled={starting}
-                onClick={() => { void trackOperation(() => choose('empty')); }}
+                disabled={starting || !undo.canPresent}
+                onClick={(click) => { void trackOperation(() => choose('empty', click.detail)); }}
               >Start empty</button>
             </div>
-            <small>Starting empty clears the hearts on those photos. It never deletes a photo.</small>
+            <small>Starting empty clears those Album picks. It never deletes a delivered photo.</small>
           </section>
         </>
       : <>
@@ -1382,11 +2235,20 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
               onRetry={() => applyDraft(draftRef.current, true)}
               live={false}
             />
-            <span>{photoCount} photo{photoCount === 1 ? '' : 's'} in the album</span>
+            {/* A trashed photo has not given its place back. Saying so here is the only
+                honest version of "how full is this album", and it is where a host
+                looks before deciding they have room for more. */}
+            <span>{photoCount} photo{photoCount === 1 ? '' : 's'} In Album{retainedCount > 0
+              ? `, and ${retainedCount} recently deleted photo${retainedCount === 1 ? '' : 's'} still holding a place`
+              : ''}</span>
           </div>
 
           {previewOpen
-            ? <AlbumPreview entries={draft.entries} title={draft.title.trim()} description={draft.description} />
+            ? <AlbumPreview
+                eventId={eventId}
+                revision={album?.revision ?? 0}
+                onAnnouncement={onAnnouncement}
+              />
             : <div className="album-editor">
                 <section className="album-metadata" aria-label="Album details">
                   <div className="album-cover">
@@ -1407,7 +2269,18 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                     <small>{effectiveCover
                       ? `${explicitCover ? 'Cover · ' : 'Cover · first photo, until you star another · '}${galleryPhotoTitle(effectiveCover)}`
                       : 'The first photo becomes the cover.'}</small>
-                    {explicitCover && <button
+                    {coverRetainedSlot && coverRetainedDeadline && <small className="album-cover__retained">
+                      <strong>Your chosen cover is a {RETAINED_SLOT_NAME.toLowerCase()}.</strong>{' '}
+                      {coverRetainedExpired
+                        ? <>{RETAINED_SLOT_EXPIRED}. Recovery ended{' '}
+                            <RetentionInstant display={coverRetainedDeadline} />, so the first photo
+                            stays the cover. Star another photo to choose a different one.</>
+                        : <>Restore it in Recently deleted by{' '}
+                            <RetentionInstant display={coverRetainedDeadline} /> and it is the cover
+                            again. Until then people with the Album link see the first photo, and starring another photo
+                            replaces the choice.</>}
+                    </small>}
+                    {(explicitCover || coverRetainedSlot) && <button
                       type="button"
                       className="text-button"
                       onClick={() => {
@@ -1470,41 +2343,68 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                       }}
                       onBlur={() => queue.flush()}
                     />
-                    <small>Guests see this only if you share the album. It is optional.</small>
+                    <small>People with the Album link see this. It is optional.</small>
                   </div>
                 </section>
 
                 <header className="album-order-heading">
-                  <h3 className="section-label">The order guests will see</h3>
+                  <h3 className="section-label">The order people with the Album link will see</h3>
                   <button type="button" className="button button--secondary" onClick={addSection}>
                     <Plus aria-hidden="true" /> Add a section
                   </button>
-                  <button type="button" className="text-button" onClick={resetOrder}>
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={!undo.canPresent}
+                    aria-describedby="album-reset-consequence"
+                    onClick={(click) => resetOrder(click.detail)}
+                  >
                     Reset to timeline order
                   </button>
                 </header>
+                <small id="album-reset-consequence">
+                  Reset removes every section and can be undone for {UNDO_WINDOW_MS / 1_000} seconds.
+                </small>
 
                 {draft.entries.length === 0
                   ? <div className="empty-state">
-                      <h3>The album is empty.</h3>
-                      <p>Pick photos in Library. A pick adds the photo to this album for every host on this event. It does not publish it.</p>
+                      <h3>The Album is empty.</h3>
+                      <p>Pick photos in Library. Each pick makes a photo In Album for every host on this event. It does not publish to the Guest gallery.</p>
                       <button type="button" className="button button--secondary" onClick={onGoToLibrary}>Go to Library</button>
                     </div>
-                  : <ol className="album-review-grid" ref={listRef}>
+                  : <ol
+                      className="album-review-grid"
+                      ref={listRef}
+                      onFocusCapture={(focusEvent) => {
+                        const focusedEntry = (focusEvent.target as HTMLElement)
+                          .closest<HTMLElement>('[data-entry-key]');
+                        const key = focusedEntry?.dataset.entryKey;
+                        if (key) lastFocusedEntryKey.current = key;
+                      }}
+                    >
                       {draft.entries.map((entry, index) => {
                         const key = entryKey(entry);
                         const name = entryName(entry);
+                        // Retained slots are not numbered: the number is the guest's
+                        // reading position, and the public album omits the marker.
                         if (entry.kind === 'photo') photoPosition += 1;
                         const position = photoPosition;
                         const isCover = entry.kind === 'photo' && entry.photo.id === effectiveCoverId;
                         const previewFailed = entry.kind === 'photo'
                           && failedPreviewIds.has(entry.photo.id);
+                        const retainedDeadline = entry.kind === 'photo-retained'
+                          ? retentionDisplay(entry.slot.restoreUntil, eventTimezone)
+                          : null;
+                        const retainedExpired = entry.kind === 'photo-retained'
+                          && retainedSlotExpired(entry.slot, deadlineNow);
                         return <li
                           key={key}
                           data-entry-key={key}
                           className={entry.kind === 'section'
                             ? 'album-review-grid__section'
-                            : 'album-review-grid__photo'}
+                            : entry.kind === 'photo-retained'
+                              ? 'album-review-grid__photo album-review-grid__photo--retained'
+                              : 'album-review-grid__photo'}
                           draggable
                           onDragStart={(dragEvent) => {
                             dragKey.current = key;
@@ -1532,23 +2432,62 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                           {entry.kind === 'section'
                             ? <>
                                 <span className="album-section__marker" aria-hidden="true" />
-                                <input
-                                  className="album-section__input"
-                                  aria-label="Section name"
-                                  value={entry.heading}
-                                  onChange={(change) => renameSection(
-                                    entry.id,
-                                    clampCodePoints(change.target.value, ALBUM_SECTION_HEADING_MAX_LENGTH),
-                                  )}
-                                  onBlur={() => commitSectionName(entry.id)}
-                                  onKeyDown={(pressed) => {
-                                    if (pressed.key === 'Enter') {
-                                      pressed.preventDefault();
-                                      pressed.currentTarget.blur();
-                                    }
-                                  }}
-                                />
+                                <div className="album-section__field">
+                                  <input
+                                    className="album-section__input"
+                                    aria-label="Section name"
+                                    value={entry.heading}
+                                    onChange={(change) => renameSection(
+                                      entry.id,
+                                      clampCodePoints(change.target.value, ALBUM_SECTION_HEADING_MAX_LENGTH),
+                                    )}
+                                    onBlur={() => commitSectionName(entry.id)}
+                                    onKeyDown={(pressed) => {
+                                      if (pressed.key === 'Enter') {
+                                        pressed.preventDefault();
+                                        pressed.currentTarget.blur();
+                                      }
+                                    }}
+                                  />
+                                  {emptySections.has(entry.id) && <small className="album-section__empty-note">
+                                    Empty section—omitted from the Album link
+                                  </small>}
+                                </div>
                                 <span className="album-section__rule" aria-hidden="true" />
+                              </>
+                            : entry.kind === 'photo-retained'
+                            /* Opaque on purpose. The host took this photograph out of
+                               view, so no image, caption, contributor or filename
+                               belongs here — only that the place is still held. */
+                            ? <>
+                                <div className="album-review-grid__preview">
+                                  <div className="album-review-grid__fallback album-review-grid__retained" aria-hidden="true">
+                                    <Trash2 />
+                                    <span>Not shown</span>
+                                  </div>
+                                </div>
+                                <span className="album-review-grid__meta">
+                                  <strong>{RETAINED_SLOT_NAME}</strong>
+                                </span>
+                                <small className="album-entry__retained-note">
+                                  {retainedExpired
+                                    ? <>
+                                        <span className="album-entry__retained-state">{RETAINED_SLOT_EXPIRED}</span>
+                                        {' '}Recovery ended{' '}
+                                        {retainedDeadline && <RetentionInstant display={retainedDeadline} />}
+                                        . Its place is held here until cleanup runs.
+                                      </>
+                                    : <>
+                                        Its place is held here. Recovery ends{' '}
+                                        {retainedDeadline && <RetentionInstant display={retainedDeadline} />}
+                                        .
+                                      </>}
+                                </small>
+                                {!retainedExpired && onOpenRecentlyDeleted && <button
+                                  type="button"
+                                  className="text-button album-entry__retained-open"
+                                  onClick={onOpenRecentlyDeleted}
+                                >Restore in Recently deleted</button>}
                               </>
                             : <>
                                 <div className="album-review-grid__preview">
@@ -1612,18 +2551,22 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                                 setAnnouncement(`${name} is the album cover.`);
                               }}
                             ><Star aria-hidden="true" /></button>}
-                            <button
+                            {/* A retained slot has no Remove: the row is held for recovery, and
+                                dropping the marker would be a deletion the host did not ask for.
+                                Recently deleted owns what happens to it next. */}
+                            {entry.kind !== 'photo-retained' && <button
                               type="button"
                               className="icon-button album-entry__remove"
-                              disabled={entry.kind === 'photo' && pendingPickIds.has(entry.photo.id)}
+                              disabled={!undo.canPresent
+                                || (entry.kind === 'photo' && pendingPickIds.has(entry.photo.id))}
                               aria-label={entry.kind === 'section'
                                 ? `Remove section ${name}`
-                                : `Remove ${name} from the album`}
-                              onClick={() => {
-                                if (entry.kind === 'section') removeSection(entry.id);
-                                else void trackOperation(() => removePhoto(entry));
+                                : `Remove ${name} from Album`}
+                              onClick={(click) => {
+                                if (entry.kind === 'section') removeSection(entry.id, click.detail);
+                                else void trackOperation(() => removePhoto(entry, click.detail));
                               }}
-                            ><X aria-hidden="true" /></button>
+                            ><X aria-hidden="true" /></button>}
                           </span>
                         </li>;
                       })}
@@ -1631,7 +2574,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
               </div>}
 
           <section className="album-exits" aria-labelledby="album-exits-title">
-            <p className="section-label" id="album-exits-title">When the album is right</p>
+            <p className="section-label" id="album-exits-title" ref={shareHeadingRef} tabIndex={-1}>When the Album is right</p>
             <div className="album-exits__controls">
               <button
                 type="button"
@@ -1641,41 +2584,152 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
               ><Eye aria-hidden="true" /> {previewOpen ? 'Back to editing' : 'Preview album'}</button>
               <button
                 type="button"
+                ref={shareActionRef}
                 className="button button--secondary"
                 disabled={(!share && photoCount === 0) || sharePending}
-                onClick={() => { void toggleShare(); }}
+                onClick={() => { if (share) requestStopShare(); else requestCreateShare(); }}
               ><Link aria-hidden="true" /> {share
-                ? 'Stop sharing album'
-                : sharePending ? 'Sharing album…' : 'Share album'}</button>
+                ? 'Stop Album link'
+                : sharePending ? 'Creating Album link…' : 'Create Album link'}</button>
               <AlbumExportControl
-                photoCount={photoCount}
-                totalBytes={album?.totalBytes ?? 0}
                 job={exportJob}
                 activeJob={activeExport}
                 download={exportDownload}
+                eventTimezone={eventTimezone ?? 'UTC'}
+                currentSource={exportSource}
                 onPrepare={prepareAlbumExport}
                 onDownload={onDownloadExport}
                 onRetry={onRetryExport}
                 live={false}
-                onAnnouncement={onAnnouncement}
               />
             </div>
 
             {share && <div className="album-share">
-              <p>Anyone holding this link can see the album. It does not change what the shared gallery shows.</p>
-              <div className="album-share__link">
-                <code tabIndex={0}>{share.url}</code>
-                <button type="button" className="button button--secondary" onClick={() => { void copyShareLink(); }}>
-                  {copied ? 'Copied' : 'Copy album link'}
-                </button>
-              </div>
-              {copyUnavailable && <small className="album-share__error">
-                Copy unavailable. Select the link instead.
-              </small>}
+              <p>
+                People with the Album link can see the saved Album. The Guest gallery is separate,
+                and this link does not change what event guests see there.
+              </p>
+              <CopyableLinkCard
+                ref={shareCopyRef}
+                label="Album link"
+                controlNoun="Album link"
+                value={share.url}
+                sensitive
+              />
             </div>}
           </section>
         </>}
 
-    <UndoBar controller={undo} live={false} onRestoreFocus={restoreAlbumEditorFocus} />
+    {/*
+      Creation and revocation reuse the same focused Manager confirmation contract.
+      Each dialog states its own consequence before any request is sent.
+    */}
+    {createShareSnapshot && createPortal(<div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(press) => { if (press.target === press.currentTarget) cancelCreateShare(); }}
+    >
+      <div
+        className="modal-card"
+        ref={shareConfirmRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="album-create-share-title"
+        aria-describedby="album-create-share-body"
+        aria-busy={sharePending}
+      >
+        <h2 id="album-create-share-title">Create the Album link?</h2>
+        <div id="album-create-share-body">
+          <p>
+            This link will show {createShareSnapshot.photoCount} photo{createShareSnapshot.photoCount === 1 ? '' : 's'} and{' '}
+            {createShareSnapshot.publishedCaptionCount} published caption{createShareSnapshot.publishedCaptionCount === 1 ? '' : 's'}{' '}
+            to people with the Album link.
+          </p>
+          <p>
+            The Album link is a live view. Later saved changes to Album membership, metadata,
+            sections, and order affect what people see when they request it.
+          </p>
+          <p>
+            The Guest gallery is separate. Creating this link does not publish photos there or
+            change what event guests can see.
+          </p>
+        </div>
+        {createShareError && <p
+          className="form-error"
+          role="alert"
+          tabIndex={-1}
+          ref={createShareErrorRef}
+        >{createShareError}</p>}
+        <div className="modal-actions">
+          <button
+            type="button"
+            ref={cancelCreateShareRef}
+            className="button button--secondary"
+            aria-disabled={sharePending}
+            onClick={cancelCreateShare}
+          >Cancel</button>
+          <button
+            type="button"
+            className="button button--primary"
+            aria-disabled={sharePending}
+            onClick={() => { void confirmCreateShare(); }}
+          >{sharePending ? 'Creating Album link' : 'Create Album link'}</button>
+        </div>
+      </div>
+    </div>, confirmHost)}
+
+    {confirmingStopShare && share && createPortal(<div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(press) => { if (press.target === press.currentTarget) keepSharing(); }}
+    >
+      <div
+        className="modal-card"
+        ref={shareConfirmRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="album-stop-share-title"
+        aria-describedby="album-stop-share-body"
+        aria-busy={sharePending}
+      >
+        <h2 id="album-stop-share-title">Stop the Album link?</h2>
+        <div id="album-stop-share-body">
+          <p>
+            Every request from people with the Album link stops working immediately, and so does
+            every session already opened with it.
+          </p>
+          <p>
+            A page someone still has open may keep the photographs it already loaded, and copies
+            already loaded or downloaded cannot be recalled.
+          </p>
+          <p>This link cannot be brought back. You can create a new Album link afterwards.</p>
+          <p>
+            Delivered photos and the Album arrangement are unchanged. The Guest gallery is
+            separate, and what event guests see there is unchanged.
+          </p>
+        </div>
+        {stopShareError && <p
+          className="form-error"
+          role="alert"
+          tabIndex={-1}
+          ref={stopShareErrorRef}
+        >{stopShareError}</p>}
+        <div className="modal-actions">
+          {/* Initial focus, and never the destructive one. */}
+          <button
+            type="button"
+            ref={keepSharingRef}
+            className="button button--secondary"
+            onClick={keepSharing}
+          >Keep sharing</button>
+          <button
+            type="button"
+            className="button button--danger"
+            aria-disabled={sharePending}
+            onClick={() => { void confirmStopShare(); }}
+          >{sharePending ? 'Stopping Album link' : 'Stop Album link'}</button>
+        </div>
+      </div>
+    </div>, confirmHost)}
   </div>;
 });

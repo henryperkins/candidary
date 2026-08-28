@@ -11,12 +11,12 @@ export interface GallerySelectionTransition {
   message: string | null;
 }
 
-export function selectionCapacityMessage(): string {
-  return `${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once. Add these first, then select more.`;
+export function selectionCountMessage(count: number): string {
+  return `${count} of ${MANAGER_BULK_SELECTION_MAX} selected`;
 }
 
-export function sharedSelectionCapacityMessage(): string {
-  return `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} photos selected. Remove one to choose another.`;
+export function selectionCapacityMessage(): string {
+  return `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} selected. Remove one to choose another.`;
 }
 
 function uniqueIds(ids: readonly string[]): string[] {

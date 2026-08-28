@@ -2,11 +2,27 @@ import { describe, expect, it } from 'vitest';
 
 import { MANAGER_BULK_SELECTION_MAX } from '../../shared/constants';
 import {
+  selectionCountMessage,
   selectionCapacityMessage,
   transitionSelection,
 } from '../../src/features/gallery/selection-state';
 
 describe('gallery selection transitions', () => {
+  it.each([
+    [0, '0 of 50 selected'],
+    [1, '1 of 50 selected'],
+    [49, '49 of 50 selected'],
+    [50, '50 of 50 selected'],
+  ] as const)('reports the shared selection count at %i selections', (count, expected) => {
+    expect(selectionCountMessage(count)).toBe(expected);
+  });
+
+  it('names the recovery when selection reaches capacity', () => {
+    expect(selectionCapacityMessage()).toBe(
+      '50 of 50 selected. Remove one to choose another.',
+    );
+  });
+
   it('selects and deselects without mutating the current set', () => {
     const empty = new Set<string>();
     const selected = transitionSelection(empty, {
@@ -78,7 +94,7 @@ describe('gallery selection transitions', () => {
       `1 of 2 selected from these results. ${selectionCapacityMessage()}`,
     );
     expect(selectionCapacityMessage()).toBe(
-      `${MANAGER_BULK_SELECTION_MAX} photos is the most you can act on at once. Add these first, then select more.`,
+      `${MANAGER_BULK_SELECTION_MAX} of ${MANAGER_BULK_SELECTION_MAX} selected. Remove one to choose another.`,
     );
   });
 

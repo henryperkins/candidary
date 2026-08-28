@@ -1,5 +1,6 @@
+import type { SupportedImageType } from './constants';
 import type { EventCoverView, GuestEventCoverView } from './event-cover';
-import type { ApiErrorBody } from './errors';
+import type { ApiErrorBody, ApiErrorCode } from './errors';
 
 // Access links only ever grant these two. Keeping `Role` narrow is what stops a
 // host account from being mistaken for something an event token can mint.
@@ -18,6 +19,28 @@ export type PublicationStatus = 'unpublished' | 'published' | 'hidden';
 export type TimelineSource = 'capture' | 'received';
 export type ExportKind = 'complete' | 'album';
 export type ExportState = 'queued' | 'running' | 'ready' | 'failed' | 'expired';
+
+export const MANAGER_EXPORT_ERROR_CODES = [
+  'EXPORT_SOURCE_MISSING',
+  'EXPORT_SOURCE_REMOVED',
+  'EXPORT_EVENT_DELETED',
+  'EXPORT_GUESTBOOK_SNAPSHOT_INVALID',
+  'EXPORT_SNAPSHOT_CHANGED',
+  'EXPORT_WORKFLOW_DISPATCH_FAILED',
+  'EXPORT_FAILED',
+] as const;
+
+export type ManagerExportErrorCode = typeof MANAGER_EXPORT_ERROR_CODES[number];
+
+/** Never expose an export worker's internal diagnostic through Manager JSON. */
+export function normalizeManagerExportErrorCode(
+  value: string | null,
+): ManagerExportErrorCode | null {
+  if (value === null) return null;
+  return (MANAGER_EXPORT_ERROR_CODES as readonly string[]).includes(value)
+    ? value as ManagerExportErrorCode
+    : 'EXPORT_FAILED';
+}
 
 export interface ApiSuccess<T> {
   data: T;
@@ -120,9 +143,17 @@ export interface EventView {
   galleryVisible: boolean;
   moderationRequired: boolean;
   reservedMediaCount: number;
+  // Active delivered originals. Deliberately unchanged in meaning by recovery:
+  // export freshness compares against this, so a trashed photo must leave it.
   storedMediaCount: number;
   reservedBytes: number;
   storedBytes: number;
+  // Photos in Recently deleted. They are not delivered any more, but they still
+  // hold their bytes and their slot: a Restore must never fail because later
+  // uploads spent space this photo only looked like it had released. Manager
+  // only — no guest projection carries either field.
+  recoverableMediaCount: number;
+  recoverableBytes: number;
   guestAccessExpiresAt: string;
   managementAccessExpiresAt: string;
   purgeAfter: string;
@@ -267,6 +298,72 @@ export interface LegacyGuestbookItem {
   mediaId: string | null;
 }
 
+// Guest media allowlists. Every one of these is written out field by field
+// rather than derived from a repository record, because a guest response is the
+// one place where "we forgot to strip it" is indistinguishable from "we meant to
+// publish it". Nothing here carries an uploader session id, an object key, a
+// bucket generation, byte or MIME metadata, an idempotency key, a reservation
+// field, moderation internals, or Album membership.
+
+/**
+ * A published photo as one guest sees another guest's contribution.
+ *
+ * There is deliberately no `originalFilename`: a filename is the uploader's
+ * device talking, and the shared gallery renders `Shared photo` instead.
+ */
+export interface GuestGalleryMediaView {
+  id: string;
+  guestName: string;
+  caption: string | null;
+  previewAvailable: boolean;
+}
+
+/**
+ * A guest's own contribution. They may see the filename they sent and how far
+ * the transfer got, because both are theirs; `deleted` is absent because a
+ * guest's own deletion is permanent and the row simply stops being listed.
+ */
+export interface GuestContributionMediaView {
+  id: string;
+  originalFilename: string;
+  caption: string | null;
+  uploadState: 'reserved' | 'stored' | 'failed';
+  previewAvailable: boolean;
+  createdAt: string;
+}
+
+/** The acknowledgement of a guest's own permanent deletion. */
+export interface GuestContributionDeletionView {
+  id: string;
+  deleted: true;
+}
+
+/** What the upload queue needs to drive one photo, and nothing else. */
+export interface UploadMediaView {
+  id: string;
+  mimeType: SupportedImageType;
+  uploadState: UploadState;
+}
+
+/**
+ * One reservation outcome. `uploadUrl` exists only for an accepted reservation
+ * that still needs its bytes, and is always a relative same-origin path.
+ */
+export type UploadBatchItemView =
+  | {
+      idempotencyKey: string;
+      status: 'accepted';
+      alreadyDelivered: boolean;
+      media: UploadMediaView;
+      uploadUrl?: string;
+      uploadUrlExpiresAt?: string;
+    }
+  | {
+      idempotencyKey: string;
+      status: 'rejected';
+      error: { code: ApiErrorCode; message: string };
+    };
+
 export interface ManagerMediaView {
   id: string;
   originalFilename: string;
@@ -278,6 +375,22 @@ export interface ManagerMediaView {
   width: number | null;
   height: number | null;
   createdAt: string;
+}
+
+/**
+ * A photo the host moved to Recently deleted.
+ *
+ * No preview, storage, object, or session field appears here: a recoverable row
+ * is retained, not delivered. The host recognizes it by name, guest, and caption,
+ * and `restoreUntil` is the server's answer about how long that stays true.
+ */
+export interface ManagerTrashedMediaView {
+  id: string;
+  originalFilename: string;
+  guestName: string;
+  caption: string | null;
+  trashedAt: string;
+  restoreUntil: string;
 }
 
 export interface ManagerGalleryMediaView {
@@ -317,8 +430,31 @@ export type AlbumEntryInput =
  * and a pick with no stored position is appended in timeline order, which is what makes
  * picking in Library land somewhere sensible without a second write.
  */
+/**
+ * Whether a retained slot can still be brought back.
+ *
+ * `expired-cleanup-pending` is not a bug and not a promise: the deadline passed,
+ * so Restore is gone, but an accepted export still holds the bytes and the slot
+ * survives until that hold releases and cleanup runs.
+ */
+export type AlbumRetainedSlotState = 'recoverable' | 'expired-cleanup-pending';
+
+/**
+ * The opaque stand-in for a picked photo the host moved to Recently deleted.
+ *
+ * This is the one Album surface allowed to name a trashed row, and it is
+ * deliberately not a photo: no image URL, caption, guest, or filename crosses
+ * here, because the point of trashing was to stop showing the photograph.
+ */
+export interface AlbumRetainedSlotView {
+  mediaId: string;
+  restoreUntil: string;
+  state: AlbumRetainedSlotState;
+}
+
 export type AlbumEntryView =
   | { kind: 'photo'; photo: ManagerGalleryMediaView }
+  | { kind: 'photo-retained'; slot: AlbumRetainedSlotView }
   | { kind: 'section'; id: string; heading: string };
 
 export interface AlbumMetadataInput {
@@ -344,11 +480,27 @@ export interface AlbumView extends AlbumMetadataInput {
   /** False until the host first commits an album; the only reconciliation signal. */
   saved: boolean;
   effectiveCoverMediaId: string | null;
+  /**
+   * The chosen cover is a photo the host moved to Recently deleted. The slot is
+   * held — a timely Restore puts the same photograph back as the cover — while
+   * `effectiveCoverMediaId` falls through to the first visible photo meanwhile.
+   */
+  coverRetained: AlbumRetainedSlotView | null;
   entries: AlbumEntryView[];
   /** Photos in the album. Sections are excluded — a divider is not a photograph. */
   photoCount: number;
+  /** Retained slots. Not photographs, but they hold both album and event capacity. */
+  retainedCount: number;
   sectionCount: number;
   totalBytes: number;
+}
+
+export interface GalleryAudienceSummaryView {
+  albumPhotoCount: number;
+  albumEntryCount: number;
+  albumLink: { active: boolean; sharedAt: string | null };
+  guestGalleryVisible: boolean;
+  guestGalleryPublishedCount: number;
 }
 
 export type PublicAlbumEntryView =

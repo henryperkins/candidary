@@ -21,7 +21,7 @@ const event: EventView = {
     available2xProfiles: [], surfaceTreatment: 'none', preparation: null,
   },
   uploadsEnabled: true, galleryVisible: true, moderationRequired: true,
-  reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128,
+  reservedMediaCount: 0, storedMediaCount: 3, reservedBytes: 0, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',

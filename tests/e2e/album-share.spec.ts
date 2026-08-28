@@ -11,7 +11,7 @@ async function openAlbum(page: Page) {
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
   const modes = page.getByRole('group', { name: 'Gallery mode' });
   await modes.getByRole('button', { name: /^Album/u }).click();
-  await expect(page.getByRole('heading', { name: 'The order guests will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
 }
 
 test('consumes a new share fragment on an already-mounted unavailable album', async ({ page }) => {
@@ -49,7 +49,7 @@ test('consumes a new share fragment on an already-mounted unavailable album', as
 });
 
 test('a manager shares, copies, opens, and stops the same fragment album link', async ({ page, context }) => {
-  const rows = makeMedia(4, 'unpublished').map((item, index) => ({
+  const rows = makeMedia(4, 'published').map((item, index) => ({
     ...item,
     originalFilename: `private-camera-${index + 1}.jpg`,
     caption: ['First dance', 'Dinner toast', 'Night portraits', 'Last song'][index]!,
@@ -75,13 +75,49 @@ test('a manager shares, copies, opens, and stops the same fragment album link', 
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await openAlbum(page);
 
-  await page.getByRole('button', { name: 'Share album' }).click();
-  const shareCode = page.locator('.album-share__link code');
-  await expect(shareCode).toContainText('/album#');
-  const shareUrl = (await shareCode.textContent())!;
+  let createRequests = 0;
+  await page.route(`**/api/manage/events/${EVENT_FIXTURE.id}/album/share`, (route) => {
+    if (route.request().method() === 'POST') createRequests += 1;
+    return route.fallback();
+  });
+  const createAction = page.getByRole('button', { name: 'Create Album link' });
+  await createAction.click();
+  let createDialog = page.getByRole('dialog', { name: 'Create the Album link?' });
+  await expect(createDialog.getByText(
+    'This link will show 4 photos and 4 published captions to people with the Album link.',
+  )).toBeVisible();
+  await expect(createDialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  expect(createRequests).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(createDialog).toHaveCount(0);
+  await expect(createAction).toBeFocused();
+  expect(createRequests).toBe(0);
+
+  await createAction.click();
+  createDialog = page.getByRole('dialog', { name: 'Create the Album link?' });
+  await createDialog.getByRole('button', { name: 'Create Album link' }).click();
+  expect(createRequests).toBe(1);
+  const copyAction = page.getByRole('button', { name: 'Copy Album link' });
+  await expect(copyAction).toBeFocused();
+  const shareToken = 'album-share-id.album-share-secret';
+  expect(await page.content()).not.toContain(shareToken);
+  await page.keyboard.press('Shift+Tab');
+  const revealAction = page.getByRole('button', { name: 'Reveal Album link' });
+  await expect(revealAction).toBeFocused();
+  await page.keyboard.press('Enter');
+  const shareInput = page.getByRole('textbox', { name: 'Album link' });
+  const shareUrl = await shareInput.inputValue();
+  expect(shareUrl).toContain('/album#');
   expect(new URL(shareUrl).origin).toBe(new URL(page.url()).origin);
-  await page.getByRole('button', { name: 'Copy album link' }).click();
-  await expect(page.getByRole('button', { name: 'Copied' })).toBeVisible();
+  const hideAction = page.getByRole('button', { name: 'Hide Album link' });
+  await expect(hideAction).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(shareInput).toHaveCount(0);
+  expect(await page.content()).not.toContain(shareToken);
+  await page.keyboard.press('Tab');
+  await expect(copyAction).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('status').filter({ hasText: 'Copied' })).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(shareUrl);
 
   await page.goto(shareUrl);
@@ -100,9 +136,30 @@ test('a manager shares, copies, opens, and stops the same fragment album link', 
   await expect(page.getByText('private-camera-1.jpg')).toHaveCount(0);
 
   await openAlbum(page);
-  await expect(page.locator('.album-share__link code')).toHaveText(shareUrl);
-  await page.getByRole('button', { name: 'Stop sharing album' }).click();
-  await expect(page.getByRole('button', { name: 'Share album' })).toBeVisible();
+  expect(await page.content()).not.toContain(shareToken);
+  await page.getByRole('button', { name: 'Reveal Album link' }).click();
+  await expect(page.getByRole('textbox', { name: 'Album link' })).toHaveValue(shareUrl);
+  let stopRequests = 0;
+  await page.route(`**/api/manage/events/${EVENT_FIXTURE.id}/album/share`, (route) => {
+    if (route.request().method() === 'DELETE') stopRequests += 1;
+    return route.fallback();
+  });
+  await page.getByRole('button', { name: 'Stop Album link', exact: true }).click();
+  let stopDialog = page.getByRole('alertdialog', { name: 'Stop the Album link?' });
+  await expect(stopDialog).toBeVisible();
+  expect(stopRequests).toBe(0);
+  await stopDialog.getByRole('button', { name: 'Keep sharing' }).click();
+  await expect(stopDialog).toHaveCount(0);
+  expect(stopRequests).toBe(0);
+  await expect(page.getByRole('textbox', { name: 'Album link' })).toHaveValue(shareUrl);
+
+  await page.getByRole('button', { name: 'Stop Album link', exact: true }).click();
+  stopDialog = page.getByRole('alertdialog', { name: 'Stop the Album link?' });
+  await expect(stopDialog).toBeVisible();
+  expect(stopRequests).toBe(0);
+  await stopDialog.getByRole('button', { name: 'Stop Album link' }).click();
+  await expect(page.getByRole('button', { name: 'Create Album link' })).toBeVisible();
+  expect(stopRequests).toBe(1);
 
   await page.goto('/album');
   await expect(page.getByRole('heading', { name: 'This album is not available.' })).toBeVisible();

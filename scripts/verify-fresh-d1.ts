@@ -142,7 +142,11 @@ SELECT name,
       (instr(sql, '(kind = ''complete'' AND album_entries_json IS NULL)') > 0) || '|' ||
       (instr(sql, '(kind = ''album'' AND album_entries_json IS NOT NULL') > 0) || '|' ||
       (instr(sql, 'json_valid(album_entries_json)') > 0) || '|' ||
-      (instr(sql, 'json_type(album_entries_json) = ''array''') > 0)
+      (instr(sql, 'json_type(album_entries_json) = ''array''') > 0) || '|' ||
+      (instr(sql, 'processed_media_count IS NULL OR processed_media_count >= 0') > 0) || '|' ||
+      (instr(sql, 'processed_bytes IS NULL OR processed_bytes >= 0') > 0) || '|' ||
+      (instr(sql, 'execution_protocol IN (''legacy'', ''attempt-v2'')') > 0) || '|' ||
+      (instr(sql, 'execution_transition >= 0') > 0)
     WHEN 'export_media_entries' THEN
       (instr(sql, 'object_bucket_generation IN (''legacy'', ''canonical'')') > 0) || '|' ||
       (instr(sql, 'declared_byte_size >= 0') > 0) || '|' ||
@@ -266,16 +270,62 @@ SELECT name,
       (instr(sql, '(kind = ''complete'' AND album_entries_json IS NULL)') > 0) || '|' ||
       (instr(sql, '(kind = ''album'' AND album_entries_json IS NOT NULL') > 0) || '|' ||
       (instr(sql, 'json_valid(album_entries_json)') > 0) || '|' ||
-      (instr(sql, 'json_type(album_entries_json) = ''array''') > 0)
+      (instr(sql, 'json_type(album_entries_json) = ''array''') > 0) || '|' ||
+      (instr(sql, 'processed_media_count IS NULL OR processed_media_count >= 0') > 0) || '|' ||
+      (instr(sql, 'processed_bytes IS NULL OR processed_bytes >= 0') > 0) || '|' ||
+      (instr(sql, 'execution_protocol IN (''legacy'', ''attempt-v2'')') > 0) || '|' ||
+      (instr(sql, 'execution_transition >= 0') > 0)
     WHEN 'export_media_entries' THEN
       (instr(sql, 'album_tail_position IS NULL OR album_tail_position >= 1') > 0) || ''
     ELSE ''
   END AS checks
 FROM sqlite_master
 WHERE type = 'table' AND name IN ('event_albums', 'export_jobs', 'export_media_entries')
-ORDER BY name;`;
+ORDER BY name;
+SELECT 'events' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk
+  FROM pragma_table_info('events') p
+  WHERE p.name IN ('recoverable_media_count', 'recoverable_bytes')
+UNION ALL
+SELECT 'media' AS tbl, p.cid, p.name AS col, p.type,
+       p."notnull" AS "notnull", p.dflt_value, p.pk
+  FROM pragma_table_info('media') p
+  WHERE p.name IN ('trashed_at', 'restore_until')
+ORDER BY tbl, cid;
+SELECT name, sql FROM sqlite_master
+  WHERE type = 'index' AND name IN (
+    'export_media_entries_source_hold',
+    'media_recently_deleted_page',
+    'media_recovery_expiry'
+  )
+ORDER BY name;
+SELECT p.cid, p.name, p.type, p."notnull", p.dflt_value, p.pk,
+       m.sql AS table_sql
+  FROM pragma_table_info('export_jobs') AS p
+  CROSS JOIN (
+    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'export_jobs'
+  ) AS m
+  WHERE name IN (
+    'processed_media_count',
+    'processed_bytes',
+    'progress_updated_at',
+    'execution_protocol',
+    'execution_transition',
+    'execution_started_at'
+  )
+ORDER BY cid;
+SELECT p.cid, p.name, p.type, p."notnull", p.dflt_value, p.pk,
+       m.sql AS table_sql, admission.singleton, admission.state,
+       admission.closed_at, admission.worker_version_id, admission.admitted_at
+  FROM pragma_table_info('export_protocol_admission') AS p
+  CROSS JOIN (
+    SELECT sql FROM sqlite_master
+    WHERE type = 'table' AND name = 'export_protocol_admission'
+  ) AS m
+  CROSS JOIN export_protocol_admission AS admission
+ORDER BY p.cid;`;
 
-const INVARIANT_STATEMENT_COUNT = 23;
+const INVARIANT_STATEMENT_COUNT = 27;
 
 /**
  * Pinned, not derived.
@@ -288,14 +338,23 @@ const INVARIANT_STATEMENT_COUNT = 23;
  * Eighteen after the Album end-to-end landing: `0016_host_private_gallery.sql`
  * establishes the favorite set, `0017_event_album.sql` stores its curated
  * order and share capability, and `0018_album_end_to_end.sql` adds album export
- * snapshots. Count and terminal schema assertions move together here.
+ * snapshots. Nineteen with `0019_media_recovery.sql`, which makes host deletion
+ * recoverable and turns an accepted export's frozen entries into a source hold.
+ * Twenty with `0020_export_progress.sql`, which adds durable progress and an
+ * attempt-owned execution ledger without reinterpreting existing jobs.
+ * Count and terminal schema assertions move together here.
  */
-const EXPECTED_MIGRATION_COUNT = 18;
+const EXPECTED_MIGRATION_COUNT = 20;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
- * existing invariant bodies and all fifteen 0015 bodies cannot drift behind a
- * name-only schema check.
+ * existing invariant bodies, all fifteen 0015 bodies, the twelve 0019 recovery
+ * and source-hold bodies, and the nine 0020 execution/progress/admission bodies
+ * cannot drift behind a name-only schema check.
+ *
+ * Two of these names are older than their bodies: 0019 replaces
+ * `media_object_write_tombstone_guard_update` and `media_stored_legacy_guard_update`
+ * to admit one exact recovery exception each, so their digests moved with it.
  * Normalization collapses whitespace and nothing else.
  */
 const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
@@ -308,8 +367,25 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   event_cover_render_set_manifest_update: '90ce5414d984e4adeeefa901a20d2e169ff0a5f80f943d922bc0e95081ab4815',
   event_cover_source_pointer_insert: 'a9fbab82a3e6ad5e3f98cae72d0c5cddddaf10a1e94d823bc0d3090fb91d7991',
   event_cover_source_pointer_update: '047746e2f68a3b5560756f3d750cc45aa78688349f922bcab86102775dea99fd',
+  events_media_capacity_guard_insert: '74a027aa4d29f775158cdbc4df807381af20836259ac5b9711e8f1f827469f4a',
+  events_media_capacity_guard_update: '2567b5a50e1878ca9089234914d774f2e38d2460c22aeb7c1aa313bb8a48f9fe',
   events_rsvp_deadline_insert: 'b96be8b8983ad7ed6d354e1bb3da6959cca61c89c09d83d796d22649d079b110',
   events_rsvp_deadline_update: '9154c51a32504396624c7d36205c11a573e53847e7a944cc2062e627ada682d5',
+  export_jobs_entryless_queued_insert: 'db6c8bfcc96c38495a512099c951055edde34a21804d3034c048ac43b310a965',
+  export_jobs_execution_insert: 'bac6ebfd3fc557bd1ba22c9caab7377e42158605edcba7cd699cb4704ef74765',
+  export_jobs_execution_update: '8d460c89a2f9f6d9af28d39d200a67ac00a83c03fd43d392754a8bf6f37ada97',
+  export_jobs_progress_insert: '19cb1439bf8e779be4ec89209b3156e7534c39d5253dfbcab3c73f886c38dc21',
+  export_jobs_progress_update: '699fbe58e3797ec7e161363adc31bd029dae3ebe0133ceb72124c3146dd2d187',
+  export_jobs_protocol_admission_insert: 'c3ab52e3135af073784434b39c6515b92a14dafc1a2b7e2bb4133e39f80efdf3',
+  export_jobs_protocol_admission_update: '77ad4f4c61686a92a95c9e5239e589dad55e8b42f2e6a92474bb1db9cd79449b',
+  export_jobs_retry_source_fence: '21a9d82803679053a9c192e256c6c52166aaf128917179ad092bbe132d55a633',
+  export_jobs_running_source_fence: 'aefa6ab749858b23d03dd9b0b4a5864b46d98e41f405762471e9fd678cd8be9d',
+  export_media_entry_suppressed_source_insert: 'c14114f4af846a5423c1d44f3e7d0c960f38558750908ba9ccc4d69076a7bdcc',
+  export_protocol_admission_no_delete: '270cdaa568501c06d2022499fe0c7826322a02c47b25bf7bd82782a89736c6a3',
+  export_protocol_admission_no_insert: 'e643ec41e0dc6c029d67cfcb89c51c544f842a92615573d0a0946f1f24aed7ed',
+  export_protocol_admission_transition: '33a3f139239e88541dc149c719896f17517c50b7a26ff93875bed8de7a4a9cc2',
+  export_source_hold_tombstone_insert: '98076937572545de2484496c323405c35f676749027d2a402df8bf0fc573211a',
+  export_source_hold_tombstone_suppress: '5ab86ae27655c8763e897ad894f91c1516c035c955f306d5e3979ca0d52a3880',
   legacy_media_scan_quarantine_permanent: '0b5ca1981e323706e28954b7197abe32276afcff737edae1484087f1058cb7aa',
   legacy_media_scan_state_permanent: '1665fa34a1ed318164fc0e7e29c2b50aa5550837b4a0249ee173b289ecc2a8b3',
   media_object_promotion_inventory_insert: 'ec75363b45f7be245506e400dca3329e06abe7f388334a6c13b01d64d237579e',
@@ -318,14 +394,18 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   media_object_promotion_verified_delete_guard: 'a79214e3498655ddfb022849cea069eea5f2921caab045e7fab2151d10d60246',
   media_object_promotion_verified_proof_immutable: '9f5ca9c55883615e9456ba100488a7ad412f611ed3fad6bac14c8c987936f026',
   media_object_write_tombstone_guard_insert: '04b87d3211dbe8be03775cc8d7d9a41c64729191b01bfbc9846e5fc1c74f1072',
-  media_object_write_tombstone_guard_update: '0911c3fdccd55ee858031b20927346ca94b5e9c2d06155622ec239aff8a7b208',
+  media_object_write_tombstone_guard_update: '7bf72b57df964e037fc2b71ed0dc2390d802d978484bd5497e6fb891b7a7171d',
   media_object_write_tombstone_immutable: '7d193fa0096335ef5fd436ddfbeface89161b1495adfc3ac2a9207d711570c2d',
   media_object_write_tombstone_inventory_insert: '2abaf6e5fde190f5a4d229494f06c3fcde4fbf4b5e9d8098e5df3e56f056fc7c',
   media_object_write_tombstone_inventory_update: 'a48894d8a612135cd7669ed54fb2b064b88244e2dc0daec29c8d1ec782612187',
   media_object_write_tombstone_permanent: '22bf8b47ebd7e82a8799c230b0c710d77fd1463814bb7c220410a653c226d2db',
+  media_recoverable_owner_tombstone_insert: 'c6d054fd31c5209d3bd26df3a496fedf281e6c221fbdeb6271f322944b64acba',
+  media_recoverable_owner_tombstone_suppress: '84d241d44248618a48da155121226a077f4101560a0cb8c0deda5dad52c6e7f1',
   media_stamp_stored_at_compat: '921740a4d74caa9802c6d862070ca3fa52f2765a5fc845adcf848c5bb0ee44c4',
   media_stored_legacy_guard_insert: '0ee130fcf9ac0a1d86d7c3ccf0a5de60218e3df16ced25b12882d913fa76939c',
-  media_stored_legacy_guard_update: '694f541afe7e73a49623d6794c085893eeb6d26f90fe6f2e131d53ea704465d5',
+  media_stored_legacy_guard_update: '1894aac1a305d5c42f633d676cccb75bf6aaec48dc433fb34c1b800240fb5c16',
+  media_trash_pair_insert: 'c8fa277cd7f21221d9e9b7e0e090957173cf2280c2f6fc2ebf1e61bc0754a2b3',
+  media_trash_pair_update: '934c187edbcb7df13af7c4a0b1e9c6249f65ad056dccb080da9fe9ad4f703bd2',
 };
 
 const EXPECTED_COVER_TABLES = [
@@ -474,6 +554,9 @@ const EXPECTED_GUESTBOOK_COLUMNS: Record<string, readonly string[]> = {
     'guestbook_prompt', 'guestbook_gallery_visible',
     // 0018, appended so every earlier ordinal is unmoved.
     'kind', 'album_entries_json',
+    // 0020, appended so every earlier ordinal is unmoved.
+    'processed_media_count', 'processed_bytes', 'progress_updated_at',
+    'execution_protocol', 'execution_transition', 'execution_started_at',
   ],
   export_media_entries: [
     'export_job_id', 'media_id', 'object_key', 'object_bucket_generation', 'original_filename',
@@ -505,6 +588,8 @@ const EXPECTED_GUESTBOOK_COLUMNS: Record<string, readonly string[]> = {
     'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
     // 0016, appended so every earlier ordinal is unmoved.
     'captured_at', 'timeline_at', 'favorited_at',
+    // 0019, appended so every earlier ordinal is unmoved.
+    'trashed_at', 'restore_until',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
@@ -537,6 +622,7 @@ const EXPECTED_GUESTBOOK_INDEXES = [
   'export_jobs.sqlite_autoindex_export_jobs_1 unique=1 partial=0',
   'export_media_entries.export_album_media_position unique=1 partial=1',
   'export_media_entries.export_media_entries_order unique=0 partial=0',
+  'export_media_entries.export_media_entries_source_hold unique=0 partial=0',
   'export_media_entries.sqlite_autoindex_export_media_entries_1 unique=1 partial=0',
   'guest_message_purge_receipts.sqlite_autoindex_guest_message_purge_receipts_1 unique=1 partial=0',
   'guest_message_rate_events.guestbook_rate_event_ip_window unique=0 partial=0',
@@ -560,7 +646,7 @@ const EXPECTED_GUESTBOOK_INDEXES = [
 const EXPECTED_GUESTBOOK_CHECKS: Record<string, string> = {
   events: '1',
   export_guestbook_entries: '1|1|1|1|1|1|1|1',
-  export_jobs: '1|1|1|1|1|1|1|1|1|1|1',
+  export_jobs: '1|1|1|1|1|1|1|1|1|1|1|1|1|1|1',
   export_media_entries: '1|1|1|1|1|1|1',
   guest_message_purge_receipts: '1',
   guest_message_rate_events: '',
@@ -627,9 +713,54 @@ const EXPECTED_ALBUM_INDEXES = [
 
 const EXPECTED_ALBUM_CHECKS: Record<string, string> = {
   event_albums: '1|1',
-  export_jobs: '1|1|1|1|1',
+  export_jobs: '1|1|1|1|1|1|1|1|1',
   export_media_entries: '1',
 };
+
+const EXPECTED_RECOVERY_COLUMNS = [
+  'events.30 recoverable_media_count INTEGER notnull=1 default=0 pk=0',
+  'events.31 recoverable_bytes INTEGER notnull=1 default=0 pk=0',
+  'media.25 trashed_at TEXT notnull=0 default=NULL pk=0',
+  'media.26 restore_until TEXT notnull=0 default=NULL pk=0',
+];
+
+const EXPECTED_RECOVERY_INDEX_SQL: Record<string, string> = {
+  export_media_entries_source_hold:
+    'CREATE INDEX export_media_entries_source_hold'
+    + ' ON export_media_entries(media_id, object_bucket_generation, object_key, export_job_id)',
+  media_recently_deleted_page:
+    'CREATE INDEX media_recently_deleted_page'
+    + ' ON media(event_id, trashed_at DESC, id DESC) WHERE trashed_at IS NOT NULL',
+  media_recovery_expiry:
+    'CREATE INDEX media_recovery_expiry'
+    + ' ON media(restore_until, id) WHERE trashed_at IS NOT NULL',
+};
+
+const EXPECTED_EXPORT_PROGRESS_COLUMNS = [
+  '30 processed_media_count INTEGER notnull=0 default=NULL pk=0',
+  '31 processed_bytes INTEGER notnull=0 default=NULL pk=0',
+  '32 progress_updated_at TEXT notnull=0 default=NULL pk=0',
+  "33 execution_protocol TEXT notnull=1 default='legacy' pk=0",
+  '34 execution_transition INTEGER notnull=1 default=0 pk=0',
+  '35 execution_started_at TEXT notnull=0 default=NULL pk=0',
+];
+
+// Exact normalized sqlite_master SQL after 0001-0020. Column pragmas prove
+// types/defaults; this digest additionally refuses weakened or extra CHECK
+// expressions that would retain every required substring.
+const EXPECTED_EXPORT_JOBS_TABLE_SQL_SHA256 =
+  '925d170970a421f21205b5cda86ff15d4da9fb1c63ac2934f041273ce39c2c30';
+
+const EXPECTED_EXPORT_PROTOCOL_ADMISSION_COLUMNS = [
+  '0 singleton INTEGER notnull=0 default=NULL pk=1',
+  '1 state TEXT notnull=1 default=NULL pk=0',
+  '2 closed_at TEXT notnull=0 default=NULL pk=0',
+  '3 worker_version_id TEXT notnull=0 default=NULL pk=0',
+  '4 admitted_at TEXT notnull=0 default=NULL pk=0',
+];
+
+const EXPECTED_EXPORT_PROTOCOL_ADMISSION_SQL_SHA256 =
+  '679de6b5cbbccf1ca778796696d6c0aa7256cee74d9f7fdec34f6a81bf2e2882';
 
 const EXPECTED_MEDIA_OBJECT_PROMOTIONS_SQL = `
 CREATE TABLE media_object_promotions (
@@ -727,6 +858,9 @@ const EXPECTED_COLUMN_NAMES = {
     'cover_config', 'cover_revision', 'cover_render_set_id',
     // 0015, appended without relabeling the historical Phase-3 schema.
     'guestbook_prompt',
+    // 0019. Recently deleted holds capacity, so its counters live beside the
+    // delivered ones rather than being derived from a scan.
+    'recoverable_media_count', 'recoverable_bytes',
   ],
   rsvpRosterBatchReceipts: [
     'event_id', 'idempotency_key', 'request_digest', 'receipt_json', 'created_at',
@@ -776,6 +910,8 @@ const EXPECTED_TERMINAL_COLUMNS: Record<keyof typeof EXPECTED_COLUMN_NAMES, Expe
       dflt_value: "'Share a wish, memory, or moment from the day.'",
       pk: 0,
     },
+    { name: 'recoverable_media_count', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+    { name: 'recoverable_bytes', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
   ],
   rsvpRosterBatchReceipts: [
     { name: 'event_id', type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 },
@@ -1305,6 +1441,116 @@ function assertAlbumChecks(values: unknown[]): void {
   }
 }
 
+function assertRecoveryColumns(values: unknown[]): void {
+  assertExactList(
+    values.map((value, index) => {
+      const row = exactRecord(
+        value,
+        ['tbl', 'cid', 'col', 'type', 'notnull', 'dflt_value', 'pk'],
+        `Recovery column ${index + 1}`,
+      );
+      if (typeof row.tbl !== 'string' || typeof row.col !== 'string'
+        || typeof row.type !== 'string'
+        || !Number.isSafeInteger(row.cid) || (row.cid as number) < 0
+        || (row.notnull !== 0 && row.notnull !== 1)
+        || (row.dflt_value !== null && typeof row.dflt_value !== 'string')
+        || !Number.isSafeInteger(row.pk) || (row.pk as number) < 0) {
+        throw new TypeError(`Recovery column ${index + 1} contains an invalid value.`);
+      }
+      return `${row.tbl}.${row.cid} ${row.col} ${row.type} notnull=${row.notnull}`
+        + ` default=${row.dflt_value ?? 'NULL'} pk=${row.pk}`;
+    }),
+    EXPECTED_RECOVERY_COLUMNS,
+    'Recovery column definitions',
+  );
+}
+
+function assertRecoveryIndexes(values: unknown[]): void {
+  const rows = values.map((value, index) => textField(
+    value,
+    ['name', 'sql'],
+    `Recovery index ${index + 1}`,
+  ));
+  const expectedNames = Object.keys(EXPECTED_RECOVERY_INDEX_SQL).sort();
+  assertExactList(rows.map((row) => row.name!), expectedNames, 'Recovery index set');
+  for (const row of rows) {
+    const normalized = row.sql!.replace(/\s+/gu, ' ').trim();
+    if (normalized !== EXPECTED_RECOVERY_INDEX_SQL[row.name!]) {
+      throw new Error(`${row.name} recovery index SQL has drifted.`);
+    }
+  }
+}
+
+function assertExportProgressColumns(values: unknown[]): void {
+  const tableSql = new Set<string>();
+  assertExactList(
+    values.map((value, index) => {
+      const row = exactRecord(
+        value,
+        ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk', 'table_sql'],
+        `Export progress column ${index + 1}`,
+      );
+      if (typeof row.name !== 'string' || typeof row.type !== 'string'
+        || typeof row.table_sql !== 'string'
+        || !Number.isSafeInteger(row.cid) || (row.cid as number) < 0
+        || (row.notnull !== 0 && row.notnull !== 1)
+        || (row.dflt_value !== null && typeof row.dflt_value !== 'string')
+        || !Number.isSafeInteger(row.pk) || (row.pk as number) < 0) {
+        throw new TypeError(`Export progress column ${index + 1} contains an invalid value.`);
+      }
+      tableSql.add(row.table_sql);
+      return `${row.cid} ${row.name} ${row.type} notnull=${row.notnull}`
+        + ` default=${row.dflt_value ?? 'NULL'} pk=${row.pk}`;
+    }),
+    EXPECTED_EXPORT_PROGRESS_COLUMNS,
+    'Export progress column definitions',
+  );
+  if (tableSql.size !== 1) throw new Error('export_jobs table SQL is inconsistent.');
+  const normalized = [...tableSql][0]!.replace(/\s+/gu, ' ').trim();
+  if (sha256(normalized) !== EXPECTED_EXPORT_JOBS_TABLE_SQL_SHA256) {
+    throw new Error('export_jobs table SQL has drifted.');
+  }
+}
+
+function assertExportProtocolAdmission(values: unknown[]): void {
+  const tableSql = new Set<string>();
+  assertExactList(
+    values.map((value, index) => {
+      const row = exactRecord(
+        value,
+        [
+          'cid', 'name', 'type', 'notnull', 'dflt_value', 'pk', 'table_sql',
+          'singleton', 'state', 'closed_at', 'worker_version_id', 'admitted_at',
+        ],
+        `Export protocol admission column ${index + 1}`,
+      );
+      if (typeof row.name !== 'string' || typeof row.type !== 'string'
+        || typeof row.table_sql !== 'string'
+        || !Number.isSafeInteger(row.cid) || (row.cid as number) < 0
+        || (row.notnull !== 0 && row.notnull !== 1)
+        || (row.dflt_value !== null && typeof row.dflt_value !== 'string')
+        || !Number.isSafeInteger(row.pk) || (row.pk as number) < 0
+        || row.singleton !== 1 || row.state !== 'legacy-open'
+        || row.closed_at !== null
+        || row.worker_version_id !== null || row.admitted_at !== null) {
+        throw new TypeError(`Export protocol admission column ${index + 1} is invalid.`);
+      }
+      tableSql.add(row.table_sql);
+      return `${row.cid} ${row.name} ${row.type} notnull=${row.notnull}`
+        + ` default=${row.dflt_value ?? 'NULL'} pk=${row.pk}`;
+    }),
+    EXPECTED_EXPORT_PROTOCOL_ADMISSION_COLUMNS,
+    'Export protocol admission column definitions',
+  );
+  if (tableSql.size !== 1) {
+    throw new Error('Export protocol admission table SQL is inconsistent.');
+  }
+  const normalized = [...tableSql][0]!.replace(/\s+/gu, ' ').trim();
+  if (sha256(normalized) !== EXPECTED_EXPORT_PROTOCOL_ADMISSION_SQL_SHA256) {
+    throw new Error('Export protocol admission table SQL has drifted.');
+  }
+}
+
 function assertTriggers(values: unknown[]): void {
   const rows = values.map((value, index) => textField(value, ['name', 'sql'], `Trigger ${index + 1}`));
   assertExactList(rows.map((row) => row.name!), Object.keys(EXPECTED_TRIGGER_SQL_SHA256), 'Trigger set');
@@ -1369,6 +1615,10 @@ export function parseWranglerInvariantOutput(
   assertAlbumForeignKeys(results[20]!);
   assertAlbumIndexes(results[21]!);
   assertAlbumChecks(results[22]!);
+  assertRecoveryColumns(results[23]!);
+  assertRecoveryIndexes(results[24]!);
+  assertExportProgressColumns(results[25]!);
+  assertExportProtocolAdmission(results[26]!);
 
   // `terminalSchema` deliberately keeps its three keys. `exactRecord` rejects
   // unknown fields, the literal recurs in four test files, and

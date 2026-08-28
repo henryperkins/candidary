@@ -46,6 +46,10 @@ const LOAD_FAILURE_DECISION = {
   EXPORT_LIMIT_EXCEEDED: decision('retry'),
   EXPORT_MEDIA_UPGRADE_REQUIRED: decision('retry'),
   EXPORT_FAILED: decision('retry'),
+  // Retrying this job cannot work — its frozen bytes are gone. The recovery is
+  // preparing the current collection, which is an ordinary action on the same
+  // surface, so this stays in the retryable family rather than escalating.
+  EXPORT_SOURCE_REMOVED: decision('retry'),
   VALIDATION_FAILED: decision('retry'),
   CSRF_INVALID: decision('retry'),
   ORIGIN_FORBIDDEN: decision('retry'),
