@@ -34,6 +34,7 @@ const SCHEDULED: EventView = {
   hostUploadAvailability: { enabled: true, reason: null },
   guestAccessExpiresAt: '2026-10-19T00:00:00Z', managementAccessExpiresAt: '2026-10-19T00:00:00Z',
   managerLinkRevision: 0,
+  managerLinkRotationAvailability: { enabled: true, reason: null },
   purgeAfter: '2026-12-19T00:00:00Z', createdAt: '2026-07-29T00:00:00Z', deletedAt: null,
   eventTimezone: 'America/Chicago',
   eventStartAt: '2026-09-19T22:00:00.000Z', eventStartTime: '17:00',
@@ -172,7 +173,7 @@ describe('manager guest uploads', () => {
       const panel = screen.getByRole('region', { name: 'Guest uploads' });
 
       expect(within(panel).getByRole('status')).toHaveTextContent(status);
-      expect(within(panel).getByRole('button', { name: label, exact: true })).toBeVisible();
+      expect(within(panel).getByRole('button', { name: label })).toBeVisible();
       expect(panel).not.toHaveTextContent(/photo delivery|reopen/iu);
 
       view.unmount();

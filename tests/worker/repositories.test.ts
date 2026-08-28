@@ -138,6 +138,25 @@ async function seedAccount(email: string) {
 }
 
 type AuthorityKind = UploadAuthority['kind'];
+type AuthorityIdentityField = 'eventSessionId' | 'hostSessionId' | 'accountId';
+
+function alterAuthorityIdentity(
+  authority: UploadAuthority,
+  field: AuthorityIdentityField,
+): UploadAuthority {
+  if (field === 'eventSessionId') {
+    if (authority.kind === 'manager-account') {
+      throw new Error('Manager-account authority has no event session.');
+    }
+    return { ...authority, eventSessionId: `${authority.eventSessionId}-different` };
+  }
+  if (authority.kind !== 'manager-account') {
+    throw new Error(`${authority.kind} authority has no ${field}.`);
+  }
+  return field === 'hostSessionId'
+    ? { ...authority, hostSessionId: `${authority.hostSessionId}-different` }
+    : { ...authority, accountId: `${authority.accountId}-different` };
+}
 
 function guestUploadAuthority(sessionId: string): UploadAuthority {
   return { kind: 'guest', actorSessionId: sessionId, eventSessionId: sessionId };
@@ -1248,10 +1267,7 @@ describe('upload authority repository and ingress fences', () => {
     async (kind, field) => {
       await seedEvent();
       const fixture = await seedAuthority(kind, 'event-a', `mixed-${kind}-${field}`);
-      const altered = {
-        ...fixture.authority,
-        [field]: `${fixture.authority[field]}-different`,
-      } as UploadAuthority;
+      const altered = alterAuthorityIdentity(fixture.authority, field);
       const repository = new MediaRepository(env.DB);
       const inputs = [
         reserveInput(fixture.authority, `mixed-${kind}-${field}-one`),

@@ -48,6 +48,7 @@ const event: EventView = {
   guestAccessExpiresAt: '2026-10-19T00:00:00Z',
   managementAccessExpiresAt: '2026-10-20T00:00:00Z',
   managerLinkRevision: 0,
+  managerLinkRotationAvailability: { enabled: true, reason: null },
   purgeAfter: '2026-12-19T00:00:00Z',
   createdAt: '2026-07-30T00:00:00Z',
   deletedAt: null,

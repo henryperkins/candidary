@@ -2745,6 +2745,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     if (
       entryActionPendingRef.current
       || entryAction !== action
+      || event === null
       || entryConfirm.trim() !== event.name
     ) return;
     const scope = eventScope.current.generation;

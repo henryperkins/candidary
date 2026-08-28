@@ -1616,7 +1616,7 @@ describe('cover upload progress', () => {
         eventId: 'event-a',
         schedule: () => () => undefined,
       }));
-      const [source, setSource] = useState<CoverSourceChoice | null>(null);
+      const [source, setSource] = useState<CoverSourceChoice | { kind: 'none' } | null>(null);
       const [composeState, setComposeState] = useState<CoverDraftSessionState>({
         status: 'idle',
         error: null,

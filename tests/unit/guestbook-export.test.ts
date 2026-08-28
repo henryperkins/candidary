@@ -456,14 +456,16 @@ describe('Manager Guestbook export downloads', () => {
   });
 
   it.each(['complete', 'album'] as const)('omits Retry for source-removed %s exports', (kind) => {
-    const Control = kind === 'complete' ? GalleryExportControl : AlbumExportControl;
-    render(createElement(Control, {
+    const props = {
       ...CONTROL_CONTEXT,
       job: exportView('failed', kind, { errorCode: 'EXPORT_SOURCE_REMOVED' }),
       onPrepare: async () => undefined,
       onDownload: async () => undefined,
       onRetry: async () => undefined,
-    }));
+    };
+    render(kind === 'complete'
+      ? createElement(GalleryExportControl, props)
+      : createElement(AlbumExportControl, props));
 
     expect(screen.queryByRole('button', { name: 'Retry this prepared export' })).toBeNull();
     expect(screen.getByRole('button', {
@@ -576,42 +578,51 @@ describe('Manager Guestbook export downloads', () => {
   });
 
   it.each([
-    [GalleryExportControl, 'Prepare current collection', 'Deliver a photo before preparing the current collection.'],
-    [AlbumExportControl, 'Prepare current Album', 'Add a photo to the Album before preparing it.'],
-  ] as const)('locally disables a current export only for a trusted zero count', (Control, label, reason) => {
-    render(createElement(Control, {
+    ['complete', 'Prepare current collection', 'Deliver a photo before preparing the current collection.'],
+    ['album', 'Prepare current Album', 'Add a photo to the Album before preparing it.'],
+  ] as const)('locally disables a current export only for a trusted zero count', (kind, label, reason) => {
+    const props = {
       ...CONTROL_CONTEXT,
       currentSource: { count: 0, freshness: 'fresh' },
-      job: exportView('ready', Control === GalleryExportControl ? 'complete' : 'album'),
+      job: exportView('ready', kind),
       onPrepare: async () => undefined,
       onDownload: async () => undefined,
       onRetry: async () => undefined,
-    }));
+    } as const;
+    render(kind === 'complete'
+      ? createElement(GalleryExportControl, props)
+      : createElement(AlbumExportControl, props));
     expect(screen.getByRole('button', { name: label })).toBeDisabled();
     expect(screen.getByText(reason)).toBeVisible();
   });
 
   it.each([
-    [GalleryExportControl, 'Download all'],
-    [AlbumExportControl, 'Download album photos'],
-  ] as const)('uses the authoritative current source for the initial %s action', (Control, label) => {
+    ['complete', 'Download all'],
+    ['album', 'Download album photos'],
+  ] as const)('uses the authoritative current source for the initial %s action', (kind, label) => {
     const callbacks = {
       onPrepare: async () => undefined,
       onDownload: async () => undefined,
       onRetry: async () => undefined,
     };
-    const view = render(createElement(Control, {
+    const emptyProps = {
       ...callbacks,
       ...CONTROL_CONTEXT,
       currentSource: { count: 0, freshness: 'fresh' },
-    }));
+    } as const;
+    const view = render(kind === 'complete'
+      ? createElement(GalleryExportControl, emptyProps)
+      : createElement(AlbumExportControl, emptyProps));
     expect(screen.getByRole('button', { name: label })).toBeDisabled();
 
-    view.rerender(createElement(Control, {
+    const staleProps = {
       ...callbacks,
       ...CONTROL_CONTEXT,
       currentSource: { count: 2, freshness: 'stale' },
-    }));
+    } as const;
+    view.rerender(kind === 'complete'
+      ? createElement(GalleryExportControl, staleProps)
+      : createElement(AlbumExportControl, staleProps));
     expect(screen.getByRole('button', { name: label })).toBeEnabled();
   });
 });

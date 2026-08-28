@@ -112,7 +112,7 @@ describe('Manager upload cleanup', () => {
 
   it('settles a nonterminal rejected replay because it proves an ambiguous item absent', async () => {
     const operations = deps({
-      reserve: vi.fn(async (item) => ({
+      reserve: vi.fn(async (item): Promise<ReservationResult> => ({
         id: item.idempotencyKey,
         status: 'rejected',
         error: 'The event has reached its photo limit.',
@@ -135,7 +135,7 @@ describe('Manager upload cleanup', () => {
         order.push('cancel');
         throw apiError('UPLOAD_FINALIZE_CONFLICT', 409);
       }),
-      reserve: vi.fn(async (item) => {
+      reserve: vi.fn(async (item): Promise<ReservationResult> => {
         order.push('reserve');
         return { id: item.idempotencyKey, status: 'delivered', mediaId: 'media-winner' };
       }),
@@ -153,7 +153,10 @@ describe('Manager upload cleanup', () => {
       cancel: vi.fn(async () => {
         throw new Error('Reception dropped out.');
       }),
-      reserve: vi.fn(async (item) => ({ id: item.idempotencyKey, status: 'canceled' })),
+      reserve: vi.fn(async (item): Promise<ReservationResult> => ({
+        id: item.idempotencyKey,
+        status: 'canceled',
+      })),
     });
 
     const result = await createManagerUploadCleanup(operations)
@@ -321,7 +324,10 @@ describe('Manager upload cleanup', () => {
       (_, index) => cleanupItem(`unattempted-${index}`, 'unattempted'),
     );
     const operations = deps({
-      reserve: vi.fn(async (item) => ({ id: item.idempotencyKey, status: 'canceled' })),
+      reserve: vi.fn(async (item): Promise<ReservationResult> => ({
+        id: item.idempotencyKey,
+        status: 'canceled',
+      })),
     });
 
     const result = await createManagerUploadCleanup(operations)

@@ -693,6 +693,7 @@ describe('Manager upload ingress ordering and one-shot cancellation', () => {
     if (!row) throw new Error('Expected reserved Manager media.');
     const original = MediaRepository.prototype.cancelReservation;
     vi.spyOn(MediaRepository.prototype, 'cancelReservation').mockImplementationOnce(async function (
+      this: MediaRepository,
       id,
       authority,
       canceledAt,
@@ -769,7 +770,7 @@ describe('Manager upload ingress ordering and one-shot cancellation', () => {
     const mediaId = reserved.item.media.id;
     const original = MediaRepository.prototype.cancelReservation;
     const cancel = vi.spyOn(MediaRepository.prototype, 'cancelReservation')
-      .mockImplementationOnce(async function (id, authority, canceledAt) {
+      .mockImplementationOnce(async function (this: MediaRepository, id, authority, canceledAt) {
         await env.DB.prepare('UPDATE event_sessions SET revoked_at = ? WHERE id = ?')
           .bind(new Date().toISOString(), authority.actorSessionId).run();
         return original.call(this, id, authority, canceledAt);

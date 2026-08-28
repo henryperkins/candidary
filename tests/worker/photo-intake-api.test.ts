@@ -511,10 +511,12 @@ describe('upload authority pause scope', () => {
         idempotencyKey: 'manager-batch-path',
       }],
     }, new Date());
+    const item = result.items[0];
+    if (!item || item.status !== 'accepted') throw new Error('Expected an accepted Manager reservation.');
 
-    expect(result.items[0]).toMatchObject({
+    expect(item).toMatchObject({
       status: 'accepted',
-      uploadUrl: `/api/manage/events/${event.id}/uploads/${result.items[0]!.media!.id}/content`,
+      uploadUrl: `/api/manage/events/${event.id}/uploads/${item.media.id}/content`,
     });
   });
 });

@@ -101,7 +101,7 @@ describe('GalleryViewer continuation', () => {
     const user = userEvent.setup();
 
     render(<UnmountingViewerHarness
-      loadNextAfter={vi.fn(async () => ({ status: 'exhausted' }))}
+      loadNextAfter={vi.fn(async (): Promise<ViewerContinuationOutcome> => ({ status: 'exhausted' }))}
       onClose={onClose}
       onPhotoChange={vi.fn()}
     />);

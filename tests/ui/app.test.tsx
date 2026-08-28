@@ -1316,6 +1316,16 @@ function historyRect(top: number, height = 40): DOMRect {
   };
 }
 
+function trackWindowScroll(setScrollY: (top: number) => void) {
+  function implementation(options?: ScrollToOptions): void;
+  function implementation(x: number, y: number): void;
+  function implementation(optionsOrX?: ScrollToOptions | number, y?: number) {
+    const top = typeof optionsOrX === 'number' ? y : optionsOrX?.top;
+    if (top !== undefined) setScrollY(top);
+  }
+  return vi.spyOn(window, 'scrollTo').mockImplementation(implementation);
+}
+
 function installHistoryAnchorRects(
   rootSelector: string,
   documentTops: Record<string, number>,
@@ -1598,9 +1608,7 @@ describe('canonical Manager location ownership', () => {
     }));
     let scrollY = 600;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    trackWindowScroll((top) => { scrollY = top; });
     const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=gallery`]);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
@@ -1660,9 +1668,7 @@ describe('canonical Manager location ownership', () => {
     }));
     let scrollY = 400;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    const scrollTo = trackWindowScroll((top) => { scrollY = top; });
     const anchor: GalleryAnchor = {
       kind: 'media',
       mediaId: 'library-return',
@@ -1733,9 +1739,7 @@ describe('canonical Manager location ownership', () => {
     }));
     let scrollY = 450;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    const scrollTo = trackWindowScroll((top) => { scrollY = top; });
     const anchor: GalleryAnchor = {
       kind: 'album-entry',
       entryId: 'photo:album-return',
@@ -1800,9 +1804,7 @@ describe('canonical Manager location ownership', () => {
     }));
     let scrollY = 400;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    const scrollTo = trackWindowScroll((top) => { scrollY = top; });
     const anchor: GalleryAnchor = {
       kind: 'media',
       mediaId: 'stale-library',
@@ -1859,9 +1861,7 @@ describe('canonical Manager location ownership', () => {
     }));
     let scrollY = 300;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    const scrollTo = trackWindowScroll((top) => { scrollY = top; });
     vi.spyOn(document.documentElement, 'scrollHeight', 'get').mockReturnValue(900);
     vi.spyOn(document.body, 'scrollHeight', 'get').mockReturnValue(800);
     vi.stubGlobal('innerHeight', 300);
@@ -2009,9 +2009,7 @@ describe('canonical Manager location ownership', () => {
     }));
     let scrollY = 500;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    trackWindowScroll((top) => { scrollY = top; });
     const libraryPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery`;
     const guestPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`;
     const originalHistoryState = window.history.state;
@@ -2095,9 +2093,7 @@ describe('canonical Manager location ownership', () => {
     vi.stubGlobal('fetch', managerHistoryFetch(historyMedia(['same-href-row']), []));
     let scrollY = 500;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    trackWindowScroll((top) => { scrollY = top; });
     const managerPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery`;
     const originalHistoryState = window.history.state;
     const originalHref = window.location.href;
@@ -2165,9 +2161,7 @@ describe('canonical Manager location ownership', () => {
     vi.stubGlobal('fetch', managerHistoryFetch(historyMedia(['keyless-forward-row']), []));
     let scrollY = 500;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    trackWindowScroll((top) => { scrollY = top; });
     const managerPath = `/manage/event/${MANAGED_EVENT.id}?section=gallery`;
     const originalHistoryState = window.history.state;
     const originalHref = window.location.href;
@@ -2691,9 +2685,7 @@ describe('canonical Manager location ownership', () => {
     }));
     let scrollY = 600;
     vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY);
-    vi.spyOn(window, 'scrollTo').mockImplementation((options?: ScrollToOptions) => {
-      scrollY = options?.top ?? scrollY;
-    });
+    trackWindowScroll((top) => { scrollY = top; });
     const router = createAppRouter([{
       pathname: `/manage/event/${MANAGED_EVENT.id}`,
       search: '?section=gallery&mode=library&unknown=held-completion',
@@ -5772,7 +5764,7 @@ describe('manager experience', () => {
       expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
       await user.click(screen.getByRole('button', { name: 'Settings' }));
 
-      await user.click(screen.getByRole('button', { name: 'Pause guest uploads', exact: true }));
+      await user.click(screen.getByRole('button', { name: 'Pause guest uploads' }));
       expect(writes).toEqual([{ action: 'pause' }]);
       expect(screen.getByText('Saving guest uploads…')).toHaveAttribute('role', 'status');
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -5792,7 +5784,7 @@ describe('manager experience', () => {
         'New guest uploads are paused. Event access, Guestbook, the Guest gallery setting, and Manager uploads are unchanged.',
       )).toHaveAttribute('role', 'status');
 
-      await user.click(screen.getByRole('button', { name: 'Resume guest uploads', exact: true }));
+      await user.click(screen.getByRole('button', { name: 'Resume guest uploads' }));
       expect(writes).toEqual([{ action: 'pause' }, { action: 'reopen' }]);
       expect(screen.getByText('Saving guest uploads…')).toHaveAttribute('role', 'status');
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -6274,7 +6266,7 @@ describe('manager experience', () => {
     });
     for (const path of reconciledPaths) {
       expect(base.calls.filter((call) => call.method === 'GET' && call.path === path))
-        .toHaveLength(readsWhilePaused.get(path));
+        .toHaveLength(readsWhilePaused.get(path) ?? 0);
     }
 
     await user.click(within(result).getByRole('button', { name: 'Copy management link' }));
