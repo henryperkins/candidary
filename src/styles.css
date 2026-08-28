@@ -780,11 +780,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 
 /* Live host intake */
-/* Intake shows one of two lists. The toggle is a filter over the same collection,
-   not a destination, so it sits with the search rather than in the nav. */
+/* Keep the alternate Intake destination close to the current list. */
 .intake-modes { margin: 20px 0 12px; display: flex; flex-wrap: wrap; gap: 8px; }
 .intake-modes button { min-height: 44px; padding: 9px 16px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--ink); font: inherit; font-size: .86rem; cursor: pointer; }
-.intake-modes button.active { border-color: var(--denim); background: var(--denim); color: var(--paper); font-weight: 700; }
 .intake-note { margin: 0 0 16px; color: var(--muted); font-size: .86rem; line-height: 1.5; }
 .intake-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 /* A retained photo is deliberately not shown as a photograph. */
@@ -814,6 +812,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .intake-search .text-button { min-width: 44px; font-size: .875rem; }
 .intake-grid .intake-photo { position: relative; padding: 0; }
 .intake-grid .intake-photo > img { width: 100%; aspect-ratio: 1.25; object-fit: cover; background: #eee4d8; }
+@media (max-width: 760px) {
+  .intake-grid .intake-photo > img { aspect-ratio: 16 / 9; }
+}
 .intake-select { position: absolute !important; inset: 0; z-index: 1; cursor: pointer; }
 .intake-select input { top: 10px; left: 10px; }
 .publication { width: fit-content; margin: 0 0 7px; padding: 4px 7px; display: block; border-radius: 999px; font-size: .6rem; font-weight: 700; letter-spacing: .04em; line-height: 1; text-transform: uppercase; }
@@ -885,10 +886,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-control-row .gallery-mode-switch { margin-top: 0; }
 .manager-gallery > .gallery-control-row + .state-card--error { width: 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .gallery-audience-summary { margin: 0; color: var(--ink); font-size: .8rem; line-height: 1.4; }
-.gallery-context-disclosure { margin-top: 4px; border-bottom: 1px solid var(--border); }
-.gallery-context-disclosure summary,
-.gallery-export__details summary { min-height: 44px; padding: 8px 2px; display: flex; align-items: center; color: var(--chestnut); font-size: .82rem; font-weight: 700; line-height: 1.35; cursor: pointer; }
-.gallery-context-disclosure > p { margin: 0 0 10px; color: var(--muted); font-size: .82rem; line-height: 1.45; }
 .manager-gallery > .workspace-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 /* Both Gallery switches are pressed-state controls in the same workspace, so the selected pill is
    declared once here rather than twice. `.filter-tabs` has no other user, and the mode switch and the
@@ -933,9 +930,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-shared .moderation-grid article .intake-card-actions .button--approve { background: var(--moss); color: white; }
 .gallery-shared .moderation-grid article .intake-card-actions .button--secondary { border-color: var(--chestnut); background: transparent; color: var(--chestnut); }
 .gallery-export { display: grid; gap: 10px; justify-items: start; }
-.gallery-export__details { width: 100%; min-width: 0; }
-.gallery-export__details summary { padding: 6px 0; }
-.gallery-export__details .gallery-export__copy { padding-bottom: 8px; }
 .gallery-export__copy { margin: 0; color: var(--muted); font-size: .85rem; }
 .gallery-export .export-state { justify-items: start; }
 .gallery-export .export-links { display: grid; gap: 8px; }
@@ -946,6 +940,23 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-search { margin: 16px 0 20px; display: grid; gap: 8px; }
 .gallery-search label { color: var(--ink); font-size: .8rem; font-weight: 700; }
 .gallery-search input { min-width: 0; min-height: 48px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); font: inherit; }
+.gallery-search__field { min-width: 0; position: relative; }
+.gallery-search__field input { width: 100%; padding-right: 54px; }
+.gallery-search__submit {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px !important;
+  position: absolute;
+  inset: 2px 2px 2px auto;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+}
+.gallery-search__submit svg { width: 20px; height: 20px; }
+.gallery-search__submit-label { display: none; }
 .gallery-search__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .gallery-search .button, .gallery-search .text-button { min-height: 48px; }
 .gallery-search__favorites[aria-pressed="true"] {
@@ -1200,6 +1211,20 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .gallery-control-row { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
   .gallery-search { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
   .gallery-search label { grid-column: 1 / -1; }
+  .gallery-search__field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+  .gallery-search__field input { padding-right: 12px; }
+  .gallery-search__submit {
+    width: auto;
+    height: auto;
+    min-height: 48px !important;
+    position: static;
+    padding: 10px 16px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--chestnut);
+  }
+  .gallery-search__submit-label { display: inline; }
 
   .manager-shell--intake {
     display: grid;
@@ -1605,7 +1630,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 .gallery-mode-switch--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .gallery-mode-switch--three button { padding: 9px 4px; font-size: .74rem; }
-.gallery-mode-note { margin: 10px 0 0; color: var(--muted); font-size: .82rem; line-height: 1.45; }
 
 /* Selection */
 .gallery-selection-controls { margin: 0 0 18px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
@@ -1685,8 +1709,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-metadata__fields > small:not(.field-error) { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
 
 .album-order-heading { margin: 22px 0 14px; display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
-.album-order-heading h3 { margin: 0; font-size: 1.2rem; letter-spacing: -.015em; }
-.album-order-heading p { margin: 3px 0 0; color: var(--muted); font-size: .8rem; line-height: 1.45; }
 .album-review-grid { margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 196px), 1fr)); gap: 14px; list-style: none; }
 .album-review-grid__photo { min-width: 0; padding: 10px; display: grid; align-content: start; gap: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); cursor: grab; }
 .album-review-grid__photo:active { cursor: grabbing; }
@@ -1765,7 +1787,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
     background: var(--paper);
   }
   .gallery-control-row .gallery-mode-switch { padding: 0; border: 0; }
-  .gallery-context-disclosure { min-width: 0; margin: 0; border-bottom: 0; }
   .gallery-header { margin: 0; padding: 0; gap: 4px; border: 0; border-radius: 0; background: transparent; }
   .gallery-export { width: 100%; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
   .gallery-export > .export-state,
@@ -1787,9 +1808,10 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .gallery-control-row { grid-template-columns: minmax(0, 1fr) auto; }
   .gallery-control-row .gallery-mode-switch { grid-column: 1 / -1; }
   .gallery-audience-summary { align-self: center; }
-  .gallery-search { grid-template-columns: minmax(0, 1fr) auto auto; align-items: end; }
+  .gallery-search { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
   .gallery-search label { grid-column: 1 / -1; }
-  .gallery-search__actions { display: contents; }
+  .gallery-search__actions { justify-content: flex-end; }
+  .gallery-search__actions:has(.text-button) { grid-column: 1 / -1; }
   .gallery-private {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);

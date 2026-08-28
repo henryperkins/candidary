@@ -9,7 +9,7 @@ async function openGallery(page: Page) {
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
 }
 
 test('Library adds and removes Album picks, then its export stays visible from queued through running to ready', async ({ page }) => {
@@ -23,9 +23,7 @@ test('Library adds and removes Album picks, then its export stays visible from q
 
   const modes = page.getByRole('group', { name: 'Gallery mode' });
   await expect(modes.getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByText(
-    'Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.',
-  )).toBeVisible();
+  await expect(page.getByText('About this Gallery view', { exact: true })).toHaveCount(0);
   const picksFilter = page.getByRole('button', { name: 'Album picks' });
   await expect(picksFilter.locator('.lucide-check')).toHaveCount(1);
 
@@ -56,7 +54,8 @@ test('Library adds and removes Album picks, then its export stays visible from q
   await expect(page.getByText('In Album')).toHaveCount(2);
 
   await modes.getByRole('button', { name: /^Album \(2\)$/u }).click();
-  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add a section' })).toBeVisible();
   await page.getByRole('button', { name: 'Download album photos' }).click();
   const exportState = page.locator('.album-export .export-state');
   await expect(exportState.getByText('Queued', { exact: true })).toBeVisible();
@@ -90,7 +89,7 @@ test('Library adds and removes Album picks, then its export stays visible from q
   await expect(liveHost.getByRole('status')).toContainText('Ready');
 
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Album \(2\)$/u }).click();
   await expect(exportState.getByText('Ready', { exact: true })).toBeVisible();
@@ -117,7 +116,7 @@ test('Guest gallery clears selection by filter and keeps one failed preview and 
 
   await expect(page.getByText(
     'Publish and Hide change what event guests see. They do not change Album membership or the Album link.',
-  )).toBeVisible();
+  )).toHaveCount(0);
   const shared = page.locator('.gallery-shared');
   await expect(shared.getByText('Preview unavailable')).toHaveCount(1);
   await expect(shared.locator('.intake-photo img')).toHaveCount(1);

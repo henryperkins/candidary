@@ -359,10 +359,21 @@ afterEach(() => {
 });
 
 describe('host private gallery', () => {
+  it('names the private workspace once and leaves Download all self-explanatory', async () => {
+    renderGallery();
+
+    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    expect(screen.queryByText('About this Gallery view')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Delivered photos stay private to hosts/u)).not.toBeInTheDocument();
+    expect(screen.queryByText('What the complete download includes')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Every delivered photo, the photo manifest/u)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download all' })).toBeVisible();
+  });
+
   it('opens the private timeline with moments, the event total, and no moderation controls', async () => {
     const { fetchMock } = renderGallery();
 
-    expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
     expect(screen.getByText('842 delivered photos')).toBeVisible();
     expect(await screen.findByText('Saturday, August 15 · 5:42–6:18 PM')).toBeVisible();
     expect(await screen.findByText('Saturday, August 15, 11:48 PM–Sunday, August 16, 12:24 AM')).toBeVisible();
@@ -375,7 +386,7 @@ describe('host private gallery', () => {
 
   it('renders the delivered photographs themselves rather than a placeholder grid', async () => {
     renderGallery();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     await waitFor(() => expect(mosaicImages()).toHaveLength(4));
     expect(mosaicImages().map((image) => image.getAttribute('src')))
@@ -413,7 +424,7 @@ describe('host private gallery', () => {
 
   it('names each tile once, on the control that opens it', async () => {
     renderGallery();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     // The photograph is decorative and the visible caption is its echo; announcing
     // the same title three times per tile is 48 tiles' worth of noise per page.
@@ -428,7 +439,7 @@ describe('host private gallery', () => {
         index === 1 ? { ...item, previewAvailable: false } : { ...item }
       )),
     });
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     expect(await screen.findByText('Preview unavailable')).toBeVisible();
     expect(mosaicImages()).toHaveLength(3);
@@ -438,7 +449,7 @@ describe('host private gallery', () => {
 
   it('falls back to the named unavailable state when a preview fails to load', async () => {
     renderGallery();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     await waitFor(() => expect(mosaicImages()).toHaveLength(4));
     fireEvent.error(mosaicImages()[0]!);
@@ -450,7 +461,7 @@ describe('host private gallery', () => {
   it('opens newest-first and refetches the stream when the host changes the order', async () => {
     const { fetchMock } = renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     const galleryOrders = () => fetchMock.mock.calls
       .map(([input]) => new URL(String(input), 'https://candidary.test'))
@@ -475,7 +486,7 @@ describe('host private gallery', () => {
   it('searches, clears, and shows the no-match state without losing the active query', async () => {
     renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     await user.type(screen.getByLabelText('Find photos'), 'Maya');
     await user.click(screen.getByRole('button', { name: 'Search' }));
@@ -979,7 +990,7 @@ describe('host private gallery', () => {
   it('announces the exact In Album result and patches a picked tile without a refetch', async () => {
     const { fetchMock } = renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     const galleryGets = () => fetchMock.mock.calls
       .filter(([input, init]) => {
@@ -1085,7 +1096,7 @@ describe('host private gallery', () => {
   it('restores the confirmed favorite state and shows a notice when a favorite write fails', async () => {
     renderGallery({ favoriteFails: true });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     await user.click(await screen.findByRole('button', { name: 'Pick First dance for the Album' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('manager action');
@@ -1268,7 +1279,7 @@ describe('host private gallery', () => {
       name: 'Gallery heading',
       ids: ['p1'],
       removeId: 'p1',
-      expected: { role: 'heading' as const, name: 'Gallery' },
+      expected: { role: 'heading' as const, name: 'Private Gallery' },
     },
   ])('establishes the filtered-Library $name fallback before pointer Undo presentation', async ({
     ids,
@@ -1404,7 +1415,7 @@ describe('host private gallery', () => {
   it('opens the immersive viewer, navigates, and restores focus on close', async () => {
     renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     const origin = await screen.findByRole('button', { name: /open first dance/i });
     await user.click(origin);
@@ -1426,7 +1437,7 @@ describe('host private gallery', () => {
   it('names the viewer position as loaded while chronological pages remain', async () => {
     renderGallery({ nextCursor: 'cursor-b' });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     await user.click(await screen.findByRole('button', { name: /open first dance/i }));
     const dialog = await screen.findByRole('dialog', { name: 'First dance' });
@@ -1439,7 +1450,7 @@ describe('host private gallery', () => {
   it('switches to the shared workspace on unpublished and back to the preserved private state', async () => {
     const { fetchMock, onStatusChange } = renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     await user.type(screen.getByLabelText('Find photos'), 'Maya');
     await user.click(screen.getByRole('button', { name: 'Search' }));
@@ -1457,7 +1468,7 @@ describe('host private gallery', () => {
     expect(screen.queryByRole('button', { name: /^Album picks/ })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Library' }));
-    expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByLabelText('Find photos')).toHaveValue('Maya');
     expect(screen.getByText('From Maya')).toBeVisible();
@@ -1516,17 +1527,10 @@ describe('host private gallery', () => {
   it('starts the complete export from the one Download all action', async () => {
     const { onPrepare } = renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
-    const exportScope = screen.getByText(/Every delivered photo, the photo manifest, and the printable and private guestbook files/);
-    expect(exportScope).not.toBeVisible();
-    expect(screen.getByText(/Search and Album picks do not change this/)).not.toBeVisible();
-    await user.click(screen.getByText('What the complete download includes', {
-      exact: true,
-      selector: 'summary',
-    }));
-    expect(exportScope).toBeVisible();
-    expect(screen.getByText(/Search and Album picks do not change this/)).toBeVisible();
+    expect(screen.queryByText('What the complete download includes')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Every delivered photo, the photo manifest/u)).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     expect(onPrepare).toHaveBeenCalledTimes(1);
     expect(onPrepare).toHaveBeenCalledWith();
@@ -1560,7 +1564,7 @@ describe('host private gallery', () => {
         errorCode: null,
       },
     });
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     expect(screen.getByText('Ready')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Get download links' })).toBeVisible();
@@ -1580,7 +1584,7 @@ describe('host private gallery', () => {
       currentSource: { count: 0, freshness: 'fresh' },
       onPrepare,
     });
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     expect(screen.getByRole('button', { name: 'Download all' })).toBeDisabled();
     expect(screen.getByText('Deliver a photo before preparing the current collection.')).toBeVisible();
@@ -1615,7 +1619,7 @@ describe('host private gallery', () => {
         errorCode: 'EXPORT_FAILED',
       },
     });
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     expect(screen.getByText('Failed')).toBeVisible();
     expect(screen.getByText(/This prepared export did not finish\./u)).toBeVisible();
@@ -1655,7 +1659,7 @@ describe('host private gallery', () => {
       onPrepare,
     });
 
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     expect(screen.getByText(/A photo in this prepared export is no longer available\. Prepare the current collection\./, {
       selector: 'span',
     })).toBeVisible();
@@ -1706,7 +1710,7 @@ describe('host private gallery', () => {
         privateGuestbook: null,
       },
     });
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     // A host planning a multi-gigabyte download needs the size before they start.
     expect(screen.getByText('Frozen size: 3.0 GB · 12 guestbook entries.')).toBeVisible();
@@ -1833,13 +1837,9 @@ describe('host private gallery', () => {
       .toHaveClass('button--secondary');
     expect(screen.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
     expect(screen.getByText('Publication choices are saved, but the Guest gallery is off.')).toBeVisible();
-    const modeNote = screen.getByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.');
-    expect(modeNote).not.toBeVisible();
-    await user.click(screen.getByText('About this Gallery view', {
-      exact: true,
-      selector: 'summary',
-    }));
-    expect(modeNote).toBeVisible();
+    expect(screen.queryByText('About this Gallery view')).not.toBeInTheDocument();
+    expect(screen.queryByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.'))
+      .not.toBeInTheDocument();
     await user.click(within(filters).getByRole('button', { name: 'Hidden' }));
     const selected = screen.getByRole('checkbox', { name: 'Select toast.jpg' });
     await user.click(selected);
@@ -1988,7 +1988,7 @@ describe('host private gallery', () => {
     expect(await screen.findByText(
       'New delivered photos appear in Live intake as event guests send them.',
     )).toBeVisible();
-    expect(document.body).not.toHaveTextContent(/private gallery|private deliveries/iu);
+    expect(document.body).not.toHaveTextContent(/private deliveries/iu);
     await user.click(await screen.findByRole('button', { name: /^Album picks/ }));
 
     expect(await screen.findByRole('heading', { name: 'No photos are In Album yet.' })).toBeVisible();
@@ -2025,7 +2025,7 @@ describe('host private gallery', () => {
     ));
     renderGallery({ galleryRows: crowded });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     await user.click(screen.getByRole('button', { name: 'Show more photos' }));
     expect(screen.getByRole('button', { name: /open p9/i })).toBeVisible();

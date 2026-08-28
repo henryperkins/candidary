@@ -880,7 +880,7 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
 }
 
 async function openAlbum(user = userEvent.setup()) {
-  await screen.findByRole('heading', { name: 'Gallery' });
+  await screen.findByRole('heading', { name: 'Private Gallery' });
   await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
     .getByRole('button', { name: /^Album/ }));
   return user;
@@ -1268,7 +1268,7 @@ describe('gallery modes', () => {
     expect(await screen.findByText(expected)).toBeVisible();
   });
 
-  it('keeps the exact live Album-link consequence visible in Library and Album', async () => {
+  it('keeps the live Album status visible without repeating its consequence copy', async () => {
     const { fetchMock } = harness({
       audienceSummary: {
         albumPhotoCount: 1,
@@ -1281,13 +1281,15 @@ describe('gallery modes', () => {
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
     const consequence = 'Album link live—later saved membership, metadata, sections, and order changes affect what people with the Album link see when they request it.';
+    const summary = 'Album: 1 photo · Link: Live · Guest gallery: On, 0 published';
 
-    await user.click(screen.getByText('About this Gallery view'));
-    expect(await screen.findByText(consequence)).toBeVisible();
+    expect(await screen.findByText(summary)).toBeVisible();
+    expect(screen.queryByText(consequence)).not.toBeInTheDocument();
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/u }));
 
-    expect(screen.getByText(consequence)).toBeVisible();
+    expect(screen.getByText(summary)).toBeVisible();
+    expect(screen.queryByText(consequence)).not.toBeInTheDocument();
   });
 
   it('keeps Library and exports usable when the first audience-summary read fails', async () => {
@@ -1379,21 +1381,24 @@ describe('gallery modes', () => {
     )).not.toBeInTheDocument();
   });
 
-  it('offers Library, Album and Guest gallery, and names each audience boundary', async () => {
+  it('offers Library, Album and Guest gallery without redundant mode explanations', async () => {
     const { fetchMock } = harness();
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
 
     const modes = screen.getByRole('group', { name: 'Gallery mode' });
     expect(within(modes).getAllByRole('button')).toHaveLength(3);
     expect(within(modes).getByRole('button', { name: 'Guest gallery' })).toBeVisible();
     expect(within(modes).queryByRole('button', { name: 'Shared' })).not.toBeInTheDocument();
-    await user.click(screen.getByText('About this Gallery view'));
-    expect(screen.getByText('Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.')).toBeVisible();
+    expect(screen.queryByText('About this Gallery view')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Delivered photos stay private to hosts/u)).not.toBeInTheDocument();
 
     await user.click(within(modes).getByRole('button', { name: /^Album/ }));
-    expect(await screen.findByText('One Album per event. Its order and sections are yours; the delivered photos stay exactly where they are.')).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Album' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Add a section' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'The order people with the Album link will see' }))
+      .not.toBeInTheDocument();
   });
 
   it('stacks the three-mode switch at the narrowest layout', () => {
@@ -1480,9 +1485,10 @@ describe('gallery modes', () => {
     const modes = await screen.findByRole('group', { name: 'Gallery mode' });
 
     await user.click(within(modes).getByRole('button', { name: 'Guest gallery' }));
-    await user.click(screen.getByText('About this Gallery view'));
+    expect(screen.queryByText('About this Gallery view')).not.toBeInTheDocument();
     expect(screen.getByText('Published photos are visible to event guests.')).toBeVisible();
-    expect(screen.getByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.')).toBeVisible();
+    expect(screen.queryByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.'))
+      .not.toBeInTheDocument();
     const unpublishedActions = screen.getByRole('button', { name: 'Publish p1.jpg' }).parentElement!;
     expect(Array.from(unpublishedActions.querySelectorAll('button')).map((button) => button.textContent?.trim()))
       .toEqual(['Publish', 'Hide']);
@@ -3155,7 +3161,9 @@ describe('the album', () => {
     const user = await openAlbum();
 
     expect(screen.getByText('People with the Album link see this. It is optional.')).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'The order people with the Album link will see' }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add a section' })).toBeVisible();
     expect(await screen.findByText('Cover · p2.jpg')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Use the first photo instead' })).toBeEnabled();
     const grid = document.querySelector('.album-review-grid');
@@ -4068,7 +4076,7 @@ describe('the album', () => {
     const onPrepare = vi.fn(noop);
     renderWorkspace(pickedHarness.fetchMock, { onPrepare });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4079,7 +4087,7 @@ describe('the album', () => {
     cleanup();
     const emptyHarness = harness();
     renderWorkspace(emptyHarness.fetchMock);
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
     expect(await screen.findByRole('button', { name: 'Download album photos' })).toBeDisabled();
@@ -4123,7 +4131,7 @@ describe('the album', () => {
     const onPrepare = vi.fn(noop);
     renderWorkspace(controlled.fetchMock, { onPrepare });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4157,7 +4165,7 @@ describe('the album', () => {
     const onPrepare = vi.fn(noop);
     renderWorkspace(controlled.fetchMock, { onPrepare });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4197,7 +4205,7 @@ describe('the album', () => {
     const onPrepare = vi.fn(noop);
     renderWorkspace(controlled.fetchMock, { onPrepare });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4291,7 +4299,7 @@ describe('the album', () => {
     };
     renderWorkspace(pickedHarness.fetchMock, { albumJob, albumDownload });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4308,7 +4316,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4349,7 +4357,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4365,7 +4373,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4380,7 +4388,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4399,7 +4407,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
     const exportControl = (await screen.findByRole('button', { name: 'Download album photos' }))
@@ -4417,7 +4425,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4444,7 +4452,7 @@ describe('the album', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4476,7 +4484,7 @@ describe('the album', () => {
     });
     const rendered = renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4520,7 +4528,7 @@ describe('the album', () => {
     const { fetchMock } = harness({ galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z')] });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 

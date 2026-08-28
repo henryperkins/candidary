@@ -1680,13 +1680,11 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     const key = selectSectionKey.current;
     if (!key) return;
     selectSectionKey.current = null;
-    const frame = window.requestAnimationFrame(() => {
-      const input = listRef.current
-        ?.querySelector<HTMLInputElement>(`[data-entry-key="${CSS.escape(key)}"] input`);
-      input?.focus();
-      input?.select();
-    });
-    return () => window.cancelAnimationFrame(frame);
+    const input = listRef.current
+      ?.querySelector<HTMLInputElement>(`[data-entry-key="${CSS.escape(key)}"] input`);
+    input?.scrollIntoView?.({ behavior: 'instant', block: 'center', inline: 'nearest' });
+    input?.focus({ preventScroll: true });
+    input?.select();
   }, [draft.entries]);
 
   function move(from: number, to: number, direction: ReorderDirection) {
@@ -2497,8 +2495,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                   </div>
                 </section>
 
-                <header className="album-order-heading">
-                  <h3 className="section-label">The order people with the Album link will see</h3>
+                <div className="album-order-heading">
                   <button type="button" className="button button--secondary" onClick={addSection}>
                     <Plus aria-hidden="true" /> Add a section
                   </button>
@@ -2511,7 +2508,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                   >
                     Reset to timeline order
                   </button>
-                </header>
+                </div>
                 <small id="album-reset-consequence">
                   Reset removes every section and can be undone for {UNDO_WINDOW_MS / 1_000} seconds.
                 </small>

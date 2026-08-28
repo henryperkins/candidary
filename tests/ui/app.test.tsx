@@ -2289,7 +2289,7 @@ describe('canonical Manager location ownership', () => {
     }]);
     render(<RouterProvider router={router} />);
 
-    await screen.findByRole('heading', { name: 'Gallery' });
+    await screen.findByRole('heading', { name: 'Private Gallery' });
     expect(await screen.findByRole('region', { name: 'Complete export' })).toHaveFocus();
   });
 
@@ -2897,7 +2897,7 @@ describe('canonical Manager location ownership', () => {
     expect(trashGets).toBe(1);
     await waitFor(() => expect(router.state.location.state).toEqual({ source: 'album-entry' }));
 
-    screen.getByRole('button', { name: /^Recently deleted/ }).focus();
+    screen.getByRole('button', { name: /^Trash/ }).focus();
     await router.navigate(-1);
     await screen.findByLabelText('Album title');
     await router.navigate(1);
@@ -2907,7 +2907,7 @@ describe('canonical Manager location ownership', () => {
     view.unmount();
     const reload = createAppRouter([`/manage/event/${MANAGED_EVENT.id}`]);
     render(<RouterProvider router={reload} />);
-    await userEvent.setup().click(await screen.findByRole('button', { name: /^Recently deleted/ }));
+    await userEvent.setup().click(await screen.findByRole('button', { name: /^Trash/ }));
     expect(await screen.findByRole('button', { name: 'Restore retained-photo.jpg' })).not.toHaveFocus();
   });
 
@@ -2990,7 +2990,7 @@ describe('canonical Manager location ownership', () => {
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: /^Recently deleted/ }));
+    await user.click(await screen.findByRole('button', { name: /^Trash/ }));
     await screen.findByRole('button', { name: 'Restore first-page.jpg' });
     await user.click(await screen.findByRole('button', { name: 'Load more' }));
     expect(await screen.findByRole('button', { name: 'Restore page-two.jpg' })).toBeVisible();
@@ -3043,7 +3043,7 @@ describe('canonical Manager location ownership', () => {
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: /^Recently deleted/ }));
+    await user.click(await screen.findByRole('button', { name: /^Trash/ }));
     await screen.findByRole('button', { name: 'Restore exhausted-first.jpg' });
     await user.click(await screen.findByRole('button', { name: 'Load more' }));
     const secondPageRestore = await screen.findByRole('button', {
@@ -3099,7 +3099,7 @@ describe('canonical Manager location ownership', () => {
     await user.click(screen.getByRole('button', { name: 'Live intake' }));
     await screen.findByRole('heading', { name: 'Live intake' });
     await act(async () => { releaseFirstTrash(); });
-    await user.click(screen.getByRole('button', { name: 'Recently deleted' }));
+    await user.click(screen.getByRole('button', { name: 'Trash' }));
 
     const restore = await screen.findByRole('button', { name: 'Restore delayed.jpg' });
     expect(restore).not.toHaveFocus();
@@ -3837,7 +3837,7 @@ describe('manager experience', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
     const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
-    await user.click(await screen.findByRole('button', { name: /Recently deleted/ }));
+    await user.click(await screen.findByRole('button', { name: /Trash/ }));
     await user.click(await screen.findByRole('button', {
       name: 'Restore restore-summary-row.jpg',
     }));
@@ -4536,11 +4536,11 @@ describe('manager experience', () => {
     await user.click(screen.getByRole('button', { name: 'Library' }));
     await user.click(await screen.findByRole('button', { name: 'Download all' }));
     expect(await screen.findByRole('alert'), 'export').toHaveTextContent('That photo changed before your update.');
-    expect(screen.getByRole('heading', { name: 'Gallery' }), 'export').toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Private Gallery' }), 'export').toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
   });
 
   /**
@@ -4911,7 +4911,7 @@ describe('manager experience', () => {
     await screen.findByRole('heading', { name: 'Live intake' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
 
     const poll = await waitFor(() => {
       const scheduled = interval.mock.calls.filter(([, delay]) => delay === 10_000).at(-1)?.[0];
@@ -6824,7 +6824,7 @@ describe('manager experience', () => {
     await user.click(galleryNavigation);
     expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
     await user.click(await screen.findByRole('checkbox', { name: /The toast/i }));
     await user.click(screen.getByRole('button', { name: 'Publish selected' }));
@@ -7904,7 +7904,7 @@ describe('Manager Intake empty states', () => {
     expect(share).toHaveClass('button--primary');
     expect(addPhotos).toHaveClass('button--secondary');
 
-    await user.click(screen.getByRole('button', { name: 'Recently deleted' }));
+    await user.click(screen.getByRole('button', { name: 'Trash' }));
     expect(await screen.findByRole('heading', { name: 'Nothing in Recently deleted.' })).toBeVisible();
     expect(screen.queryByRole('heading', { name: 'No photos yet' })).not.toBeInTheDocument();
 

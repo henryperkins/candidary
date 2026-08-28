@@ -69,7 +69,7 @@ async function stubAlbumWorkspace(page: Page, { saved = false, shareActive = fal
 async function openGallery(page: Page) {
   await page.goto(galleryUrl);
   await expect(page).toHaveURL(galleryUrl);
-  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
   await expect(page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }))
     .toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('group', { name: 'Gallery mode' })
@@ -114,7 +114,7 @@ async function openAlbumFromPicks(page: Page) {
 
 async function startAlbum(page: Page) {
   await page.getByRole('button', { name: 'Start the Album from them' }).click();
-  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
   await expect(page.getByText('10 photos In Album')).toBeVisible();
 }
 
@@ -275,7 +275,7 @@ test('album mode is keyboard-operable and respects reduced motion', async ({ pag
   const start = page.getByRole('button', { name: 'Start the Album from them' });
   await start.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
 
   const firstEntry = page.locator('.album-review-grid > li').first();
   const firstEntryName = (await firstEntry.locator('.album-review-grid__meta strong').textContent())!;
@@ -316,7 +316,7 @@ test('manager album reflows at 200 and 400 percent zoom proxies', async ({ page 
   await openGallery(page);
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Album/u }).click();
-  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
 
   for (const viewport of [
     { width: 640, height: 450, label: '200 percent' },

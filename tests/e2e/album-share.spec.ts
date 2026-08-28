@@ -11,7 +11,7 @@ async function openAlbum(page: Page) {
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
   const modes = page.getByRole('group', { name: 'Gallery mode' });
   await modes.getByRole('button', { name: /^Album/u }).click();
-  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
 }
 
 test('consumes a new share fragment on an already-mounted unavailable album', async ({ page }) => {

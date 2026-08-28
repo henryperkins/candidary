@@ -240,7 +240,7 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
     Number.parseFloat(getComputedStyle(element).scrollMarginTop));
 
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
   const managerNav = page.locator('.manager-nav');
   const controlRow = page.locator('.gallery-control-row');
   const mosaicControl = page.locator('.gallery-mosaic__open').last();
@@ -323,6 +323,98 @@ test('manager shell and media grid turn over exactly at their breakpoints', asyn
     expect(tracks[2], `utility rail width at ${width}`).toBeCloseTo(330, 0);
     expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(3);
   }
+});
+
+test('Intake photos use a compact mobile crop without shrinking card actions', async ({ page }) => {
+  await openManager(page);
+
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    const photo = page.locator('.intake-grid .intake-photo > img').first();
+    const bounds = await photo.boundingBox();
+    if (!bounds) throw new Error(`The Intake photo requires rendered bounds at ${width}.`);
+    expect(bounds.width / bounds.height, `Intake photo crop at ${width}`).toBeGreaterThanOrEqual(1.7);
+    await expectTouchTargets(
+      page,
+      '.intake-grid article:first-of-type .intake-card-actions a, .intake-grid article:first-of-type .intake-card-actions button',
+      `compact Intake card actions at ${width}`,
+    );
+    await expectContained(page, width);
+  }
+});
+
+test('Library search integrates its submit icon on mobile and keeps its desktop label', async ({ page }) => {
+  await openManager(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await destination(page, 'Gallery').click();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+
+  const searchForm = page.getByRole('search');
+  const input = searchForm.getByRole('textbox', { name: 'Find photos' });
+  const submit = searchForm.getByRole('button', { name: 'Search' });
+  const label = submit.locator('.gallery-search__submit-label');
+  const [mobileInput, mobileSubmit] = await Promise.all([input.boundingBox(), submit.boundingBox()]);
+  if (!mobileInput || !mobileSubmit) throw new Error('Mobile search requires input and submit bounds.');
+  expect(mobileSubmit.x, 'mobile Search begins inside the field').toBeGreaterThanOrEqual(mobileInput.x);
+  expect(mobileSubmit.x + mobileSubmit.width, 'mobile Search ends inside the field')
+    .toBeLessThanOrEqual(mobileInput.x + mobileInput.width + GEOMETRY_TOLERANCE);
+  expect(mobileSubmit.y, 'mobile Search begins inside the field').toBeGreaterThanOrEqual(mobileInput.y);
+  expect(mobileSubmit.y + mobileSubmit.height, 'mobile Search ends inside the field')
+    .toBeLessThanOrEqual(mobileInput.y + mobileInput.height + GEOMETRY_TOLERANCE);
+  expect(mobileSubmit.width, 'mobile Search touch width').toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  expect(mobileSubmit.height, 'mobile Search touch height').toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+  await expect(label).toHaveCount(1);
+  await expect(label).toBeHidden();
+
+  await page.setViewportSize({ width: 761, height: 900 });
+  const [desktopInput, desktopSubmit] = await Promise.all([input.boundingBox(), submit.boundingBox()]);
+  if (!desktopInput || !desktopSubmit) throw new Error('Desktop search requires input and submit bounds.');
+  expect(desktopSubmit.x, 'desktop Search follows the field')
+    .toBeGreaterThanOrEqual(desktopInput.x + desktopInput.width);
+  await expect(label).toBeVisible();
+  await expectContained(page, 761);
+});
+
+test('a new Album section enters the mobile viewport without focus-induced scrolling', async ({ page }) => {
+  const rows = makeMedia(10);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    event: { storedMediaCount: rows.length },
+    album: {
+      saved: true,
+      pickedMediaIds: rows.map(({ id }) => id),
+    },
+  });
+  await page.goto(managerUrl);
+  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await destination(page, 'Gallery').click();
+  await page.getByRole('group', { name: 'Gallery mode' })
+    .getByRole('button', { name: /^Album \(10\)$/u }).click();
+
+  const addSection = page.getByRole('button', { name: 'Add a section' });
+  await addSection.scrollIntoViewIfNeeded();
+
+  // Mobile Safari does not reliably scroll an off-screen field when focus happens
+  // after the tap's user-activation turn. Model that contract directly: revealing
+  // the new editor must not depend on the browser's focus-scroll side effect.
+  await page.evaluate(() => {
+    const nativeFocus = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function focusWithoutScroll(options?: FocusOptions) {
+      nativeFocus.call(this, { ...options, preventScroll: true });
+    };
+  });
+
+  await addSection.click();
+
+  const sectionName = page.getByLabel('Section name');
+  await expect(sectionName).toHaveValue('New section');
+  await expect(sectionName).toBeFocused();
+  const bounds = await sectionName.boundingBox();
+  if (!bounds) throw new Error('The new mobile section editor requires rendered bounds.');
+  expect(bounds.y, 'new section begins inside the mobile viewport').toBeGreaterThanOrEqual(0);
+  expect(bounds.y + bounds.height, 'new section ends inside the mobile viewport')
+    .toBeLessThanOrEqual(844);
 });
 
 // The rail is a grid item stretched to the full height of the shell. Without `align-content: start` its
@@ -695,7 +787,7 @@ test('Library first photo intersects the initial 390 by 844 viewport', async ({ 
   });
   await page.goto(managerUrl);
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
 
   const firstPhoto = page.locator('.gallery-mosaic__item').first();
   await expect(firstPhoto).toBeVisible();
@@ -722,44 +814,11 @@ test('Library first photo intersects the initial 390 by 844 viewport', async ({ 
   await expectContained(page, 390);
 
   const controlRow = page.locator('.gallery-control-row');
-  const contextDetails = page.locator('.gallery-context-disclosure');
-  expect(await contextDetails.evaluate((details) => ({
-    parentClass: details.parentElement?.className ?? null,
-    previousSiblingClass: details.previousElementSibling?.className ?? null,
-  })), 'Gallery context stays in normal flow beside the direct-child sticky row').toEqual({
-    parentClass: 'manager-gallery',
-    previousSiblingClass: 'gallery-control-row',
-  });
-  const contextSummary = contextDetails.getByText('About this Gallery view', { exact: true });
-  const contextCopy = contextDetails.getByText(
-    'Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.',
-    { exact: true },
-  );
-  const liveLinkCopy = contextDetails.getByText(/Album link live—later saved membership/u);
-  await expect(contextCopy).toBeHidden();
-  await expect(liveLinkCopy).toBeHidden();
-  expect((await measureTarget(contextSummary)).height, 'Gallery context summary height')
-    .toBeGreaterThanOrEqual(TOUCH_MINIMUM);
   const collapsedControlRow = await controlRow.boundingBox();
   if (!collapsedControlRow) throw new Error('Collapsed Gallery controls require rendered bounds.');
-  await contextSummary.focus();
-  await page.keyboard.press('Enter');
-  await expect(contextDetails).toHaveAttribute('open', '');
-  await expect(contextCopy).toBeVisible();
-  await expect(liveLinkCopy).toBeVisible();
-  await expectContained(page, 390);
-  const [contextBox, firstAfterContext, expandedControlRow] = await Promise.all([
-    contextDetails.boundingBox(),
-    firstPhoto.boundingBox(),
-    controlRow.boundingBox(),
-  ]);
-  if (!contextBox || !firstAfterContext || !expandedControlRow) {
-    throw new Error('Expanded Gallery context requires control and photo geometry.');
-  }
-  expect(expandedControlRow.height, 'expanded context does not enlarge the sticky obstruction')
-    .toBeCloseTo(collapsedControlRow.height, 1);
-  expect(contextBox.y + contextBox.height, 'expanded Gallery context does not cover the first photo')
-    .toBeLessThanOrEqual(firstAfterContext.y + 1);
+  await expect(page.getByText('About this Gallery view', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('What the complete download includes', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Download all' })).toBeVisible();
 
   const stickyTarget = page.locator('.gallery-mosaic__open').first();
   await stickyTarget.evaluate((element) => {
@@ -808,33 +867,8 @@ test('Library first photo intersects the initial 390 by 844 viewport', async ({ 
   expect(stickyTargetBox.y, 'focused mosaic control clears the actual sticky Gallery row')
     .toBeGreaterThanOrEqual(stickyControlRow.y + stickyControlRow.height - GEOMETRY_TOLERANCE);
 
-  await contextSummary.focus();
-  await page.keyboard.press('Enter');
-  await expect(contextDetails).not.toHaveAttribute('open', '');
-  await expect(contextCopy).toBeHidden();
   await page.evaluate(() => window.scrollTo(0, 0));
-
-  const exportDetails = page.locator('.gallery-export__details');
-  const exportSummary = exportDetails.getByText('What the complete download includes', { exact: true });
-  const exportCopy = exportDetails.getByText(
-    'Every delivered photo, the photo manifest, and the printable and private guestbook files. Search and Album picks do not change this.',
-    { exact: true },
-  );
-  await expect(exportCopy).toBeHidden();
-  expect((await measureTarget(exportSummary)).height, 'complete download summary height')
-    .toBeGreaterThanOrEqual(TOUCH_MINIMUM);
-  await exportSummary.focus();
-  await page.keyboard.press('Enter');
-  await expect(exportDetails).toHaveAttribute('open', '');
-  await expect(exportCopy).toBeVisible();
   await expectContained(page, 390);
-  const [exportBox, firstAfterExport] = await Promise.all([
-    exportDetails.boundingBox(),
-    firstPhoto.boundingBox(),
-  ]);
-  if (!exportBox || !firstAfterExport) throw new Error('Expanded export detail requires photo geometry.');
-  expect(exportBox.y + exportBox.height, 'expanded export detail does not cover the first photo')
-    .toBeLessThanOrEqual(firstAfterExport.y + 1);
 });
 
 test('audience failure stays below the mobile Gallery sticky row', async ({ page }) => {
@@ -879,7 +913,7 @@ test('audience failure stays below the mobile Gallery sticky row', async ({ page
     await page.setViewportSize({ width, height: 844 });
     await page.goto(managerUrl);
     await destination(page, 'Gallery').click();
-    await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
 
     const controlRow = page.locator('.gallery-control-row');
     const managerGallery = page.locator('.manager-gallery');
@@ -1006,7 +1040,7 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
   });
   await page.goto(managerUrl);
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
 
   for (const width of [320, 390]) {
     await page.setViewportSize({ width, height: 844 });
@@ -1492,12 +1526,13 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
 
   await page.getByRole('button', { name: 'Clear selection' }).click();
   await page.getByRole('button', { name: /^Album \(1\)$/u }).click();
-  await expect(page.getByRole('heading', { name: 'The order people with the Album link will see' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add a section' })).toBeVisible();
   await expectTouchTargets(page, '.gallery-album button', 'Album controls at 390');
 
   await page.getByRole('button', { name: 'Guest gallery' }).click();
-  await page.getByText('About this Gallery view', { exact: true }).click();
-  await expect(page.getByText(/Publish and Hide change what event guests see/u)).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Gallery', exact: true })).toBeVisible();
+  await expect(page.getByText(/Publish and Hide change what event guests see/u)).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Shared' })).toHaveCount(0);
   await expectTouchTargets(page, '.gallery-shared button', 'Guest-gallery controls at 390');
   const documentSize = await measureDocument(page);

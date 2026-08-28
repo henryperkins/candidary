@@ -907,14 +907,24 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   return <div ref={rootRef} className="gallery-private">
     <form className="gallery-search" role="search" onSubmit={submitSearch}>
       <label htmlFor="gallery-search-input">Find photos</label>
-      <input
-        id="gallery-search-input"
-        value={queryInput}
-        placeholder="Contributor, caption, or filename"
-        onChange={(change) => setQueryInput(change.target.value)}
-      />
+      <div className="gallery-search__field">
+        <input
+          id="gallery-search-input"
+          value={queryInput}
+          placeholder="Contributor, caption, or filename"
+          enterKeyHint="search"
+          onChange={(change) => setQueryInput(change.target.value)}
+        />
+        <button
+          type="submit"
+          className="button button--secondary gallery-search__submit"
+          aria-label="Search"
+        >
+          <Search aria-hidden="true" />
+          <span className="gallery-search__submit-label">Search</span>
+        </button>
+      </div>
       <div className="gallery-search__actions">
-        <button type="submit" className="button button--secondary">Search</button>
         {query && <button type="button" className="text-button" onClick={clearSearch}>Clear</button>}
         {/* The count lives here rather than in the tray. In the flow it covers nothing, and
             it is the one place a host can see how big the album has grown without leaving

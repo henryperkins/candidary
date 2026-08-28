@@ -318,7 +318,7 @@ describe('manager settings autosave guards', () => {
     await user.click(nav.getByRole('button', { name: 'Gallery' }));
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
-    expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
     expect(within(screen.getByRole('group', { name: 'Publication status' }))
       .getByRole('button', { name: 'Unpublished' })).toHaveClass('active');
@@ -525,7 +525,7 @@ describe('manager settings autosave guards', () => {
 
     release!();
     await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
-    expect(await screen.findByRole('heading', { name: 'Gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
   });
 
   it('always offers Leave now, so a stalled network cannot trap the host', async () => {

@@ -478,7 +478,7 @@ describe('Manager Undo provider', () => {
     origin.remove();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
 
-    expect(screen.getByRole('heading', { name: 'Gallery' })).toHaveFocus();
+    expect(screen.getByRole('heading', { name: 'Private Gallery' })).toHaveFocus();
   });
 
   it('does not steal focus when delayed confirmation finds the host on another control', () => {

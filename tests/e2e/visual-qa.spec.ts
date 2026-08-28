@@ -262,7 +262,7 @@ test('the private mosaic and the gallery export control hold their layout', asyn
   await openManager(page, 6);
   await page.setViewportSize({ width: 320, height: 844 });
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
   const mosaic = page.locator('.gallery-mosaic');
   await expect(mosaic.locator('.gallery-mosaic__item')).toHaveCount(3);
   await settle(page);

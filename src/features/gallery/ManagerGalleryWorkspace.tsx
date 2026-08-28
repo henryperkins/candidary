@@ -45,17 +45,6 @@ const MODE_LABELS: Record<GalleryMode, string> = {
   'guest-gallery': 'Guest gallery',
 };
 
-/**
- * What each mode holds, said once, where a host chooses between them. Three modes is one
- * more than most people will read a label for, and the difference that matters — which of
- * these is visible to guests — is not inferable from the names.
- */
-const MODE_NOTES: Record<GalleryMode, string> = {
-  library: 'Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.',
-  album: 'One Album per event. Its order and sections are yours; the delivered photos stay exactly where they are.',
-  'guest-gallery': 'Publish and Hide change what event guests see. They do not change Album membership or the Album link.',
-};
-
 const ignoreLoadFailure: (failure: LoadFailure) => void = () => {};
 
 function publicationResultAnnouncement(
@@ -780,7 +769,7 @@ ManagerGalleryWorkspaceProps
 
   return <section className="manager-gallery" aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading">
-      <h2 id="gallery-workspace-title">Gallery</h2>
+      <h2 id="gallery-workspace-title">{mode === 'library' ? 'Private Gallery' : 'Gallery'}</h2>
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} delivered photos</p>
     </div>
     <div className="gallery-control-row">
@@ -810,14 +799,6 @@ ManagerGalleryWorkspaceProps
       recoveryHint={audience.failure.recoveryHint}
       onRetry={() => void audience.reload()}
     />}
-    <details className="gallery-context-disclosure">
-      <summary>About this Gallery view</summary>
-      <p className="gallery-mode-note">{MODE_NOTES[mode]}</p>
-      {audienceSummary?.albumLink.active && (mode === 'library' || mode === 'album') && (
-        <p>Album link live—later saved membership, metadata, sections, and order changes affect what people with the Album link see when they request it.</p>
-      )}
-    </details>
-
     <div className="gallery-private-mode" hidden={mode !== 'library'}>
       <div className="gallery-header">
         {exports.failure && <ErrorState

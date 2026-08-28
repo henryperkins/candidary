@@ -3240,22 +3240,17 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
             className="intake-note"
           >{hostUploadUnavailableMessage}</p>}
         </div>}</div>
-        {/* A filter over Intake, not a destination of its own: Recently deleted is
-            the same collection seen from the other side, and it keeps its own
-            rows, its own cursor, and none of the live list's filters. */}
-        <div className="intake-modes" role="group" aria-label="Which photos to show">
-          <button
-            type="button"
-            aria-pressed={intakeMode === 'active'}
-            className={intakeMode === 'active' ? 'active' : ''}
-            onClick={() => chooseIntakeMode('active')}
-          >Live intake</button>
-          <button
-            type="button"
-            aria-pressed={intakeMode === 'trash'}
-            className={intakeMode === 'trash' ? 'active' : ''}
-            onClick={() => chooseIntakeMode('trash')}
-          >Recently deleted{event.recoverableMediaCount > 0 ? ` (${event.recoverableMediaCount})` : ''}</button>
+        {/* Show only the place the host can go next. The current collection is
+            already named by the heading, so repeating it as a selected control
+            adds state without adding a choice. */}
+        <div className="intake-modes">
+          {intakeMode === 'active'
+            ? <button type="button" onClick={() => chooseIntakeMode('trash')}>
+                Trash{event.recoverableMediaCount > 0 ? ` (${event.recoverableMediaCount})` : ''}
+              </button>
+            : <button type="button" onClick={() => chooseIntakeMode('active')}>
+                Live intake
+              </button>}
         </div>
         {intakeMode === 'trash'
           ? <>

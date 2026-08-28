@@ -448,7 +448,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         && new URL(response.url()).pathname
           === `/api/manage/events/${EVENT_FIXTURE.id}/media/trash`
       ));
-      await page.getByRole('button', { name: 'Recently deleted (1)' }).click();
+      await page.getByRole('button', { name: 'Trash (1)' }).click();
       await trashResponse;
     },
     async ready(page) {
@@ -719,7 +719,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
       await openGalleryMode(page, 'Album');
     },
     async ready(page) {
-      await readyHeading(page, 'The order people with the Album link will see');
+      await readyHeading(page, 'Album');
       await expect(page.getByLabel('Album title')).toHaveValue('Axe Album');
       await expect(page.locator('.album-review-grid > li')).toHaveCount(2);
       await expect(page.locator('.album-autosave-row').getByText('Saved', { exact: true }))
@@ -736,7 +736,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         album: axeAlbumRouteState(rows),
       });
       await openGalleryMode(page, 'Album');
-      await readyHeading(page, 'The order people with the Album link will see');
+      await readyHeading(page, 'Album');
       const previewResponse = page.waitForResponse((response) => (
         response.request().method() === 'GET'
         && new URL(response.url()).pathname
@@ -763,7 +763,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         album: axeAlbumRouteState(rows),
       });
       await openGalleryMode(page, 'Album');
-      await readyHeading(page, 'The order people with the Album link will see');
+      await readyHeading(page, 'Album');
       await page.getByRole('button', { name: 'Create Album link' }).click();
     },
     async ready(page) {
@@ -786,7 +786,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         }),
       });
       await openGalleryMode(page, 'Album');
-      await readyHeading(page, 'The order people with the Album link will see');
+      await readyHeading(page, 'Album');
       await page.getByRole('button', { name: 'Create Album link' }).click();
       const createResponse = page.waitForResponse((response) => (
         response.request().method() === 'POST'
@@ -821,7 +821,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         }),
       });
       await openGalleryMode(page, 'Album');
-      await readyHeading(page, 'The order people with the Album link will see');
+      await readyHeading(page, 'Album');
       await page.getByRole('button', { name: 'Stop Album link', exact: true }).click();
     },
     async ready(page) {
@@ -1042,7 +1042,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         album: axeAlbumRouteState(rows),
       });
       await openGalleryMode(page, 'Album');
-      await readyHeading(page, 'The order people with the Album link will see');
+      await readyHeading(page, 'Album');
       const title = page.getByLabel('Album title');
       await title.fill('');
       await expect(title).toHaveAttribute('aria-invalid', 'true');

@@ -167,12 +167,6 @@ export const GalleryExportControl = forwardRef<
     tabIndex={-1}
     ref={region}
   >
-    <details className="gallery-export__details">
-      <summary>What the complete download includes</summary>
-      <p className="gallery-export__copy">
-        Every delivered photo, the photo manifest, and the printable and private guestbook files. Search and Album picks do not change this.
-      </p>
-    </details>
     {!normalizedJob
       ? <>
           <button

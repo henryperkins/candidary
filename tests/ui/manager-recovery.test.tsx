@@ -484,6 +484,23 @@ describe('moving a photo to Recently deleted', () => {
 });
 
 describe('Recently deleted', () => {
+  it('shows only the alternate Intake destination', async () => {
+    const user = userEvent.setup();
+    const { fetchMock } = managerFetch({
+      event: { ...EVENT, recoverableMediaCount: 1 },
+      trash: [TRASHED],
+    });
+    await openManager(fetchMock);
+
+    expect(screen.getByRole('button', { name: 'Trash (1)' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Live intake' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Trash (1)' }));
+    await screen.findByRole('heading', { name: 'Recently deleted' });
+    expect(screen.getByRole('button', { name: 'Live intake' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Trash (1)' })).not.toBeInTheDocument();
+  });
+
   it('is a filter over Intake, and its URL never carries the live list filters', async () => {
     const user = userEvent.setup();
     const { calls, fetchMock } = managerFetch({ trash: [TRASHED] });
@@ -495,7 +512,7 @@ describe('Recently deleted', () => {
       expect(calls.some((call) => call.includes('guestName=Avery'))).toBe(true);
     });
 
-    await user.click(screen.getByRole('button', { name: /^Recently deleted/ }));
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
     await screen.findByRole('heading', { name: 'Recently deleted' });
 
     const trashCalls = calls.filter((call) => call.includes('/media/trash'));
@@ -511,7 +528,7 @@ describe('Recently deleted', () => {
     const expired = { ...TRASHED, id: 'media-9', restoreUntil: '2020-01-01T00:00:00.000Z' };
     const { fetchMock } = managerFetch({ trash: [TRASHED, expired] });
     await openManager(fetchMock);
-    await user.click(screen.getByRole('button', { name: /^Recently deleted/ }));
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
 
     const rows = await screen.findAllByRole('listitem');
     expect(rows).toHaveLength(2);
@@ -529,7 +546,7 @@ describe('Recently deleted', () => {
     const expiring = { ...TRASHED, restoreUntil: '2026-09-20T01:00:01.000Z' };
     const { fetchMock } = managerFetch({ trash: [expiring] });
     await openManager(fetchMock);
-    await user.click(screen.getByRole('button', { name: /^Recently deleted/ }));
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
 
     expect(await screen.findByRole('button', { name: /Restore/ })).toBeInTheDocument();
     await act(async () => { vi.advanceTimersByTime(1_000); });
@@ -542,7 +559,7 @@ describe('Recently deleted', () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch({ trash: [TRASHED] });
     await openManager(fetchMock);
-    await user.click(screen.getByRole('button', { name: /^Recently deleted/ }));
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
 
     expect(await screen.findByText(/still use this event's capacity/i)).toBeInTheDocument();
   });
@@ -551,7 +568,7 @@ describe('Recently deleted', () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch({ trash: [TRASHED] });
     await openManager(fetchMock);
-    await user.click(screen.getByRole('button', { name: /^Recently deleted/ }));
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
 
     await screen.findAllByRole('listitem');
     expect(screen.queryByRole('link', { name: /Download original/i })).toBeNull();
@@ -562,7 +579,7 @@ describe('Recently deleted', () => {
     const user = userEvent.setup();
     const { calls, fetchMock } = managerFetch({ trash: [TRASHED] });
     await openManager(fetchMock);
-    await user.click(screen.getByRole('button', { name: /^Recently deleted/ }));
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
 
     await user.click(await screen.findByRole('button', { name: /Restore/ }));
     await waitFor(() => {
@@ -577,7 +594,7 @@ describe('Recently deleted', () => {
     const user = userEvent.setup();
     const { calls, fetchMock } = managerFetch({ trash: [TRASHED] });
     await openManager(fetchMock);
-    await user.click(screen.getByRole('button', { name: /^Recently deleted/ }));
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
     await screen.findByRole('button', { name: 'Restore first-dance.jpg' });
     const count = (suffix: string) => calls.filter((call) => call.endsWith(suffix)).length;
     const mediaReadsBeforeRestore = calls.filter((call) => call.startsWith('GET ') && call.includes('/media')).length;
