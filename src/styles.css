@@ -1997,7 +1997,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* Two fixed bars at the same edge is the phone-only defect this avoids: the tray needs the space,
    and it arrives only when the host has already chosen what to act on. */
 @media (max-width: 760px) {
-  .manager-gallery:has(.selection-tray) .gallery-action { display: none; }
+  .manager-gallery:has(.gallery-private-mode:not([hidden]) .selection-tray, .gallery-shared-mode:not([hidden]) .selection-tray) .gallery-action { display: none; }
 }
 
 @media (min-width: 761px) {

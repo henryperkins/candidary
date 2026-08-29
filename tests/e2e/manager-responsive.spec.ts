@@ -1906,6 +1906,36 @@ test('a wide Library tray leaves the heading action visible but suppresses its m
   await expect(action).toBeHidden();
 });
 
+test('an inactive Library tray does not suppress the active Album mobile action', async ({ page }) => {
+  const rows = makeMedia(2);
+  await page.setViewportSize({ width: 760, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    event: { storedMediaCount: rows.length },
+    album: {
+      pickedMediaIds: rows.map(({ id }) => id),
+      entries: rows.map(({ id }) => ({ kind: 'photo' as const, mediaId: id })),
+      saved: true,
+    },
+  });
+  await page.goto(managerUrl);
+  await destination(page, 'Gallery').click();
+  await page.getByRole('button', { name: 'Select photos' }).click();
+  await page.getByRole('button', {
+    name: `Select ${rows[0]!.caption}, from ${rows[0]!.guestName}`,
+    exact: true,
+  }).click();
+  await expect(page.locator('.gallery-private-mode .selection-tray')).toBeVisible();
+
+  await page.getByRole('group', { name: 'Gallery mode' }).getByRole('button', { name: /^Album/u }).click();
+  await page.locator('.gallery-private-mode[hidden]').evaluate((mode) => {
+    mode.insertAdjacentHTML('beforeend', '<div class="selection-tray"></div>');
+  });
+  await expect(page.locator('.gallery-private-mode[hidden] .selection-tray')).toHaveCount(1);
+  await expect(page.locator('.workspace-heading .gallery-action')
+    .getByRole('button', { name: 'Create Album link', exact: true })).toBeVisible();
+});
+
 test('the 320px Library dock follows a child tray as its capacity copy grows', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await stubManagerRoutes(page, {
