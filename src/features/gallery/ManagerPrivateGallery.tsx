@@ -1,4 +1,4 @@
-import { Check, ListChecks, Search, X } from 'lucide-react';
+import { Check, ListChecks, Minus, Plus, Search, X } from 'lucide-react';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 import { flushSync } from 'react-dom';
 
@@ -924,36 +924,40 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
           <span className="gallery-search__submit-label">Search</span>
         </button>
       </div>
-      <div className="gallery-search__actions">
-        {query && <button type="button" className="text-button" onClick={clearSearch}>Clear</button>}
-        {/* The count lives here rather than in the tray. In the flow it covers nothing, and
-            it is the one place a host can see how big the album has grown without leaving
-            the photographs they are picking from. */}
+    </form>
+    {/* Row B. One rail, in the order a host works: narrow the set, then act on what is shown.
+        `Clear` leads because it belongs to the field directly above it. */}
+    <div className="gallery-toolbar">
+      {query && <button type="button" className="text-button" onClick={clearSearch}>Clear</button>}
+      {/* Named for the photograph the host lands on, not for the sort key: "Newest first" opens on
+          the last dance, "Earliest first" on the empty room. The word that carries that meaning is
+          too wide to sit in one row beside the picks filter and the selection verb, so it moves to
+          the accessible name — which still contains the visible word, so the two never disagree. */}
+      <div className="gallery-order" role="group" aria-label="Photo order">
         <button
           type="button"
-          className="button button--secondary gallery-search__favorites"
-          aria-pressed={favoritesOnly}
-          onClick={toggleFavorites}
-        ><Check aria-hidden="true" /> Album picks{pickCount > 0 ? ` (${pickCount})` : ''}</button>
+          aria-pressed={order === 'newest'}
+          aria-label="Newest first"
+          className={order === 'newest' ? 'active' : ''}
+          onClick={() => chooseOrder('newest')}
+        >Newest</button>
+        <button
+          type="button"
+          aria-pressed={order === 'earliest'}
+          aria-label="Earliest first"
+          className={order === 'earliest' ? 'active' : ''}
+          onClick={() => chooseOrder('earliest')}
+        >Earliest</button>
       </div>
-    </form>
-    {/* Named for the photograph the host lands on, not for the sort key. "Newest first"
-        opens on the last dance; "Earliest first" opens on the empty room. */}
-    <div className="gallery-order" role="group" aria-label="Photo order">
+      {/* The count lives here rather than in the tray. In the flow it covers nothing, and
+          it is the one place a host can see how big the album has grown without leaving
+          the photographs they are picking from. */}
       <button
         type="button"
-        aria-pressed={order === 'newest'}
-        className={order === 'newest' ? 'active' : ''}
-        onClick={() => chooseOrder('newest')}
-      >Newest first</button>
-      <button
-        type="button"
-        aria-pressed={order === 'earliest'}
-        className={order === 'earliest' ? 'active' : ''}
-        onClick={() => chooseOrder('earliest')}
-      >Earliest first</button>
-    </div>
-    <div className="gallery-selection-controls">
+        className="button button--secondary gallery-search__favorites"
+        aria-pressed={favoritesOnly}
+        onClick={toggleFavorites}
+      ><Check aria-hidden="true" /> Album picks{pickCount > 0 ? ` (${pickCount})` : ''}</button>
       <button
         type="button"
         ref={selectToggleRef}
@@ -999,8 +1003,17 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       count={selectedIds.size}
       busy={bulkBusy}
       mutationLocked={!undo.canPresent}
-      onAdd={(input) => void applyPicks(true, input)}
-      onRemove={(input) => void applyPicks(false, input)}
+      primary={{
+        label: bulkBusy ? 'Working…' : `Pick for Album (${selectedIds.size})`,
+        icon: <Plus aria-hidden="true" />,
+        onClick: (input) => void applyPicks(true, input),
+      }}
+      secondary={{
+        label: bulkBusy ? 'Working…' : `Remove from Album (${selectedIds.size})`,
+        icon: <Minus aria-hidden="true" />,
+        onClick: (input) => void applyPicks(false, input),
+      }}
+      note="Pick changes Album membership only. Remove from Album keeps every delivered photo in Library; neither action publishes to the Guest gallery."
       onClear={clearSelection}
     />}
     {viewerPhotoId !== null && viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer

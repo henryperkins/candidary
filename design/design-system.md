@@ -29,7 +29,7 @@ Candidary is editorial and intimate rather than celebratory-software generic. Tr
 | Border | `#d9cec2` |
 | Focus | `#2c5c85` |
 
-Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. The guest photo drop uses one open, calm primary canvas with a compact form surface only where selection needs structure. The guest RSVP uses the same canvas and the same card surface, so a household reaching the event before the day and a guest reaching it on the day are visibly the same product. The manager uses a 184px navigation rail carrying six destinations, an open Live intake workspace, and a 330px utility rail at wide widths; below 761px that rail becomes a six-column bar whose labels stay at the 14px control-text floor.
+Spacing follows a 4px base with primary steps `8, 12, 16, 24, 32, 48, 64, 88`. Content max width is 1440px. The guest photo drop uses one open, calm primary canvas with a compact form surface only where selection needs structure. The guest RSVP uses the same canvas and the same card surface, so a household reaching the event before the day and a guest reaching it on the day are visibly the same product. The manager uses a 184px navigation rail carrying six destinations, an open Live intake workspace, and a 330px utility rail at wide widths; below 761px that rail becomes one horizontally scrollable row of the same six destinations, whose labels stay at the 14px control-text floor. That floor is unchanged and still binding: the row scrolls sideways rather than shrinking its type to fit.
 
 ## Event theme overlay
 
@@ -319,7 +319,7 @@ Guest before-start: `The event hasn't started yet`, `{event name} begins {format
 
 Create receipt: the existing links plus `Set up guest list`. It is permitted because a new event starts with RSVP paused until the host has a validated roster — photo intake is permitted from creation and opens on the event's own schedule — so the guest list is the one thing the receipt would otherwise name no way to reach.
 
-Manager: `Candidary`, event name/date, the event's start time and time zone, the server-derived photo intake state, capacity/lifecycle facts, the active section title, and the six destination labels `Intake`, `RSVP`, `Gallery`, `Guestbook`, `Share`, `Settings`. The RSVP destination's eight totals are labelled facts derived from the server, not marketing metrics.
+Manager: `Candidary`, event name/date, the event's start time and time zone, the server-derived photo intake state, capacity/lifecycle facts, the active section title, and the six destination labels `Intake`, `RSVP`, `Gallery`, `Guestbook`, `Share`, `Settings`. The RSVP destination's eight totals and the Gallery destination's three audience states — `Album` with `{n} photos`, `Album link` as `Live` or `Off`, and `Guest gallery` as `On, {n} published` or `Off, {n} published` — are labelled facts derived from the server, not marketing metrics; so are the counts the three Gallery mode segments carry, `Library` with the delivered total, `Album` with its photo count, and `Guest gallery` with its published count or `Off`. The audience states are permitted because Gallery is the only place two independent audiences — the people holding the Album link, and the event guests — become legible on arrival; without them each audience is discoverable only by opening its own mode and holding the other in memory, which the host-gallery review ranked as its first orientation finding.
 
 Cover preparation is Manager copy below the Settings fold, so it sits outside
 this list's above-the-fold reach — but it is recorded here because it is the one
@@ -367,4 +367,6 @@ when the server projection names that profile. Runtime layer order is image,
 optional film grain, contrast scrim, then copy. A missing current image becomes
 the existing event gradient, never a broken-image icon, legacy object, or master.
 
-Apart from those entry points, no eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.
+The three Gallery audience chips are the one carve-out from the rule that closes this section. They are the single labelled `Album` / `Album link` / `Guest gallery` group beneath the Gallery mode switch, they carry only the server-derived states named in the Manager entry above, and no other destination, mode, or surface may add a second set.
+
+Apart from them and those entry points, no eyebrow, badge, pill, fake metric, pricing, account, or unrelated navigation copy may be added.

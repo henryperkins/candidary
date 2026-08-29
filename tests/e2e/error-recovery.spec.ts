@@ -363,15 +363,17 @@ test('a refused bulk publish keeps the gallery, its filter, and the selection', 
       : route.fallback();
   });
 
+  const tray = page.getByRole('region', { name: 'Guest gallery', exact: true });
   const first = page.locator('.moderation-grid article').first();
+  await page.getByRole('button', { name: 'Select photos' }).click();
   await first.getByRole('checkbox').check();
-  await expect(page.locator('#bulk-selection-status')).toHaveText('1 of 50 selected');
-  await page.getByRole('button', { name: 'Publish selected' }).click();
+  await expect(tray.locator('#bulk-selection-status strong')).toHaveText('1 of 50 selected');
+  await tray.getByRole('button', { name: 'Publish (1)' }).click();
 
   await expectRecoverableNotice(page, 'Gallery', 'retry');
   // The filter the host had chosen and the selection they had made are both still true.
   await expect(page.locator('.filter-tabs button.active')).toHaveText('Unpublished');
-  await expect(page.locator('#bulk-selection-status')).toHaveText('1 of 50 selected');
+  await expect(tray.locator('#bulk-selection-status strong')).toHaveText('1 of 50 selected');
   await expect(first.getByRole('checkbox')).toBeChecked();
 
   await page.getByRole('button', { name: 'Try again', exact: true }).click();
@@ -379,8 +381,9 @@ test('a refused bulk publish keeps the gallery, its filter, and the selection', 
   expect(bulkPayloads[0]).toMatchObject({ action: 'publish', expectedStatus: 'unpublished' });
   expect(bulkPayloads[1]).toEqual(bulkPayloads[0]);
   await expect(page.getByRole('alert')).toHaveCount(0);
-  await expect(page.locator('#bulk-selection-status'))
-    .toHaveText('0 of 50 selected');
+  // The write consumed the selection, so the tray retires rather than standing there holding a
+  // zero — which is the whole reason Guest gallery moved onto it.
+  await expect(tray).toHaveCount(0);
   await expect(page.locator('.moderation-grid article')).toHaveCount(1);
 });
 
@@ -416,15 +419,17 @@ test('a refused export request keeps the gallery and the control that asked for 
     ? route.fulfill({ status: 409, json: { ...MUTATION_REFUSED, requestId: 'request-a' } })
     : route.fallback());
 
-  const control = page.locator('.gallery-export');
+  // Found by name rather than by container: below 761 the first ask is docked to the thumb bar and
+  // the export panel holds only the status, which does not exist yet.
+  const control = page.getByRole('button', { name: 'Download all' });
   await expect(control).toBeVisible();
-  await control.getByRole('button', { name: 'Download all' }).click();
+  await control.click();
 
   const notice = page.getByRole('alert');
   await expect(notice).toContainText(MUTATION_REFUSED.message);
   await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
   // The control that asked is still there, still able to ask again, rather than a dead section.
-  await expect(control.getByRole('button', { name: 'Download all' })).toBeEnabled();
+  await expect(control).toBeEnabled();
   await expectContained(page);
 
   await page.getByRole('button', { name: 'Dismiss error', exact: true }).click();

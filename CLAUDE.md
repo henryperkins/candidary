@@ -5,15 +5,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```powershell
-npm run dev            # Vite + @cloudflare/vite-plugin — SPA and Worker run together
-npm run build          # tsc -b (app, Worker, scripts) then vite build
-npm run typecheck      # tsc -b --pretty false
-npm run typecheck:e2e  # tests/e2e + shared + Playwright config
-npm run lint           # eslint . --max-warnings=0
-npm test               # test:unit + test:worker
-npm run test:unit      # jsdom: tests/unit + tests/ui
-npm run test:worker    # workerd (vitest-pool-workers): tests/worker
-npm run test:e2e       # Playwright against a built `vite preview`
 npm run test:smoke     # one smoke case against an already-built artifact; never builds
 npm run verify:bindings    # fail if generated Worker binding types drift
 npm run build:cloudflare   # one typecheck and one Vite build; selects preview off main
@@ -38,11 +29,9 @@ npx vitest run --config vitest.worker.config.ts tests/worker/upload-api.test.ts 
 npx playwright test tests/e2e/core-journey.spec.ts --project=mobile
 ```
 
-Local secrets go in `.dev.vars` (copy `.dev.vars.example`). The ten independent values are
-`TOKEN_HMAC_KEY`, `SESSION_HMAC_KEY`, `GUEST_TOKEN_ENCRYPTION_KEY`, `LOGIN_HMAC_KEY`,
-`ENTRY_HMAC_KEY`, `ENTRY_ENCRYPTION_KEY`, `RSVP_LOOKUP_HMAC_KEY`, `GUEST_MESSAGE_HMAC_KEY`,
-`ALBUM_SHARE_HMAC_KEY`, and `ALBUM_SHARE_ENCRYPTION_KEY`. Every encryption key decodes from unpadded
-base64url to exactly 32 bytes; `ALBUM_SHARE_HMAC_KEY` contains at least 32 random bytes. The entry,
+Local secrets go in `.dev.vars` (copy `.dev.vars.example`), whose ten independent key values are
+each generated separately. Every encryption key decodes from unpadded base64url to exactly 32
+bytes; `ALBUM_SHARE_HMAC_KEY` contains at least 32 random bytes. The entry,
 RSVP, Guestbook, and album-share key material protects persisted data: rotating one without a
 coordinated re-encryption, re-digest, re-HMAC, or invalidation migration breaks persisted behavior.
 Ordinary guest-grant and session rotation must leave them alone. Preview and production album-share
@@ -53,15 +42,12 @@ Local `vite dev` reads this file, while production builds explicitly omit it fro
 
 One Cloudflare Worker (`worker/index.ts`) serves everything: a Hono API, the React SPA via the `ASSETS`
 binding, daily cleanup and hourly notification-dispatch scheduled jobs, and the exported
-`ExportWorkflow`, `CoverRenderWorkflow`, and `CoverBackfillWorkflow` classes. Bindings are `DB` (D1),
-`MEDIA_BUCKET` (private R2), `IMAGES`, `EXPORT_WORKFLOW`, `COVER_RENDER_WORKFLOW`,
-`COVER_BACKFILL_WORKFLOW`, `EMAIL`, `HOST_AUTH_RATE_LIMIT`, `RSVP_LOOKUP_RATE_LIMIT`,
-`GUEST_MESSAGE_RATE_LIMIT`, and `ASSETS`.
-`CF_VERSION_METADATA` exposes Cloudflare's deployed Worker version metadata.
+`ExportWorkflow`, `CoverRenderWorkflow`, and `CoverBackfillWorkflow` classes. Its bindings are
+declared in `wrangler.jsonc`; the R2 buckets are private, and `CF_VERSION_METADATA` exposes
+Cloudflare's deployed Worker version metadata.
 
-Three build TypeScript projects share one repo: `tsconfig.app.json` (`src`, `tests/unit`, `tests/ui`),
-`tsconfig.worker.json` (`worker`, `tests/worker`), and `tsconfig.scripts.json` (build and operational
-scripts plus Vite/Vitest configuration). The app and Worker projects include `shared/`, which is imported by relative
+Three build TypeScript projects share one repo — `tsconfig.app.json`, `tsconfig.worker.json`, and
+`tsconfig.scripts.json`. The app and Worker projects include `shared/`, which is imported by relative
 path (`../../shared/constants`) from either side — there are no path aliases. The separate
 `tsconfig.e2e.json` covers `tests/e2e`, `shared`, and `playwright.config.ts`; run
 `npm run typecheck:e2e` because `npm run typecheck` does not include it. Routine deployment is the

@@ -5,7 +5,9 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ReactElement,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
@@ -41,6 +43,12 @@ interface GalleryExportControlProps {
   onRetry(job: ExportView): Promise<void>;
   /** Retained while call sites move to Manager's one live owner; controls render no live nodes. */
   live?: boolean;
+  /**
+   * The workspace's fixed action bar, when this control owns the active mode. The current primary
+   * action renders there instead of in flow — the same element with a different parent, so its
+   * ref, focus contract and pending state are untouched.
+   */
+  actionDock?: HTMLElement | null;
   onAnnouncement?(message: string): void;
 }
 
@@ -75,6 +83,7 @@ export const GalleryExportControl = forwardRef<
   onPrepare,
   onDownload,
   onRetry,
+  actionDock,
   onAnnouncement,
 }, ref) {
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
@@ -105,6 +114,15 @@ export const GalleryExportControl = forwardRef<
   const prepareDisabled = pendingAction !== null || waitMessage !== null || currentSourceEmpty;
   const prepareReason = waitMessage
     ?? (currentSourceEmpty ? 'Deliver a photo before preparing the current collection.' : null);
+
+  // One element, two possible parents — never two copies. Only the first ask moves: `Download all`
+  // is the mode's action and has no status to keep it company yet, while the ready job's links, a
+  // retry and a fresh snapshot are each a follow-up to a state the panel is displaying, and a
+  // button docked at the far edge of the screen from the sentence explaining it reads as a
+  // different control.
+  const dockPrepare = !normalizedJob && actionDock ? actionDock : null;
+  const place = (control: ReactElement) =>
+    dockPrepare === null ? control : createPortal(control, dockPrepare);
 
   useImperativeHandle(ref, () => ({
     focusIntendedAction() {
@@ -169,7 +187,7 @@ export const GalleryExportControl = forwardRef<
   >
     {!normalizedJob
       ? <>
-          <button
+          {place(<button
             ref={initialPrepare}
             type="button"
             className="button button--primary"
@@ -177,7 +195,7 @@ export const GalleryExportControl = forwardRef<
             onClick={() => run('prepare', onPrepare)}
           >
             <Download aria-hidden="true" /> {pendingAction === 'prepare' ? 'Preparing download…' : 'Download all'}
-          </button>
+          </button>)}
           {prepareReason === null ? null : <p className="gallery-export__copy">{prepareReason}</p>}
         </>
       : <div className="export-state">

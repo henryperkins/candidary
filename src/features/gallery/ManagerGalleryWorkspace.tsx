@@ -22,6 +22,7 @@ import {
   GalleryExportControl,
   type GalleryExportControlHandle,
 } from './GalleryExportControl';
+import { useGalleryDock } from './gallery-dock';
 import { galleryPhotoTitle } from './gallery-timeline';
 import {
   ManagerAlbum,
@@ -43,6 +44,17 @@ const MODE_LABELS: Record<GalleryMode, string> = {
   library: 'Library',
   album: 'Album',
   'guest-gallery': 'Guest gallery',
+};
+
+/**
+ * The rule for the mode, read once. It sits under the mode's content rather than above it:
+ * standing between the switch and the first control it was a collapsed paragraph inside the
+ * first screen, which is the space the photographs are owed.
+ */
+const MODE_NOTES: Record<GalleryMode, string> = {
+  library: 'Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.',
+  album: 'One Album per event. Its order and sections are yours; the delivered photos stay exactly where they are.',
+  'guest-gallery': 'Publish and Hide change what event guests see. They do not change Album membership or the Album link.',
 };
 
 const ignoreLoadFailure: (failure: LoadFailure) => void = () => {};
@@ -767,33 +779,81 @@ ManagerGalleryWorkspaceProps
     currentSharedSelectionChange.current?.([]);
   }, [mode, sharedSelected.length]);
 
-  return <section className="manager-gallery" aria-labelledby="gallery-workspace-title">
+  // One stable host prevents the active mode's primary control from being recreated at 760/761.
+  // CSS changes the host from heading chrome to the phone dock; the owning mode always portals its
+  // one applicable control here, preserving that control's ref, pending state, and focus.
+  const [actionDock, setActionDock] = useState<HTMLDivElement | null>(null);
+
+  const rootRef = useRef<HTMLElement>(null);
+  useGalleryDock(rootRef);
+
+  const modeCount = (value: GalleryMode): string | null => {
+    switch (value) {
+      case 'library':
+        return event.storedMediaCount.toLocaleString();
+      case 'album':
+        return audienceSummary === null ? null : audienceSummary.albumPhotoCount.toLocaleString();
+      case 'guest-gallery':
+        if (audienceSummary === null) return null;
+        return guestGalleryVisible
+          ? audienceSummary.guestGalleryPublishedCount.toLocaleString()
+          : 'Off';
+    }
+  };
+
+  return <section className="manager-gallery" ref={rootRef} aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading">
       <h2 id="gallery-workspace-title">{mode === 'library' ? 'Private Gallery' : 'Gallery'}</h2>
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} delivered photos</p>
+      <div className="gallery-action" ref={setActionDock} />
     </div>
     <div className="gallery-control-row">
       <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
-        {(['library', 'album', 'guest-gallery'] as const).map((value) => (
-          <button
+        {/* The counts live in the switch so it answers how many, and where, without costing a
+            second row on a phone. */}
+        {(['library', 'album', 'guest-gallery'] as const).map((value) => {
+          const count = modeCount(value);
+          return <button
             type="button"
             key={value}
             disabled={externalLeaveActive && value !== mode}
             aria-pressed={mode === value}
+            /* Named rather than left to be assembled: how a label and a sub-line are joined into
+               one accessible name is engine-dependent, and `Album0` is not what this says. */
+            aria-label={count === null ? MODE_LABELS[value] : `${MODE_LABELS[value]}, ${count}`}
             className={mode === value ? 'active' : ''}
             onClick={() => onModeChange(value)}
-          >{MODE_LABELS[value]}{value === 'album' && pickCount > 0 ? ` (${pickCount})` : ''}</button>
-        ))}
+          >{MODE_LABELS[value]}
+            {count !== null && <span className="gallery-mode-switch__count">{count}</span>}
+          </button>;
+        })}
       </div>
-      {audienceSummary && <p className="gallery-audience-summary">
-        Album: {audienceSummary.albumPhotoCount} {audienceSummary.albumPhotoCount === 1 ? 'photo' : 'photos'}
-        {' · '}Link: {audienceSummary.albumLink.active ? 'Live' : 'Off'}
-        {' · '}Guest gallery: {guestGalleryVisible ? 'On' : 'Off'}, {audienceSummary.guestGalleryPublishedCount} published
-      </p>}
-      {!audienceSummary && !audience.failure && (
-        <p className="gallery-audience-summary">Loading audience status…</p>
-      )}
     </div>
+    {/* The audience facts are read on arrival, not consulted while scrolling, so they sit in the
+        flow below the switch rather than inside the pinned band — the mode is the only thing worth
+        pinning, and this line was costing every mode roughly a third of that band.
+
+        Three labelled facts, never blended into one sentence: an event has two independent
+        audiences, and a host has to be able to read either without opening the mode it belongs to.
+        Below 761 the switch above already carries the Album count and the Guest gallery state, so
+        those two restate it and stand down; the Album link is the one fact the switch cannot say. */}
+    {audienceSummary && <dl className="gallery-audience">
+      <div className="gallery-audience__fact gallery-audience__fact--restated">
+        <dt>Album</dt>
+        <dd>{audienceSummary.albumPhotoCount} {audienceSummary.albumPhotoCount === 1 ? 'photo' : 'photos'}</dd>
+      </div>
+      <div className="gallery-audience__fact">
+        <dt>Album link</dt>
+        <dd>{audienceSummary.albumLink.active ? 'Live' : 'Off'}</dd>
+      </div>
+      <div className="gallery-audience__fact gallery-audience__fact--restated">
+        <dt>Guest gallery</dt>
+        <dd>{guestGalleryVisible ? 'On' : 'Off'}, {audienceSummary.guestGalleryPublishedCount} published</dd>
+      </div>
+    </dl>}
+    {!audienceSummary && !audience.failure && (
+      <p className="gallery-audience-summary">Loading audience status…</p>
+    )}
     {audience.failure && <ErrorState
       message={audience.failure.message}
       recoveryHint={audience.failure.recoveryHint}
@@ -818,6 +878,7 @@ ManagerGalleryWorkspaceProps
           onDownload={exports.onDownload}
           onRetry={exports.onRetry}
           live={false}
+          actionDock={mode === 'library' ? actionDock : null}
         />
       </div>
       <ManagerPrivateGallery
@@ -867,6 +928,7 @@ ManagerGalleryWorkspaceProps
         onAccessFailure={onAlbumAccessFailure}
         onAnnouncement={setAnnouncement}
         onAnchorReady={reportAlbumAnchorReady}
+        actionDock={actionDock}
       />
     </div>}
 
@@ -951,7 +1013,13 @@ ManagerGalleryWorkspaceProps
         onOpenSettings={shared.onOpenSettings}
         settingsBlocked={shared.settingsBlocked}
         onAnnouncement={setAnnouncement}
+        actionDock={mode === 'guest-gallery' ? actionDock : null}
       />
     </div>
+
+    <details className="gallery-context-disclosure">
+      <summary>About this Gallery view</summary>
+      <p>{MODE_NOTES[mode]}</p>
+    </details>
     </section>;
 });

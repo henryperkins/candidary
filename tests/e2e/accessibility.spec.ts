@@ -54,7 +54,9 @@ const NOTE = {
 const MANAGER_SECTIONS = [
   { name: 'Intake', heading: 'Live intake' },
   { name: 'RSVP', heading: 'Guest list and RSVPs' },
-  { name: 'Gallery', heading: 'Gallery' },
+  // Library is the mode the workspace opens in, and it names itself: `Private Gallery` over the
+  // delivered photographs, `Gallery` once a mode with an audience is chosen.
+  { name: 'Gallery', heading: 'Private Gallery' },
   { name: 'Guestbook', heading: 'Guestbook from the day' },
   { name: 'Share', heading: 'Share your event' },
   { name: 'Settings', heading: 'Settings' },
@@ -243,10 +245,34 @@ async function openManagerLinkRotationConfirmation(page: Page) {
   await page.getByRole('button', { name: 'Rotate manager link' }).click();
 }
 
+// Each segment carries its own count now — `Library 3`, `Album 2`, `Guest gallery Off` — so the
+// label alone no longer names one exactly. Anchored at the start instead, which is as strict about
+// the label as `exact` was while admitting the count the switch appends, and which still resolves
+// before the audience response arrives and the counts exist.
+function galleryModeSegment(page: Page, mode: 'Library' | 'Album' | 'Guest gallery') {
+  return page.getByRole('group', { name: 'Gallery mode' })
+    .getByRole('button', { name: new RegExp(`^${mode}\\b`, 'u') });
+}
+
 async function openGalleryMode(page: Page, mode: 'Library' | 'Album' | 'Guest gallery') {
   await openManagerSection(page, 'Gallery');
-  await page.getByRole('group', { name: 'Gallery mode' })
-    .getByRole('button', { name: mode }).click();
+  await galleryModeSegment(page, mode).click();
+}
+
+// Album's details fold closed below 761 so the order starts near the top, and the body is
+// conditionally rendered — the title, the description and the cover do not exist until it opens.
+// From 761 the fold already stands open and there is nothing to press, so this is the same call at
+// either width and the fixture scans the same document.
+async function openAlbumDetails(page: Page) {
+  const summary = page.getByRole('button', { name: 'Album details' });
+  // The fold is a phone affordance: from 761 the fields stand open and the control that would
+  // reveal them is not rendered at all, so there is nothing to press and nothing to assert.
+  if (await summary.count() === 0) {
+    await expect(page.locator('.album-metadata__body')).toBeVisible();
+    return;
+  }
+  if (await summary.getAttribute('aria-expanded') === 'false') await summary.click();
+  await expect(summary).toHaveAttribute('aria-expanded', 'true');
 }
 
 async function scanManagerFixture(page: Page, fixture: ManagerAxeFixture) {
@@ -254,6 +280,16 @@ async function scanManagerFixture(page: Page, fixture: ManagerAxeFixture) {
     await installViteRefreshGlobals(page);
     await fixture.setup(page);
     await fixture.ready(page);
+    // Audit from the top of the surface. `target-size` reports a control as obscured whenever a
+    // sticky header happens to cover part of it, so a scan taken wherever the last interaction
+    // left the page measures the scroll offset rather than the design — and the same fixture
+    // passes or fails on how tall the header is that day.
+    await page.evaluate(() => {
+      const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+      document.documentElement.style.scrollBehavior = 'auto';
+      window.scrollTo(0, 0);
+      document.documentElement.style.scrollBehavior = previousScrollBehavior;
+    });
     await expectNoAxeViolations(page, fixture.name);
   } finally {
     await fixture.cleanup?.(page);
@@ -610,8 +646,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
       await openGalleryMode(page, 'Library');
     },
     async ready(page) {
-      await expect(page.getByRole('group', { name: 'Gallery mode' })
-        .getByRole('button', { name: 'Library', exact: true }))
+      await expect(galleryModeSegment(page, 'Library'))
         .toHaveAttribute('aria-pressed', 'true');
       const mosaic = page.locator('.gallery-mosaic__item');
       await expect(mosaic).toHaveCount(3);
@@ -720,6 +755,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
     },
     async ready(page) {
       await readyHeading(page, 'Album');
+      await openAlbumDetails(page);
       await expect(page.getByLabel('Album title')).toHaveValue('Axe Album');
       await expect(page.locator('.album-review-grid > li')).toHaveCount(2);
       await expect(page.locator('.album-autosave-row').getByText('Saved', { exact: true }))
@@ -903,6 +939,9 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         });
         await openGuestGalleryFilter(page, 'unpublished');
         await readyGuestGalleryFilter(page, 'unpublished', rows);
+        // Per-card checkboxes exist only while selecting, so the Guest gallery's own rail verb is
+        // what puts them on screen — the same `Select photos` contract Library already carries.
+        await page.getByRole('button', { name: 'Select photos' }).click();
         await page.getByRole('checkbox', { name: 'Select Axe unpublished photo 1' }).check();
         await page.getByRole('checkbox', { name: 'Select Axe unpublished photo 2' }).check();
         const bulkRequest = page.waitForRequest((request) => (
@@ -912,7 +951,8 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         ));
         await Promise.all([
           bulkRequest,
-          page.getByRole('button', { name: 'Publish selected' }).click(),
+          page.getByRole('region', { name: 'Guest gallery', exact: true })
+            .getByRole('button', { name: 'Publish (2)' }).click(),
         ]);
         // As above, arm the response waiter only after both the action and held request are known
         // to exist, so cleanup cannot mask an earlier setup failure.
@@ -923,13 +963,19 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
         ));
       },
       async ready(page) {
-        const bulkBar = page.locator('.gallery-shared .bulk-bar');
-        await expect(bulkBar).toHaveAttribute('aria-busy', 'true');
-        await expect(bulkBar.locator('#bulk-selection-status')).toHaveText('2 of 50 selected');
-        const publishing = bulkBar.getByRole('button', { name: 'Publishing…' });
+        // The always-on bulk bar is gone. The shared selection tray carries the Guest gallery's two
+        // verbs, and it took the busy state and `#bulk-selection-status` with them.
+        const tray = page.getByRole('region', { name: 'Guest gallery', exact: true });
+        await expect(tray).toHaveAttribute('aria-busy', 'true');
+        // Still the `aria-describedby` target a capacity-blocked checkbox points at, so its new
+        // home — the tray's count — is what is asserted rather than merely the message.
+        await expect(tray.locator('#bulk-selection-status strong')).toHaveText('2 of 50 selected');
+        const publishing = tray.getByRole('button', { name: 'Publishing…' });
         await expect(publishing).toBeDisabled();
-        await expect(publishing).toHaveAttribute('aria-busy', 'true');
-        await expect(bulkBar.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+        // `aria-busy` moved from the retired container onto the region, so the write is announced
+        // once, by the tray, and not a second time by the verb inside it.
+        await expect(tray.locator('[aria-busy]')).toHaveCount(0);
+        await expect(tray.getByRole('button', { name: 'Hide (2)' })).toBeDisabled();
       },
       async cleanup() {
         releaseBulk();
@@ -1043,11 +1089,19 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
       });
       await openGalleryMode(page, 'Album');
       await readyHeading(page, 'Album');
+      await openAlbumDetails(page);
       const title = page.getByLabel('Album title');
       await title.fill('');
       await expect(title).toHaveAttribute('aria-invalid', 'true');
-      await page.getByRole('group', { name: 'Gallery mode' })
-        .getByRole('button', { name: 'Library', exact: true }).click();
+      // An invalid title holds the fold open wherever the refusal is raised, so the field, its
+      // message and its `aria-invalid` cannot be folded away from the host asked to fix them.
+      // A phone must not be able to fold an invalid title away from the host asked to fix it. From
+      // 761 the fields never fold, so there is no control to assert against.
+      const invalidTitleFold = page.getByRole('button', { name: 'Album details' });
+      if (await invalidTitleFold.count() > 0) {
+        await expect(invalidTitleFold).toHaveAttribute('aria-expanded', 'true');
+      }
+      await galleryModeSegment(page, 'Library').click();
     },
     async ready(page) {
       const prompt = page.getByRole('region', { name: 'Album changes are not saved yet' });
@@ -2414,9 +2468,9 @@ test('manager Album Preview and the public Album keep their heading hierarchy ax
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { level: 2, name: 'Gallery', exact: true })).toHaveCount(1);
-  await page.getByRole('group', { name: 'Gallery mode' })
-    .getByRole('button', { name: /^Album/u }).click();
+  await expect(page.getByRole('heading', { level: 2, name: 'Private Gallery', exact: true }))
+    .toHaveCount(1);
+  await galleryModeSegment(page, 'Album').click();
   const createAction = page.getByRole('button', { name: 'Create Album link' });
   await createAction.click();
   const createDialog = page.getByRole('dialog', { name: 'Create the Album link?' });

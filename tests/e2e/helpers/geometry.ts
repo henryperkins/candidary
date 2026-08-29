@@ -80,12 +80,38 @@ export async function measureSeparation(first: Locator, second: Locator) {
 
 // Descendants whose painted box leaves the viewport sideways, named so a failure says which ones.
 // Rects ignore clipping, so this still reports content an `overflow: hidden` ancestor has swallowed.
+// A horizontal scroll container is the one exception: parking content off-screen is what it is for and
+// a swipe brings that content back, so the phone nav's off-screen destinations are not lost. The
+// scroller itself is measured like anything else — one that leaves the viewport is still a bug — and a
+// scroller that has already escaped exempts nothing, because a swipe cannot reach past the edge.
 export async function measureViewportEscapes(locator: Locator) {
   return locator.evaluate((container) => {
     const viewportWidth = document.documentElement.clientWidth;
+    const contained = (rect: DOMRect) => rect.left >= -1 && rect.right <= viewportWidth + 1;
+    // Both halves matter: `overflow-y: auto` alone computes `overflow-x: auto` too, so only a box whose
+    // content actually overruns its own scrollport is scrollable sideways.
+    const scrollsSideways = (element: Element) => {
+      const { overflowX } = getComputedStyle(element);
+      return (overflowX === 'auto' || overflowX === 'scroll') && element.scrollWidth > element.clientWidth + 1;
+    };
+    // The nearest such ancestor decides, and the walk stops at `body`: the page root scrolls the
+    // document itself, which `measureDocument` already asserts, and it may not excuse anything here.
+    const reachableByScrolling = (element: Element, rect: DOMRect) => {
+      for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        if (!scrollsSideways(parent) || !contained(parent.getBoundingClientRect())) continue;
+        const escapesLeft = rect.left < -1;
+        const escapesRight = rect.right > viewportWidth + 1;
+        // A horizontal scroller starts at inline-start, so it can reveal only inline-end overflow.
+        // RTL reverses the physical side without weakening containment of the scrollport itself.
+        return getComputedStyle(parent).direction === 'rtl'
+          ? escapesLeft && !escapesRight
+          : escapesRight && !escapesLeft;
+      }
+      return false;
+    };
     return Array.from(container.querySelectorAll<HTMLElement>('*')).flatMap((element) => {
       const rect = element.getBoundingClientRect();
-      return rect.width > 0 && (rect.left < -1 || rect.right > viewportWidth + 1)
+      return rect.width > 0 && !contained(rect) && !reachableByScrolling(element, rect)
         ? [{ selector: `${element.tagName.toLowerCase()}.${element.getAttribute('class') ?? ''}`, left: rect.left, right: rect.right }]
         : [];
     });
