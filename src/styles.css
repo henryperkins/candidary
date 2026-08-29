@@ -1994,9 +1994,16 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* Before a job exists the panel's only child is the action, which is docked below 761 — an empty
    bordered region announcing `Complete export` is chrome for a state that has no status yet. */
 .gallery-export:empty { display: none; }
-/* Two fixed bars at the same edge is the defect this avoids: the tray needs the space, and it
-   arrives only when the host has already chosen what to act on. */
-.manager-gallery:has(.selection-tray) .gallery-action { display: none; }
+/* Two fixed bars at the same edge is the phone-only defect this avoids: the tray needs the space,
+   and it arrives only when the host has already chosen what to act on. */
+@media (max-width: 760px) {
+  .manager-gallery:has(.selection-tray) .gallery-action { display: none; }
+}
+
+@media (min-width: 761px) {
+  .gallery-action { position: static; inset: auto; z-index: auto; flex: 0 0 auto; padding: 0; align-items: baseline; background: transparent; backdrop-filter: none; border: 0; }
+  .gallery-action .button { flex: 0 0 auto; min-height: 44px; }
+}
 
 /* Album's details are context — a host opens the Album to reorder it, not to retype its title — so
    on a phone they fold closed on arrival and the order starts near the top. */

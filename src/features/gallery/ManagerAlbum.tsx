@@ -2477,7 +2477,11 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                     aria-controls="album-metadata-body"
                     onClick={() => setAlbumDetailsOpen((current) => !current)}
                   >Album details</button>
-                  {albumDetailsExpanded && <div className="album-metadata__body" id="album-metadata-body">
+                  {albumDetailsExpanded && <div
+                    className="album-metadata__body"
+                    id="album-metadata-body"
+                    onFocusCapture={() => setAlbumDetailsOpen(true)}
+                  >
                     <div className="album-cover">
                       {effectiveCover
                         ? failedPreviewIds.has(effectiveCover.id)

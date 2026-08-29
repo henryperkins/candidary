@@ -50,7 +50,6 @@ function dockedExtent(root: HTMLElement): number {
 export function useGalleryDock(rootRef: RefObject<HTMLElement | null>): void {
   const written = useRef<string | null>(null);
   const observed = useRef<HTMLElement | null>(null);
-  const resizeObserver = useRef<ResizeObserver | null>(null);
 
   const measure = useRef(() => {});
   measure.current = () => {
@@ -80,8 +79,18 @@ export function useGalleryDock(rootRef: RefObject<HTMLElement | null>): void {
     // jsdom has no ResizeObserver — the resize listener and the mutation watch still carry the
     // cases a rendered test can produce.
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(remeasure);
-    resizeObserver.current = observer;
     observer?.observe(shell);
+    const retargetDock = () => {
+      // A selection tray suppresses the action host and owns the real reservation. Prefer it even
+      // though the stable host appears earlier in the workspace heading.
+      const docked = root.querySelector<HTMLElement>('.selection-tray')
+        ?? root.querySelector<HTMLElement>('.gallery-action');
+      if (docked === observed.current) return;
+      if (observed.current !== null) observer?.unobserve(observed.current);
+      observed.current = docked;
+      if (docked !== null) observer?.observe(docked);
+    };
+    retargetDock();
 
     // The tray belongs to Library and Guest gallery, not to this workspace, so its arrival is a
     // subtree mutation rather than a render here. Only dock nodes are worth a re-measure — a
@@ -95,35 +104,27 @@ export function useGalleryDock(rootRef: RefObject<HTMLElement | null>): void {
     };
     const mutations = new MutationObserver((records) => {
       for (const record of records) {
-        if (touchesDock(record.addedNodes) || touchesDock(record.removedNodes)) {
+        const dockIdentityChanged = record.type === 'attributes'
+          && record.target instanceof HTMLElement
+          && record.target.matches(DOCK_SELECTORS);
+        if (dockIdentityChanged || touchesDock(record.addedNodes) || touchesDock(record.removedNodes)) {
+          retargetDock();
           remeasure();
           return;
         }
       }
     });
-    mutations.observe(root, { childList: true, subtree: true });
+    mutations.observe(root, { attributes: true, attributeFilter: ['class'], childList: true, subtree: true });
 
     window.addEventListener('resize', remeasure);
     return () => {
       window.removeEventListener('resize', remeasure);
       mutations.disconnect();
       observer?.disconnect();
-      resizeObserver.current = null;
       observed.current = null;
       written.current = null;
       shell.style.removeProperty('--gallery-dock');
     };
   }, [rootRef]);
 
-  // Re-target the element observer whenever the docked element changes identity.
-  useLayoutEffect(() => {
-    const root = rootRef.current;
-    const observer = resizeObserver.current;
-    if (root === null || observer === null) return;
-    const docked = root.querySelector<HTMLElement>(DOCK_SELECTORS);
-    if (docked === observed.current) return;
-    if (observed.current !== null) observer.unobserve(observed.current);
-    observed.current = docked;
-    if (docked !== null) observer.observe(docked);
-  });
 }

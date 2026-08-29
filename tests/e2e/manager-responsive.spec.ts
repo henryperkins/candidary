@@ -1809,3 +1809,162 @@ test('gallery-off keeps published captions out of Shared and labels them precise
   await expect(page.getByText('Not currently visible to event guests')).toBeVisible();
   await expect(page.locator('.manager-guestbook__list > li')).toHaveCount(1);
 });
+
+test('Album metadata fields keep focus when 761 narrows to the phone fold', async ({ page }) => {
+  const rows = makeMedia(2);
+  await page.setViewportSize({ width: 761, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    event: { storedMediaCount: rows.length },
+    album: {
+      pickedMediaIds: rows.map(({ id }) => id),
+      entries: rows.map(({ id }) => ({ kind: 'photo' as const, mediaId: id })),
+      saved: true,
+    },
+  });
+  await page.goto(managerUrl);
+  await destination(page, 'Gallery').click();
+  await page.getByRole('group', { name: 'Gallery mode' }).getByRole('button', { name: /^Album/u }).click();
+
+  const details = page.getByRole('button', { name: 'Album details' });
+  for (const label of ['Album title', 'Description'] as const) {
+    await page.setViewportSize({ width: 761, height: 844 });
+    const field = page.getByLabel(label);
+    await field.focus();
+    await expect(field).toBeFocused();
+
+    await page.setViewportSize({ width: 760, height: 844 });
+    await expect(details).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('#album-metadata-body')).toBeVisible();
+    await expect(page.getByLabel(label)).toBeFocused();
+  }
+});
+
+test('Gallery primary actions keep one focused control in their stable host across 760 and 761', async ({ page }) => {
+  const rows = makeMedia(2);
+  await page.setViewportSize({ width: 761, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    event: { storedMediaCount: rows.length, galleryVisible: false },
+    album: {
+      pickedMediaIds: rows.map(({ id }) => id),
+      entries: rows.map(({ id }) => ({ kind: 'photo' as const, mediaId: id })),
+      saved: true,
+    },
+  });
+  await page.goto(managerUrl);
+  await destination(page, 'Gallery').click();
+
+  const modes = page.getByRole('group', { name: 'Gallery mode' });
+  const host = page.locator('.workspace-heading .gallery-action');
+  for (const [mode, actionName] of [
+    ['Library', 'Download all'],
+    ['Album', 'Create Album link'],
+    ['Guest gallery', 'Open settings'],
+  ] as const) {
+    await modes.getByRole('button', { name: new RegExp(`^${mode}`, 'u') }).click();
+    const action = page.getByRole('button', { name: actionName, exact: true });
+    await expect(action).toBeVisible();
+    await action.focus();
+    await expect(action).toBeFocused();
+
+    for (const width of [760, 761]) {
+      await page.setViewportSize({ width, height: 844 });
+      const current = page.getByRole('button', { name: actionName, exact: true });
+      await expect(current).toHaveCount(1);
+      await expect(current).toBeEnabled();
+      await expect(current).toBeFocused();
+      await expect(host.getByRole('button', { name: actionName, exact: true })).toHaveCount(1);
+    }
+  }
+});
+
+test('a wide Library tray leaves the heading action visible but suppresses its mobile dock', async ({ page }) => {
+  const rows = makeMedia(2);
+  await page.setViewportSize({ width: 761, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: rows, nextCursor: null } },
+    event: { storedMediaCount: rows.length },
+  });
+  await page.goto(managerUrl);
+  await destination(page, 'Gallery').click();
+  await page.getByRole('button', { name: 'Select photos' }).click();
+  await page.getByRole('button', {
+    name: `Select ${rows[0]!.caption}, from ${rows[0]!.guestName}`,
+    exact: true,
+  }).click();
+
+  const tray = page.getByRole('region', { name: 'Album' });
+  const actionHost = page.locator('.workspace-heading .gallery-action');
+  const action = actionHost.getByRole('button', { name: 'Download all', exact: true });
+  await expect(tray).toBeVisible();
+  await expect(action).toBeVisible();
+
+  await page.setViewportSize({ width: 760, height: 844 });
+  await expect(tray).toBeVisible();
+  await expect(actionHost).toHaveCSS('position', 'fixed');
+  await expect(action).toBeHidden();
+});
+
+test('the 320px Library dock follows a child tray as its capacity copy grows', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: makeMedia(1), nextCursor: null } },
+    event: { storedMediaCount: 1 },
+  });
+  await page.goto(managerUrl);
+  await destination(page, 'Gallery').click();
+  await page.locator('.gallery-private').evaluate((library) => {
+    library.insertAdjacentHTML('beforeend', `
+      <div class="selection-tray" role="region" aria-label="Album">
+        <div class="selection-tray__inner">
+          <div class="selection-tray__count"><strong>1 of 50 selected</strong><span>Pick photos for the Album.</span></div>
+          <div class="selection-tray__actions"><button type="button">Pick for Album (1)</button></div>
+        </div>
+      </div>
+    `);
+  });
+  const tray = page.getByRole('region', { name: 'Album' });
+  await expect(tray).toContainText('1 of 50 selected');
+  await expect.poll(() => page.locator('.manager-shell').evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).getPropertyValue('--gallery-dock')),
+  )).toBeGreaterThan(0);
+  const initialReservation = await page.locator('.manager-shell').evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).getPropertyValue('--gallery-dock')),
+  );
+
+  await tray.locator('strong').evaluate((element) => {
+    element.textContent = '50 of 50 selected. Remove one to choose another.';
+  });
+  await expect.poll(() => page.locator('.manager-shell').evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).getPropertyValue('--gallery-dock')),
+  )).toBeGreaterThan(initialReservation);
+
+  await tray.evaluate((element) => element.remove());
+  await expect(tray).toHaveCount(0);
+});
+
+test('viewport escape measurement only exempts overflow reachable from its scroller side', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.setContent(`
+    <style>
+      #escape-fixtures { position: relative; width: 320px; }
+      .escape-fixture { position: relative; width: 200px; height: 40px; overflow-x: auto; overflow-y: hidden; }
+      .escape-fixture::after { content: ''; position: absolute; top: 0; left: 300px; width: 1px; height: 1px; }
+      .escape-target { position: absolute; top: 0; width: 80px; height: 20px; }
+      .right { left: 250px; }
+      .left { left: -80px; }
+    </style>
+    <div id="escape-fixtures">
+      <div id="ltr-reachable" class="escape-fixture"><div class="escape-target right"></div></div>
+      <div id="ltr-unreachable" class="escape-fixture"><div class="escape-target left"></div></div>
+      <div id="rtl-reachable" class="escape-fixture" dir="rtl"><div class="escape-target left"></div></div>
+      <div id="rtl-unreachable" class="escape-fixture" dir="rtl"><div class="escape-target right"></div></div>
+    </div>
+  `);
+
+  await expect(measureViewportEscapes(page.locator('#ltr-reachable'))).resolves.toEqual([]);
+  await expect(measureViewportEscapes(page.locator('#rtl-reachable'))).resolves.toEqual([]);
+  await expect(measureViewportEscapes(page.locator('#ltr-unreachable'))).resolves.toHaveLength(1);
+  await expect(measureViewportEscapes(page.locator('#rtl-unreachable'))).resolves.toHaveLength(1);
+});

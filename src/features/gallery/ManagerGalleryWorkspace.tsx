@@ -23,7 +23,6 @@ import {
   type GalleryExportControlHandle,
 } from './GalleryExportControl';
 import { useGalleryDock } from './gallery-dock';
-import { useWideViewport } from './viewport';
 import { galleryPhotoTitle } from './gallery-timeline';
 import {
   ManagerAlbum,
@@ -780,20 +779,9 @@ ManagerGalleryWorkspaceProps
     currentSharedSelectionChange.current?.([]);
   }, [mode, sharedSelected.length]);
 
-  /**
-   * The mode's one action docks to the bottom edge on a phone, where the hand already is. From 761
-   * it goes back to the heading's baseline, which is where its owner already renders it, so the
-   * dock simply stands down and nothing is portalled.
-   *
-   * The container is conditional rather than merely empty: a fixed bar with nothing in it still
-   * paints its border, its blur and its padding across the bottom of every screen.
-   */
-  const wide = useWideViewport();
-  const hasAction = !wide && (
-    mode === 'library'
-    || mode === 'album'
-    || (mode === 'guest-gallery' && !guestGalleryVisible)
-  );
+  // One stable host prevents the active mode's primary control from being recreated at 760/761.
+  // CSS changes the host from heading chrome to the phone dock; the owning mode always portals its
+  // one applicable control here, preserving that control's ref, pending state, and focus.
   const [actionDock, setActionDock] = useState<HTMLDivElement | null>(null);
 
   const rootRef = useRef<HTMLElement>(null);
@@ -817,6 +805,7 @@ ManagerGalleryWorkspaceProps
     <div className="workspace-heading">
       <h2 id="gallery-workspace-title">{mode === 'library' ? 'Private Gallery' : 'Gallery'}</h2>
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} delivered photos</p>
+      <div className="gallery-action" ref={setActionDock} />
     </div>
     <div className="gallery-control-row">
       <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
@@ -1027,11 +1016,6 @@ ManagerGalleryWorkspaceProps
         actionDock={mode === 'guest-gallery' ? actionDock : null}
       />
     </div>
-
-    {/* The mode's one action, docked to the thumb on a phone and on the heading's baseline from
-        761. The active mode portals its own primary control in here, so the button keeps the state
-        and focus contract of the component that owns it and never exists twice. */}
-    {hasAction && <div className="gallery-action" ref={setActionDock} />}
 
     <details className="gallery-context-disclosure">
       <summary>About this Gallery view</summary>

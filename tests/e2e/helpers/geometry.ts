@@ -96,15 +96,22 @@ export async function measureViewportEscapes(locator: Locator) {
     };
     // The nearest such ancestor decides, and the walk stops at `body`: the page root scrolls the
     // document itself, which `measureDocument` already asserts, and it may not excuse anything here.
-    const reachableByScrolling = (element: Element) => {
+    const reachableByScrolling = (element: Element, rect: DOMRect) => {
       for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
-        if (scrollsSideways(parent)) return contained(parent.getBoundingClientRect());
+        if (!scrollsSideways(parent) || !contained(parent.getBoundingClientRect())) continue;
+        const escapesLeft = rect.left < -1;
+        const escapesRight = rect.right > viewportWidth + 1;
+        // A horizontal scroller starts at inline-start, so it can reveal only inline-end overflow.
+        // RTL reverses the physical side without weakening containment of the scrollport itself.
+        return getComputedStyle(parent).direction === 'rtl'
+          ? escapesLeft && !escapesRight
+          : escapesRight && !escapesLeft;
       }
       return false;
     };
     return Array.from(container.querySelectorAll<HTMLElement>('*')).flatMap((element) => {
       const rect = element.getBoundingClientRect();
-      return rect.width > 0 && !contained(rect) && !reachableByScrolling(element)
+      return rect.width > 0 && !contained(rect) && !reachableByScrolling(element, rect)
         ? [{ selector: `${element.tagName.toLowerCase()}.${element.getAttribute('class') ?? ''}`, left: rect.left, right: rect.right }]
         : [];
     });
