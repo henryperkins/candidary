@@ -352,6 +352,15 @@ function mosaicImages(): HTMLImageElement[] {
   return Array.from(document.querySelectorAll<HTMLImageElement>('.gallery-mosaic__item img'));
 }
 
+/**
+ * Each mode segment carries its count on a second line inside the button, so the accessible name is
+ * the label and the count together, and the button names itself rather than leaving that to how
+ * each engine joins a label with a sub-line: `Album, 1`, never `Album (1)` and never `Album1`.
+ */
+function modeName(label: string, count: string): RegExp {
+  return new RegExp(`^${label}, ${count}$`, 'u');
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -363,8 +372,12 @@ describe('host private gallery', () => {
     renderGallery();
 
     expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
-    expect(screen.queryByText('About this Gallery view')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Delivered photos stay private to hosts/u)).not.toBeInTheDocument();
+    // The mode's rule is back, but folded and last: a host who wants it opens it, and until they do
+    // it costs no words above the photographs.
+    const disclosure = document.querySelector('.gallery-context-disclosure')!;
+    expect(disclosure).not.toHaveAttribute('open');
+    expect(screen.getByText('About this Gallery view')).toBeVisible();
+    expect(screen.getByText(/Delivered photos stay private to hosts/u)).not.toBeVisible();
     expect(screen.queryByText('What the complete download includes')).not.toBeInTheDocument();
     expect(screen.queryByText(/Every delivered photo, the photo manifest/u)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Download all' })).toBeVisible();
@@ -1009,7 +1022,7 @@ describe('host private gallery', () => {
 
     await user.click(screen.getByRole('button', { name: /^Album picks/ }));
     expect(await screen.findByText('First dance')).toBeVisible();
-    expect(screen.getByTitle('p4.jpg')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Open p4.jpg, from Jose' })).toBeVisible();
   });
 
   it('refetches the current query and invalidates audience after a confirmed card write crosses replacement', async () => {
@@ -1460,16 +1473,22 @@ describe('host private gallery', () => {
       return url.pathname.endsWith('/gallery') && (init?.method ?? 'GET') === 'GET';
     }).length;
 
-    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    await user.click(screen.getByRole('button', { name: modeName('Guest gallery', '0') }));
     expect(screen.getByRole('heading', { name: 'Gallery' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Guest gallery' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: /publish selected/i })).toBeVisible();
+    expect(screen.getByRole('button', { name: modeName('Guest gallery', '0') }))
+      .toHaveAttribute('aria-pressed', 'true');
+    // The Guest gallery's own rail is what proves the switch landed. Its bulk verbs no longer idle
+    // at zero over the controls that start a selection: nothing is selected here, so the tray that
+    // carries them is simply absent and `Select photos` is the way in.
+    expect(screen.getByRole('button', { name: 'Select photos' })).toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Guest gallery' })).not.toBeInTheDocument();
     expect(onStatusChange).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /^Album picks/ })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Library' }));
+    await user.click(screen.getByRole('button', { name: modeName('Library', '842') }));
     expect(screen.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: modeName('Library', '842') }))
+      .toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByLabelText('Find photos')).toHaveValue('Maya');
     expect(screen.getByText('From Maya')).toBeVisible();
     expect(screen.queryByText('From Jose')).not.toBeInTheDocument();
@@ -1760,7 +1779,7 @@ describe('host private gallery', () => {
       }}
     />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await user.click(await screen.findByRole('button', { name: modeName('Guest gallery', 'Off') }));
 
     const filters = screen.getByRole('group', { name: 'Publication status' });
     const all = within(filters).getByRole('button', { name: 'All' });
@@ -1824,7 +1843,7 @@ describe('host private gallery', () => {
       }}
     />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await user.click(await screen.findByRole('button', { name: modeName('Guest gallery', 'Off') }));
 
     const filters = screen.getByRole('group', { name: 'Publication status' });
     expect(within(filters).getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'false');
@@ -1835,15 +1854,23 @@ describe('host private gallery', () => {
       .toHaveClass('button--approve');
     expect(screen.getByRole('button', { name: 'Hide toast.jpg' }))
       .toHaveClass('button--secondary');
-    expect(screen.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+    // With nothing selected there are no bulk verbs to disable: the tray that carries them only
+    // exists once a selection does, so its absence is the honest form of the old greyed-out Hide.
+    expect(screen.queryByRole('region', { name: 'Guest gallery' })).not.toBeInTheDocument();
     expect(screen.getByText('Publication choices are saved, but the Guest gallery is off.')).toBeVisible();
-    expect(screen.queryByText('About this Gallery view')).not.toBeInTheDocument();
-    expect(screen.queryByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.'))
-      .not.toBeInTheDocument();
+    expect(document.querySelector('.gallery-context-disclosure')).not.toHaveAttribute('open');
+    expect(screen.getByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.'))
+      .not.toBeVisible();
     await user.click(within(filters).getByRole('button', { name: 'Hidden' }));
+    await user.click(screen.getByRole('button', { name: 'Select photos' }));
     const selected = screen.getByRole('checkbox', { name: 'Select toast.jpg' });
     await user.click(selected);
     expect(selected).toBeChecked();
+    // The verbs arrive with the selection, and they keep the weight the card buttons above use
+    // outside the `Published` filter: Publish leads, Hide steps back.
+    const tray = screen.getByRole('region', { name: 'Guest gallery' });
+    expect(within(tray).getByRole('button', { name: 'Publish (1)' })).toHaveClass('button--approve');
+    expect(within(tray).getByRole('button', { name: 'Hide (1)' })).toHaveClass('button--secondary');
     await user.click(screen.getByRole('button', { name: 'Open settings' }));
     expect(onOpenSettings).toHaveBeenCalledOnce();
     expect(onOpenSettings).toHaveBeenCalledWith('hidden');
@@ -1974,7 +2001,7 @@ describe('host private gallery', () => {
   it('explains an empty published filter without promising new deliveries', async () => {
     renderGallery({ status: 'published' });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await user.click(await screen.findByRole('button', { name: modeName('Guest gallery', '0') }));
 
     expect(screen.getByRole('heading', { name: 'No published photos.' })).toBeVisible();
     expect(screen.getByText('Publish a photo to show it in the Guest gallery.')).toBeVisible();
@@ -1998,7 +2025,7 @@ describe('host private gallery', () => {
   it('explains an empty hidden filter as hide, not as unpublished privacy', async () => {
     renderGallery({ status: 'hidden' });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await user.click(await screen.findByRole('button', { name: modeName('Guest gallery', '0') }));
 
     expect(screen.getByRole('heading', { name: 'No hidden photos.' })).toBeVisible();
     expect(screen.getByText('Photos Hidden from event guests appear here.')).toBeVisible();
@@ -2008,7 +2035,7 @@ describe('host private gallery', () => {
   it('does not describe an unfiltered empty shared list as unpublished', async () => {
     renderGallery({ status: 'all' });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await user.click(await screen.findByRole('button', { name: modeName('Guest gallery', '0') }));
 
     expect(screen.getByRole('heading', { name: 'No photos.' })).toBeVisible();
     expect(screen.getByText('New delivered photos appear here.')).toBeVisible();
@@ -2084,7 +2111,7 @@ describe('host private gallery', () => {
       }}
     />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
+    await user.click(await screen.findByRole('button', { name: modeName('Guest gallery', 'Off') }));
 
     const escape = screen.getByRole('button', { name: 'Open settings' });
     expect(escape).toBeDisabled();

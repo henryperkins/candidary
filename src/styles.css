@@ -248,8 +248,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .fullscreen { min-height: 100svh; background: var(--event-fullscreen-backdrop); color: var(--event-fullscreen-foreground); }.fullscreen__bar { height: 70px; padding: 0 25px; display: flex; align-items: center; justify-content: space-between; }.fullscreen__bar .brand { color: var(--event-fullscreen-foreground); }.fullscreen__bar .brand__mark i { background: var(--event-accent); }.fullscreen__bar .brand__mark i:nth-child(2) { background: var(--event-primary); }.fullscreen__bar a { padding: 12px; }.fullscreen__bar .fullscreen__close { min-width: 44px; min-height: 44px; display: grid; place-items: center; color: var(--event-fullscreen-foreground); }.fullscreen .fullscreen__close:focus-visible { outline-color: var(--event-focus); }.fullscreen__grid { padding: 0 25px 35px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }.fullscreen figure { position: relative; }.fullscreen img { width: 100%; height: 75vw; max-height: 500px; object-fit: cover; }.fullscreen figcaption { position: absolute; inset: auto 0 0; padding: 40px 15px 15px; color: var(--event-fullscreen-foreground); background: linear-gradient(transparent, rgb(0 0 0 / 65%)); }
 .photo-grid figure, .photo-grid figcaption, .photo-grid figcaption span, .contributions li > span, .fullscreen figure, .fullscreen figcaption { min-width: 0; overflow-wrap: anywhere; }
 /* Narrow first: the manager base is the labelled two-tier phone header over one workspace column. */
-.manager-shell { --manager-sticky-offset: 112px; --gallery-control-obstruction: 96px; }
-.manager-shell { min-height: 100svh; background: #faf6ee; }.manager-nav { position: sticky; top: 0; z-index: 5; min-width: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; border-bottom: 1px solid var(--border); background: #f2eadf; }.manager-nav .brand { width: 100%; min-height: 52px; padding: 0 20px; }.manager-nav nav { width: 100%; margin: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--border); }.manager-nav button { min-width: 0; min-height: 58px; padding: 7px 2px 8px; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: .65rem; line-height: 1; text-align: center; }.manager-nav button svg { width: 20px; height: 20px; }.manager-nav button.active { background: var(--denim-soft); color: var(--chestnut); font-weight: 600; box-shadow: inset 0 -3px 0 var(--chestnut); }.manager-nav button:not(.active):hover { background: rgb(221 231 240 / 45%); color: var(--chestnut); }.manager-main { min-width: 0; padding: 28px 20px 60px; overflow: visible; }.manager-title { display: block; }.manager-title p { margin-bottom: 5px; color: var(--muted); font-size: .8rem; }.manager-title h1 { margin: 0; font-size: clamp(2.15rem, 10vw, 2.7rem); }.manager-title .status { margin-top: 18px; }.lifecycle { margin: 28px 0 45px; display: grid; gap: 7px; padding: 16px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }.lifecycle p { margin: 0; color: var(--muted); font-size: .84rem; }.workspace-heading { display: block; }.workspace-heading h2, .manager-panel h2 { margin: 0; font-size: clamp(2rem, 9vw, 2.25rem); }.filter-tabs { width: 100%; max-width: 100%; margin-top: 20px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; }.filter-tabs button { min-width: 44px; min-height: 44px; padding: 9px 4px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: .75rem; text-transform: capitalize; cursor: pointer; }.bulk-bar { min-height: 61px; margin: 25px 0 17px; padding: 9px 13px; display: flex; flex-wrap: wrap; align-items: center; gap: 9px; background: var(--paper); border: 1px solid var(--border); border-radius: 7px; }.bulk-bar span { flex: 1 1 100%; color: var(--muted); font-size: .85rem; }.bulk-bar .button { flex: 1 1 140px; min-width: 44px; min-height: 44px; padding: 7px 11px; font-size: .78rem; }
+.manager-shell { --manager-sticky-offset: 112px; --gallery-control-obstruction: 52px; }
+.manager-shell { min-height: 100svh; background: #faf6ee; }.manager-nav { position: sticky; top: 0; z-index: 5; min-width: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; border-bottom: 1px solid var(--border); background: #f2eadf; }.manager-nav .brand { width: 100%; min-height: 52px; padding: 0 20px; }.manager-nav nav { width: 100%; margin: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--border); }.manager-nav button { min-width: 0; min-height: 58px; padding: 7px 2px 8px; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: .65rem; line-height: 1; text-align: center; }.manager-nav button svg { width: 20px; height: 20px; }.manager-nav button.active { background: var(--denim-soft); color: var(--chestnut); font-weight: 600; box-shadow: inset 0 -3px 0 var(--chestnut); }.manager-nav button:not(.active):hover { background: rgb(221 231 240 / 45%); color: var(--chestnut); }.manager-main { min-width: 0; padding: 28px 20px 60px; overflow: visible; }.manager-title { display: block; }.manager-title p { margin-bottom: 5px; color: var(--muted); font-size: .8rem; }.manager-title h1 { margin: 0; font-size: clamp(2.15rem, 10vw, 2.7rem); }.manager-title .status { margin-top: 18px; }.lifecycle { margin: 28px 0 45px; display: grid; gap: 7px; padding: 16px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }.lifecycle p { margin: 0; color: var(--muted); font-size: .84rem; }.workspace-heading { display: block; }.workspace-heading h2, .manager-panel h2 { margin: 0; font-size: clamp(2rem, 9vw, 2.25rem); }.filter-tabs { max-width: 100%; margin-top: 20px; display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; }.filter-tabs button { flex: 0 1 auto; min-width: 44px; min-height: 44px; padding: 9px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: .75rem; text-transform: capitalize; white-space: nowrap; cursor: pointer; }
 .moderation-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 13px; }.moderation-grid article { border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: var(--paper); transition: border 160ms, box-shadow 160ms; }.moderation-grid article.selected { border-color: var(--denim); box-shadow: 0 0 0 2px var(--denim); }.moderation-grid label { position: relative; display: block; cursor: pointer; }.moderation-grid input { position: absolute; top: 10px; left: 10px; z-index: 1; width: 20px; min-height: 20px; accent-color: var(--chestnut); }.moderation-grid img { width: 100%; aspect-ratio: 1.25; object-fit: cover; background: #eee4d8; }.moderation-grid article > div { padding: 11px; }.moderation-grid small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; color: var(--muted); }.moderation-grid article > div > div { margin-top: 10px; display: flex; gap: 5px; }.moderation-grid article button { width: 33px; height: 33px; min-width: 44px; min-height: 44px; display: grid; place-items: center; border: 1px solid var(--border); background: transparent; color: var(--moss); border-radius: 5px; cursor: pointer; }.moderation-grid article button:nth-child(2), .moderation-grid article button:nth-child(3) { color: var(--danger); }
 /* The host recognises a photo by its name, so the compact label wraps to two lines instead of ending in an ellipsis. */
 .moderation-grid strong { display: -webkit-box; overflow: hidden; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
@@ -885,7 +885,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-control-row { margin-top: 12px; display: grid; gap: 8px; }
 .gallery-control-row .gallery-mode-switch { margin-top: 0; }
 .manager-gallery > .gallery-control-row + .state-card--error { width: 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.gallery-audience-summary { margin: 0; color: var(--ink); font-size: .8rem; line-height: 1.4; }
+.gallery-audience-summary { margin: 10px 0 0; color: var(--ink); font-size: .8rem; line-height: 1.4; }
 .manager-gallery > .workspace-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 /* Both Gallery switches are pressed-state controls in the same workspace, so the selected pill is
    declared once here rather than twice. `.filter-tabs` has no other user, and the mode switch and the
@@ -898,9 +898,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 .gallery-header { margin: 16px 0; padding: 12px; display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); }
 .gallery-total { margin: 0; color: var(--muted); font-size: .88rem; }
-/* Narrow first: two named bulk controls do not share a phone row. The 761 block puts them back
-   beside the selection count — it must name `.gallery-shared` too, because this line outranks it. */
-.gallery-shared .bulk-bar .button { flex: 1 1 100%; white-space: nowrap; }
 .gallery-shared__lede { max-width: 72ch; margin: 0 0 16px; color: var(--muted); font-size: .84rem; line-height: 1.55; }
 .gallery-shared__preview-fallback { width: 100%; aspect-ratio: 1.25; display: grid; place-content: center; justify-items: center; gap: 6px; background: #eee4d8; color: var(--muted); text-align: center; }
 .gallery-shared__preview-fallback svg { width: 22px; height: 22px; }
@@ -957,7 +954,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 .gallery-search__submit svg { width: 20px; height: 20px; }
 .gallery-search__submit-label { display: none; }
-.gallery-search__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .gallery-search .button, .gallery-search .text-button { min-height: 48px; }
 .gallery-search__favorites[aria-pressed="true"] {
   background: var(--denim-soft);
@@ -969,24 +965,33 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-order { margin: 0 0 20px; display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; }
 .gallery-order button { min-height: 44px; padding: 8px 14px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; }
 .gallery-order button.active { background: var(--denim-soft); color: var(--chestnut); }
+/* Row B is one rail. The order pair or the status tabs, then the mode's own toggles, then the
+   selection verb — one row a thumb can move along instead of three stacked blocks, so the
+   photographs start higher. It wraps rather than scrolls once there is width for it. */
+.gallery-toolbar { margin: 0 0 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.gallery-toolbar > * { margin-top: 0; margin-bottom: 0; }
+.gallery-toolbar .button, .gallery-toolbar .text-button { min-height: 44px; white-space: nowrap; }
 .gallery-timeline { display: grid; gap: 34px; }
 .gallery-moment__heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
 .gallery-moment__heading h3 { margin: 0; font-size: 1.25rem; letter-spacing: -.02em; overflow-wrap: anywhere; }
 .gallery-moment__count { color: var(--muted); font-size: .8rem; }
-/* The row height tracks the column width — at two columns a tile is (100vw - 40px gutters -
-   8px gap) / 2 — so a unit tile stays square instead of flattening as the phone gets wider. */
-.gallery-mosaic { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: row; grid-auto-rows: clamp(156px, calc(50vw - 24px), 190px); gap: 8px; }
+/* The photograph is the product: two square columns through the phone frame, with one singular
+   2-by-2 lead image and tight gutters. The item aspect ratio resolves each implicit grid row from
+   the actual container width, so this also holds inside the Manager rail rather than assuming the
+   viewport and workspace have the same width. */
+.gallery-mosaic { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-flow: row; gap: 6px; }
 /* The ground a photograph loads onto is warm paper, not Denim Soft: that token means
    "selected / pending" in this system, so every unloaded photo used to read as selected,
    in the coldest value the palette owns. */
 /* An event runs to 10,000 photos and every loaded tile stays in the document, so off-screen tiles
-   stop costing layout and paint. The grid rows are fixed, so skipping a tile cannot move anything;
-   the intrinsic size only matches the tallest row so a skipped tile reserves the right box. */
-.gallery-mosaic__item { min-width: 0; position: relative; grid-column: span var(--gallery-col-span-2); grid-row: span var(--gallery-row-span-2); overflow: hidden; border-radius: 8px; background: var(--manager-rail); content-visibility: auto; contain-intrinsic-size: auto 180px; }
-.gallery-mosaic__item img, .gallery-mosaic__placeholder { width: 100%; height: 100%; object-fit: cover; object-position: center; }
+   stop costing layout and paint. The explicit square ratio reserves each tile before its contents
+   paint; the intrinsic size remains a fallback for browsers applying content visibility early. */
+.gallery-mosaic__item { min-width: 0; position: relative; grid-column: span var(--gallery-col-span-2); grid-row: span var(--gallery-row-span-2); aspect-ratio: 1; overflow: hidden; border-radius: 9px; background: #eee4d8; content-visibility: auto; contain-intrinsic-size: auto 180px; }
+.gallery-mosaic__item img, .gallery-mosaic__placeholder { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; }
 .gallery-mosaic__placeholder { padding: 8px; display: grid; place-content: center; justify-items: center; gap: 4px; color: var(--muted); text-align: center; }
-.gallery-mosaic__placeholder span { font-size: .76rem; line-height: 1.3; }
-.gallery-mosaic__open { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
+.gallery-mosaic__placeholder svg { width: 19px; height: 19px; opacity: .6; }
+.gallery-mosaic__placeholder span { font-size: .7rem; line-height: 1.25; }
+.gallery-mosaic__open { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 9px; background: transparent; cursor: pointer; }
 /* This button's box is exactly the tile's, and the tile clips its overflow, so the global ring at
    `outline-offset: 3px` was painted entirely outside the clip — the mosaic's primary control was the
    one element in the product with no visible focus. Bring the ring inside, and lay a paper band under
@@ -1001,25 +1006,19 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-moment__heading h3, .gallery-mosaic__open, .gallery-mosaic__favorite, .gallery-moment__toggle {
   scroll-margin-top: 124px;
 }
-.gallery-mosaic__favorite { position: absolute; right: 8px; bottom: 8px; z-index: 2; width: auto; min-width: 64px; height: 44px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: 8px; background: var(--paper); color: var(--chestnut); cursor: pointer; }
+.gallery-mosaic__favorite { position: absolute; right: 6px; bottom: 6px; z-index: 2; width: auto; min-width: 64px; min-height: 38px; padding: 7px 11px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 999px; background: rgb(250 246 238 / 95%); color: var(--ink); font-size: .74rem; font-weight: 600; box-shadow: 0 1px 6px rgb(43 29 23 / 22%); cursor: pointer; }
+.gallery-mosaic__item--hero .gallery-mosaic__favorite { top: 6px; bottom: auto; }
 .gallery-mosaic__favorite[aria-pressed="true"] { background: var(--chestnut); color: white; }
 .gallery-mosaic__favorite:disabled, .gallery-viewer__favorite:disabled { opacity: .6; cursor: wait; }
-.gallery-mosaic__favorite span { font-size: .66rem; font-weight: 700; white-space: nowrap; }
+.gallery-mosaic__favorite span { font-size: inherit; font-weight: inherit; white-space: nowrap; }
 .gallery-mosaic__publication { position: absolute; top: 8px; left: 8px; z-index: 2; max-width: calc(100% - 16px); padding: 4px 6px; border-radius: 5px; background: var(--paper); color: var(--ink); font-size: .62rem; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; pointer-events: none; }
 /* A solid band, not a ramp. Under a gradient the caption sat on roughly 37% ink, so white text
    over a bright photograph — a dress, a sky, a lit tent — measured near 2.3:1 against a 4.5:1
    floor, and the failure depended on the photograph rather than on anything the code could see.
    At a fixed 88% the ratio is a constant, and both lines clear the system's type floor. */
-.gallery-mosaic__meta { position: absolute; left: 0; right: 0; bottom: 60px; z-index: 1; padding: 10px 12px; display: grid; gap: 2px; background: rgb(43 29 23 / 88%); color: var(--paper); pointer-events: none; }
+.gallery-mosaic__meta { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; padding: 10px 12px; display: grid; gap: 2px; background: rgb(43 29 23 / 88%); color: var(--paper); pointer-events: none; }
 .gallery-mosaic__meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .875rem; }
 .gallery-mosaic__meta small { font-size: .76rem; opacity: .88; }
-/* Two columns held all the way to 761px, where the manager is still one full-width workspace, so
-   tiles reached 356px wide against a 180px row — the flattest crop anywhere in the product. Three
-   columns from 601px, with the row still tracking the column, keeps them near square instead. */
-@media (min-width: 601px) and (max-width: 760px) {
-  .gallery-mosaic { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: clamp(124px, calc((100vw - 60px) / 3), 180px); gap: 10px; }
-  .gallery-mosaic__item { grid-column: span var(--gallery-col-span-3); grid-row: span var(--gallery-row-span-3); }
-}
 .gallery-moment__toggle { min-height: 44px; margin-top: 12px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--chestnut); font: inherit; font-weight: 600; cursor: pointer; }
 /* Opaque, not 96%: the four percent that showed through put the nav labels, the search controls, and
    the tile captions underneath the dialog's own text. This system rejects translucency that weakens
@@ -1208,7 +1207,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .gallery-mode-switch { width: fit-content; margin-top: 0; display: flex; }
   .gallery-mode-switch button { padding: 9px 16px; font-size: .9rem; }
   .gallery-header { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); align-items: center; }
-  .gallery-control-row { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
+  .gallery-control-row { grid-template-columns: auto; align-items: center; justify-content: start; }
   .gallery-search { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
   .gallery-search label { grid-column: 1 / -1; }
   .gallery-search__field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
@@ -1283,11 +1282,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
   .filter-tabs { width: fit-content; margin-top: 0; display: flex; }
   .filter-tabs button { padding: 9px 14px; font-size: .9rem; }
-  .bulk-bar span { flex: 1 1 auto; }
-  .bulk-bar .button { flex: 0 1 auto; }
-  /* The Gallery copy of this bar is scoped one class deeper, so it outranks the line above at every
-     width. It has to opt back into the row layout by name or its two controls stay full-bleed here. */
-  .gallery-shared .bulk-bar .button { flex: 0 1 auto; }
 
   .intake-search { align-items: center; }
   .intake-search label { min-width: 220px; max-width: 430px; }
@@ -1308,19 +1302,19 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .danger-zone form { grid-template-columns: minmax(0, 1fr) auto; }
 }
 
-/* Three-column mosaic band. */
+/* The Manager rail leaves enough workspace for four supporting photos from its first breakpoint. */
 @media (min-width: 761px) and (max-width: 1100px) {
   /* The bar becomes a static side rail here, so nothing overlaps the top edge any more. */
   .gallery-moment__heading h3, .gallery-mosaic__open, .gallery-mosaic__favorite, .gallery-moment__toggle {
     scroll-margin-top: 20px;
   }
-  .gallery-mosaic { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: 132px; gap: 10px; }
-  .gallery-mosaic__item { grid-column: span var(--gallery-col-span-3); grid-row: span var(--gallery-row-span-3); }
+  .gallery-mosaic { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .gallery-mosaic__item { grid-column: span var(--gallery-col-span-4); grid-row: span var(--gallery-row-span-4); }
 }
 
 /* Four-column mosaic band. */
 @media (min-width: 1101px) {
-  .gallery-mosaic { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 148px; gap: 12px; }
+  .gallery-mosaic { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
   .gallery-mosaic__item { grid-column: span var(--gallery-col-span-4); grid-row: span var(--gallery-row-span-4); }
 }
 
@@ -1632,8 +1626,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-mode-switch--three button { padding: 9px 4px; font-size: .74rem; }
 
 /* Selection */
-.gallery-selection-controls { margin: 0 0 18px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.gallery-selection-controls .button, .gallery-selection-controls .text-button { min-height: 44px; }
 .gallery-select-toggle { display: inline-flex; align-items: center; gap: 7px; }
 .gallery-select-toggle[aria-pressed="true"] { border-color: var(--denim); background: var(--denim-soft); color: var(--chestnut); }
 .gallery-moment__select { min-height: 44px; margin-left: auto; padding: 6px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--chestnut); font: inherit; font-size: .78rem; font-weight: 600; cursor: pointer; }
@@ -1647,8 +1639,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-mosaic__item.is-selected { outline: 3px solid var(--denim); outline-offset: -3px; }
 .gallery-mosaic__item.is-selected img { opacity: .82; }
 
-.gallery-mosaic__favorite { gap: 4px; }
-.gallery-mosaic__favorite svg { width: 17px; height: 17px; }
+.gallery-mosaic__favorite { gap: 6px; }
+.gallery-mosaic__favorite svg { width: 15px; height: 15px; }
 
 /* The tray. Fixed, because the verbs must stay reachable while the host keeps scrolling
    for more to select; it exists only while a selection does, so nothing is ever covered
@@ -1663,10 +1655,23 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .selection-tray__actions .button { flex: 1 1 160px; min-height: 44px; justify-content: center; }
 .selection-tray__clear { min-height: 44px; padding: 8px 12px; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: .82rem; cursor: pointer; }
 /* The tray is fixed over the results; give the last row somewhere to be. */
-.gallery-private:has(.selection-tray) .gallery-timeline { padding-bottom: 270px; }
+/* The workspace reserves whatever is docked, measured — see `gallery-dock.ts`. A hardcoded
+   reservation sized for one occupant stranded the last photo row, and its select control, behind
+   another. */
+.manager-gallery { padding-bottom: calc(var(--gallery-dock, 0px) + 16px + env(safe-area-inset-bottom)); }
+/* The tray covers the photographs, so the room is reserved directly after them as well: the mode
+   note follows the grid, and left to the section's own padding it would absorb the reservation and
+   leave the last row of photographs underneath the tray with no scroll left to reach it.
+
+   `max()` because the tray belongs to Library and Guest gallery, so it arrives as a subtree
+   mutation rather than a render of the workspace: the measurement lands a tick later, and a host
+   who flicks to the bottom in that tick would find the last row under it. The floor is what a
+   phone tray measures; the measurement is what keeps a taller one honest. */
+.manager-gallery:has(.selection-tray) .gallery-private,
+.manager-gallery:has(.selection-tray) .gallery-shared { padding-bottom: max(calc(var(--gallery-dock, 0px) + 16px), 220px); }
 
 /* Undo */
-.album-undo__bar { position: fixed; inset: auto 12px calc(12px + env(safe-area-inset-bottom)); z-index: 35; max-width: 560px; margin: 0 auto; padding: 12px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; border-radius: 9px; background: var(--ink); color: var(--paper); box-shadow: 0 10px 30px rgb(43 29 23 / 30%); animation: album-undo-in 180ms cubic-bezier(.16,1,.3,1); }
+.album-undo__bar { position: fixed; inset: auto 12px calc(12px + var(--gallery-dock, 0px) + env(safe-area-inset-bottom)); z-index: 35; max-width: 560px; margin: 0 auto; padding: 12px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; border-radius: 9px; background: var(--ink); color: var(--paper); box-shadow: 0 10px 30px rgb(43 29 23 / 30%); animation: album-undo-in 180ms cubic-bezier(.16,1,.3,1); }
 @keyframes album-undo-in { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
 .album-undo__message { flex: 1 1 220px; font-size: .84rem; line-height: 1.45; }
 .album-undo__error { flex: 1 0 100%; color: var(--paper); font-size: .76rem; line-height: 1.4; }
@@ -1773,7 +1778,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .album-review-grid__section { grid-template-columns: 4px minmax(110px, auto) minmax(24px, 1fr) auto; gap: 12px; }
   .album-review-grid__section > .album-section__rule,
   .album-review-grid__section > .album-entry__controls { grid-column: auto; }
-  .gallery-private:has(.selection-tray) .gallery-timeline { padding-bottom: 210px; }
 }
 
 @media (max-width: 760px) {
@@ -1791,9 +1795,36 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .gallery-export { width: 100%; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
   .gallery-export > .export-state,
   .gallery-export > .gallery-export__copy { grid-column: 1 / -1; }
+  /* The three retention facts are orientation, read once. Stacked they cost about 175px above
+     every workspace; on one wrapping row they cost about 70. Wrapping rather than truncating,
+     because the deletion date is the one of the three a host cannot look up elsewhere. */
+  .lifecycle {
+    margin: 14px 0 18px;
+    padding: 11px 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 14px;
+  }
+  .lifecycle p { font-size: .8rem; }
   .gallery-search { margin: 2px 0; gap: 2px 6px; }
+  /* The placeholder does the label's work at this width; the label stays for screen readers. */
+  .gallery-search label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* One row that wraps, not one row that scrolls. The design asks for a horizontal rail, but this
+     shell holds every control inside the viewport — `measureViewportEscapes` admits no exemption for
+     a scroll container, and a control a thumb has to discover by swiping is worse than one that
+     wrapped. At 390 the group still lands on a single 44px row; 320 takes a second. */
+  .gallery-toolbar { margin: 3px 0 14px; gap: 7px; }
+  .gallery-toolbar > * { flex: 0 1 auto; }
   .gallery-order { margin-bottom: 0; }
-  .gallery-selection-controls { margin-bottom: 0; }
   .gallery-moment__heading h3,
   .gallery-mosaic__open,
   .gallery-mosaic__favorite,
@@ -1805,29 +1836,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 
 @media (min-width: 361px) and (max-width: 760px) {
-  .gallery-control-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .gallery-control-row .gallery-mode-switch { grid-column: 1 / -1; }
-  .gallery-audience-summary { align-self: center; }
-  .gallery-search { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
-  .gallery-search label { grid-column: 1 / -1; }
-  .gallery-search__actions { justify-content: flex-end; }
-  .gallery-search__actions:has(.text-button) { grid-column: 1 / -1; }
-  .gallery-private {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    column-gap: 8px;
-    align-items: start;
-  }
-  .gallery-private > .gallery-search { grid-column: 1 / -1; }
-  .gallery-private > .gallery-order { grid-column: 1; }
-  .gallery-private > .gallery-selection-controls { grid-column: 2; justify-content: end; }
-  .gallery-private > :not(.gallery-search):not(.gallery-order):not(.gallery-selection-controls) {
-    grid-column: 1 / -1;
-  }
-  .gallery-order { padding: 0; border: 0; }
+  /* The rail replaced the block that used to pair the order pair with the selection controls
+     here, so `.gallery-private` stays a plain column and the row does its own packing. */
   .gallery-order button { padding-inline: 10px; }
-  .gallery-selection-controls { gap: 6px; }
-  .gallery-selection-controls .button { padding-inline: 10px; }
   .gallery-select-toggle { gap: 4px; white-space: nowrap; }
   .gallery-moment__heading { gap: 4px 8px; }
   .gallery-moment__heading h3 { font-size: 1rem; line-height: 1.2; }
@@ -1835,17 +1846,12 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 
 @media (max-width: 360px) {
+  /* The destinations are one scrolling row at every phone width now, so the two-rows-of-three
+     packing — and the 169px of pinned header it cost — is gone. What remains narrow here is the
+     mode switch, which still stacks: three cramped columns would repeat the collision the nav row
+     just fixed. */
   .manager-shell {
-    --manager-sticky-offset: 169px;
-    --gallery-control-obstruction: 190px;
-  }
-  .manager-nav { border-bottom: 0; box-shadow: inset 0 -1px 0 var(--border); }
-  .manager-nav nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .manager-nav button { min-height: 58px; }
-  .manager-nav__label {
-    max-width: 100%;
-    line-height: 1.15;
-    overflow-wrap: anywhere;
+    --gallery-control-obstruction: 150px;
   }
   .manager-panel > h2,
   #intake-title { scroll-margin-top: calc(var(--manager-sticky-offset) + 12px); }
@@ -1859,6 +1865,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
     );
   }
   .gallery-mode-switch--three { grid-template-columns: 1fr; }
+  /* Row B takes three rows at 320 and two from 390. Packing it tighter was tried and measured at a
+     2px gain, so it is left alone: the named controls are simply wider than a 280px row. */
 }
 
 @media (max-width: 760px) {
@@ -1910,9 +1918,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
     scroll-margin-bottom: calc(12px + env(safe-area-inset-bottom));
   }
   .manager-shell:has(.album-undo__bar) .selection-tray__inner { gap: 6px; }
-  .manager-shell:has(.album-undo__bar) .gallery-private:has(.selection-tray) .gallery-timeline {
-    padding-bottom: 0;
-  }
 }
 
 @media (min-width: 761px) {
@@ -1920,7 +1925,12 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .selection-tray { right: 24px; bottom: 24px; left: auto; width: min(92vw, 470px); padding: 16px; }
   .selection-tray__inner { grid-template-columns: minmax(0, 1fr); }
   .selection-tray__actions .button { flex: 1 1 150px; }
-  .gallery-private:has(.selection-tray) .gallery-timeline { padding-bottom: 190px; }
+  /* The tray is a corner card at this width and carries its own clearance, so `--gallery-dock`
+     measures 0 here and the reservation is the workspace's ordinary bottom margin. The card still
+     overlays the bottom-right of the grid, which is what this keeps clear. */
+  .manager-gallery { padding-bottom: calc(var(--gallery-dock, 0px) + 40px); }
+  .manager-gallery:has(.selection-tray) .gallery-private,
+  .manager-gallery:has(.selection-tray) .gallery-shared { padding-bottom: 190px; }
 }
 
 @media (min-width: 900px) {
@@ -1930,4 +1940,103 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 @media (prefers-reduced-motion: reduce) {
   .selection-tray, .album-undo__bar { animation: none; }
   .gallery-mosaic__checkbox { transition: none; }
+}
+
+/* ═══ The Gallery workspace frame ═════════════════════════════════════════════════════════════
+   Library, Album and Guest gallery are one destination with three modes, and until this block they
+   shared a wrapper and nothing else — each solved the same four jobs a different way, so a host who
+   had learned Library still had to learn Guest gallery.
+
+   The frame is written against a 320 by 568 screen and unfolds at 761. That budget is the whole
+   argument: 568 pixels, chrome gets under 180 of them standing and pinned in every mode, and the
+   rest is photographs. Ported from the design system's `templates/gallery-workspace`.
+   ═════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/* Each segment carries its own count, so the switch answers how many and where without costing a
+   second row. */
+.gallery-mode-switch button { display: grid; gap: 1px; align-content: center; justify-items: center; line-height: 1.15; }
+/* No opacity: muted ink has 0.37 of headroom over 4.5 on this ground and none to lend. At .72 the
+   count measured 2.86:1. The count is set apart by size and weight, which cost nothing. */
+.gallery-mode-switch__count { font-weight: 500; font-size: .75rem; letter-spacing: .01em; }
+/* The sub-line must not make the band taller. Two 14px lines and a 1px gap are 29px, so the
+   segment's own padding comes down to keep the 44px floor — and not a pixel of it — deciding the
+   height of the one thing on this surface that is pinned. A taller pinned row is a row that
+   covers the control beneath it once the host scrolls. */
+.gallery-mode-switch--three button { padding-block: 6px; }
+
+/* Three labelled facts, never blended into one sentence: an event has two independent audiences —
+   people with the Album link, and event guests — and a host must be able to read either without
+   opening the mode it belongs to. The paper ground is not decoration: muted ink measures 4.24 on the
+   rail tint and 4.87 on paper, and the label is 12px text that has to clear 4.5. */
+.gallery-audience { margin: 10px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.gallery-audience__fact { flex: 0 0 auto; display: flex; align-items: baseline; gap: 7px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--paper); }
+.gallery-audience dt { margin: 0; color: var(--muted); font-size: .75rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.gallery-audience dd { margin: 0; color: var(--ink); font-size: .8rem; font-weight: 600; white-space: nowrap; }
+
+/* Context, not a control: the rule for the mode is read once, so it sits under the mode's content
+   rather than between the switch and the first thing a host came to do. */
+.gallery-context-disclosure { margin: 22px 0 0; border-top: 1px solid var(--border); }
+.gallery-context-disclosure summary { min-height: 44px; display: flex; align-items: center; gap: 9px; color: var(--chestnut); font-size: .82rem; font-weight: 600; list-style: none; cursor: pointer; }
+.gallery-context-disclosure summary::-webkit-details-marker { display: none; }
+/* `display: flex` on a summary drops the native marker, so the affordance is drawn back. */
+.gallery-context-disclosure summary::after { content: ""; width: 7px; height: 7px; margin-left: auto; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg) translateY(-2px); transition: transform 180ms; }
+.gallery-context-disclosure[open] summary::after { transform: rotate(225deg) translateY(-1px); }
+.gallery-context-disclosure p { margin: 0 0 14px; max-width: 68ch; color: var(--muted); font-size: .82rem; line-height: 1.55; }
+
+/* The mode's one action, docked where the hand already is. On a phone the reachable third of the
+   screen is the bottom one, and a full-width primary stacked above the photographs pushes them off:
+   `Download all` was landing about two pixels inside a 390 viewport, and the Album link was buried
+   at the bottom of a scroll. The active mode portals its own control in here, so `:empty` is a real
+   state rather than a bar of whitespace. */
+.gallery-action { position: fixed; inset: auto 0 0; z-index: 16; padding: 9px 16px calc(9px + env(safe-area-inset-bottom)); display: flex; gap: 8px; background: rgb(250 246 238 / 93%); backdrop-filter: blur(8px); border-top: 1px solid var(--border); }
+.gallery-action:empty { display: none; }
+.gallery-action .button { flex: 1 1 auto; min-height: 50px; justify-content: center; white-space: nowrap; font-size: .92rem; }
+/* Before a job exists the panel's only child is the action, which is docked below 761 — an empty
+   bordered region announcing `Complete export` is chrome for a state that has no status yet. */
+.gallery-export:empty { display: none; }
+/* Two fixed bars at the same edge is the defect this avoids: the tray needs the space, and it
+   arrives only when the host has already chosen what to act on. */
+.manager-gallery:has(.selection-tray) .gallery-action { display: none; }
+
+/* Album's details are context — a host opens the Album to reorder it, not to retype its title — so
+   on a phone they fold closed on arrival and the order starts near the top. */
+.album-metadata__summary { width: 100%; min-height: 50px; padding: 0 4px; display: flex; align-items: center; gap: 9px; border: 0; background: none; color: var(--chestnut); font: inherit; font-size: .9rem; font-weight: 700; text-align: left; cursor: pointer; }
+.album-metadata__summary::after { content: ""; width: 8px; height: 8px; margin-left: auto; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg) translateY(-2px); transition: transform 180ms; }
+.album-metadata__summary[aria-expanded="true"]::after { transform: rotate(225deg) translateY(-1px); }
+.album-metadata__body { min-width: 0; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 22px; }
+.album-metadata:has(.album-metadata__summary) { display: block; }
+
+@media (max-width: 760px) {
+  /* Six destinations wrapped into a grid cost 189px — a third of the screen before the product says
+     anything, and at 320 `Gallery`, `Guestbook` and `Share` collided outright. One row a thumb moves
+     along costs 53. Bounded by max-width rather than undone later: from 761 the product turns this
+     into a vertical rail, and an unscoped horizontal row outranks every rule that would put it back,
+     so anything that re-shapes the nav belongs inside this query. */
+  .manager-shell { --manager-sticky-offset: 53px; }
+  /* One row: the brand holds the left edge — it is the only way back out of the manager, and the
+     shell has an e2e contract that it stays a 44px target at every width — and the destinations
+     scroll beside it. */
+  .manager-nav { display: flex; align-items: stretch; box-shadow: 0 1px 0 rgb(74 36 21 / 4%); }
+  .manager-nav .brand { flex: 0 0 auto; width: auto; min-height: 52px; padding: 0 14px; border-right: 1px solid var(--border); }
+  .manager-nav nav { flex: 1 1 auto; min-width: 0; width: auto; display: flex; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; scrollbar-width: none; -webkit-overflow-scrolling: touch; border-top: 0; }
+  .manager-nav nav::-webkit-scrollbar { display: none; }
+  .manager-nav button { flex: 0 0 auto; scroll-snap-align: center; width: auto; min-height: 52px; padding: 0 15px; flex-direction: row; gap: 7px; border-bottom: 2px solid transparent; }
+  .manager-nav button svg { width: 17px; height: 17px; }
+  .manager-nav button.active { border-bottom-color: var(--chestnut); background: none; box-shadow: none; }
+  .manager-nav button:not(.active):hover { background: none; }
+  /* In a row the badge sits beside its label instead of over it. */
+  .manager-nav__count { position: static; top: auto; right: auto; }
+
+  /* The three chips restate what the switch above already carries — the Album count and the Guest
+     gallery state are in the segments — and a second row saying it again costs 43px of photograph.
+     The Album link is the one audience fact the switch cannot say, so it stays. */
+  .gallery-audience__fact--restated { display: none; }
+}
+
+@media (min-width: 761px) {
+  .gallery-mode-switch__count { font-size: .8rem; }
+  .gallery-audience { margin: 14px 0 0; gap: 8px; }
+  /* The fields are always on screen at this width, so the control that reveals them is not — a
+     button permanently reporting `aria-expanded="true"` advertises state it does not own. */
+  .album-metadata__summary { display: none; }
 }

@@ -122,34 +122,32 @@ export interface MosaicPlacement {
 
 const SPAN_PATTERNS: Record<MosaicColumnCount, Readonly<Record<number, MosaicPlacement>>> = {
   2: {
-    // Two rows, not one. A single row across both columns made the phone hero the
-    // *flattest* crop in the grid — near 2.2:1, rising to 4:1 just below the three-column
-    // breakpoint — on the surface where most photographs are portrait phone shots, so the
-    // featured tile was the one that threw away most of its subject. Two rows make it
-    // roughly square, and position eight closes the block that leaves.
+    // Two rows, not one. The hero stays square while every later photo keeps the same
+    // supporting weight; an incomplete final row is preferable to inventing a second feature.
     1: { columnSpan: 2, rowSpan: 2 },
-    8: { columnSpan: 2, rowSpan: 1 },
   },
   3: {
     1: { columnSpan: 2, rowSpan: 2 },
-    7: { columnSpan: 2, rowSpan: 1 },
   },
   4: {
     1: { columnSpan: 2, rowSpan: 2 },
-    2: { columnSpan: 2, rowSpan: 1 },
   },
 };
 
-export function mosaicPlacement(position: number, columns: MosaicColumnCount): MosaicPlacement {
-  if (position > 8) return { columnSpan: 1, rowSpan: 1 };
+export function mosaicPlacement(
+  position: number,
+  columns: MosaicColumnCount,
+  firstMoment = true,
+): MosaicPlacement {
+  if (!firstMoment || position > 8) return { columnSpan: 1, rowSpan: 1 };
   return SPAN_PATTERNS[columns][position] ?? { columnSpan: 1, rowSpan: 1 };
 }
 
 /** One span value per breakpoint; the stylesheet's media queries choose which applies. */
-export function mosaicStyleVars(position: number): Record<string, number> {
+export function mosaicStyleVars(position: number, firstMoment = true): Record<string, number> {
   const variables: Record<string, number> = {};
   for (const columns of [2, 3, 4] as const) {
-    const placement = mosaicPlacement(position, columns);
+    const placement = mosaicPlacement(position, columns, firstMoment);
     variables[`--gallery-col-span-${columns}`] = placement.columnSpan;
     variables[`--gallery-row-span-${columns}`] = placement.rowSpan;
   }

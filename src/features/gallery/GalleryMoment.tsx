@@ -11,6 +11,7 @@ export const COMPACT_MOSAIC_LIMIT = 8;
 interface GalleryTileProps {
   photo: ManagerGalleryMediaView;
   position: number;
+  hero: boolean;
   eager: boolean;
   favoritePending: boolean;
   selecting: boolean;
@@ -35,6 +36,7 @@ interface GalleryTileProps {
 function GalleryTile({
   photo,
   position,
+  hero,
   eager,
   favoritePending,
   selecting,
@@ -46,10 +48,10 @@ function GalleryTile({
   const [failed, setFailed] = useState(false);
   const title = galleryPhotoTitle(photo);
   return <div
-    className={selected ? 'gallery-mosaic__item is-selected' : 'gallery-mosaic__item'}
+    className={`gallery-mosaic__item${hero ? ' gallery-mosaic__item--hero' : ''}${selected ? ' is-selected' : ''}`}
     data-photo-id={photo.id}
     data-gallery-anchor-id={photo.id}
-    style={mosaicStyleVars(position) as CSSProperties}
+    style={mosaicStyleVars(position, hero) as CSSProperties}
   >
     {/* The covering button carries this tile's accessible name, so the image, the visible caption,
         and the button previously announced the same string three times over — 48 tiles a page. The
@@ -114,7 +116,7 @@ function GalleryTile({
     {/* Only the hero carries a visible caption. On a unit tile the band covered ~59% of the
         photograph to restate a camera filename the open control already announces, and its
         contrast was a function of whatever the photo happened to be underneath. */}
-    {position === 1 && <div className="gallery-mosaic__meta" aria-hidden="true">
+    {hero && <div className="gallery-mosaic__meta" aria-hidden="true">
       <strong title={title}>{title}</strong>
       <small>From {photo.guestName}</small>
     </div>}
@@ -170,6 +172,7 @@ export function GalleryMoment({
           key={photo.id}
           photo={photo}
           position={index + 1}
+          hero={eager && index === 0}
           eager={eager}
           favoritePending={favoritePendingIds.has(photo.id)}
           selecting={selecting}

@@ -166,6 +166,8 @@ test('captures the seven handoff-aligned manager states at 924 by 540', async ({
   await capture(page, testInfo, 'desktop-03-reconciliation');
 
   await startAlbum(page);
+  // The section, not `.album-metadata__body`: the fold's summary is part of what this state has to
+  // show, and at this width the body stands open underneath it anyway.
   await page.locator('.album-metadata').evaluate((element) => {
     const top = element.getBoundingClientRect().top + window.scrollY - 16;
     window.scrollTo(0, top);
@@ -325,6 +327,19 @@ test('manager album reflows at 200 and 400 percent zoom proxies', async ({ page 
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await parkAtTop(page);
 
+    // Below 761 Album's details fold closed so the order starts near the top, and the fields are
+    // conditionally rendered rather than hidden — safer than a 0x0 node, but it means the summary
+    // is the control that puts `Album title` and `Description` back on screen. It is refolded at
+    // the end of each pass so both widths start from the same state.
+    const albumDetails = page.getByRole('button', { name: 'Album details' });
+    await expect(albumDetails, `${viewport.label} Album details starts folded`)
+      .toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByLabel('Album title'), `${viewport.label} folded Album title`).toHaveCount(0);
+    await expectTargetsAtLeast44(albumDetails, `${viewport.label} Album details fold`);
+    await albumDetails.click();
+    await expect(albumDetails, `${viewport.label} Album details unfolds`)
+      .toHaveAttribute('aria-expanded', 'true');
+
     const operableControls = [
       page.getByRole('group', { name: 'Gallery mode' }).getByRole('button', { name: /^Album/u }),
       page.getByLabel('Album title'),
@@ -359,6 +374,10 @@ test('manager album reflows at 200 and 400 percent zoom proxies', async ({ page 
     await page.getByRole('button', { name: 'Hide Album link' }).click();
     await expect(linkField).toHaveCount(0);
     await expectContained(page, `${viewport.label} remasked Album link`);
+
+    await albumDetails.click();
+    await expect(albumDetails, `${viewport.label} Album details refolds`)
+      .toHaveAttribute('aria-expanded', 'false');
   }
 });
 

@@ -1010,6 +1010,23 @@ function anchorRect(top: number): DOMRect {
   return { top, bottom: top + 40, left: 0, right: 0, width: 0, height: 40, x: 0, y: top, toJSON: () => ({}) };
 }
 
+/**
+ * The audience status as the host reads it: three labelled facts, in source order, rather than
+ * one run-on sentence. Read as pairs so a fact that loses its label, or arrives in the wrong
+ * order, still fails.
+ */
+function audienceFacts(): Array<[string, string]> {
+  return Array.from(document.querySelectorAll('.gallery-audience__fact')).map((fact) => [
+    fact.querySelector('dt')!.textContent!,
+    fact.querySelector('dd')!.textContent!,
+  ]);
+}
+
+/** The one mode note the Gallery offers, folded behind its own summary. */
+function contextDisclosure(): HTMLDetailsElement {
+  return document.querySelector<HTMLDetailsElement>('.gallery-context-disclosure')!;
+}
+
 describe('gallery modes', () => {
   it('waits for the controlled Gallery mode to be adopted', async () => {
     const { fetchMock } = harness();
@@ -1019,7 +1036,7 @@ describe('gallery modes', () => {
 
     expect(await screen.findByText('First dance')).toBeVisible();
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: /^Album$/u }));
+      .getByRole('button', { name: /^Album/u }));
 
     expect(onModeChange).toHaveBeenCalledWith('album');
     expect(screen.getByText('First dance')).toBeVisible();
@@ -1239,7 +1256,7 @@ describe('gallery modes', () => {
         guestGalleryVisible: true,
         guestGalleryPublishedCount: 8,
       },
-      'Album: 12 photos · Link: Live · Guest gallery: On, 8 published',
+      [['Album', '12 photos'], ['Album link', 'Live'], ['Guest gallery', 'On, 8 published']],
     ],
     [
       {
@@ -1249,7 +1266,7 @@ describe('gallery modes', () => {
         guestGalleryVisible: false,
         guestGalleryPublishedCount: 0,
       },
-      'Album: 0 photos · Link: Off · Guest gallery: Off, 0 published',
+      [['Album', '0 photos'], ['Album link', 'Off'], ['Guest gallery', 'Off, 0 published']],
     ],
     [
       {
@@ -1259,13 +1276,14 @@ describe('gallery modes', () => {
         guestGalleryVisible: true,
         guestGalleryPublishedCount: 1,
       },
-      'Album: 1 photo · Link: Off · Guest gallery: On, 1 published',
+      [['Album', '1 photo'], ['Album link', 'Off'], ['Guest gallery', 'On, 1 published']],
     ],
-  ] satisfies Array<[GalleryAudienceSummaryView, string]>)('renders the persistent audience summary %#', async (audienceSummary, expected) => {
+  ] satisfies Array<[GalleryAudienceSummaryView, Array<[string, string]>]>)('renders the persistent audience summary %#', async (audienceSummary, expected) => {
     const { fetchMock } = harness({ audienceSummary });
     renderWorkspace(fetchMock);
 
-    expect(await screen.findByText(expected)).toBeVisible();
+    await waitFor(() => expect(audienceFacts()).toEqual(expected));
+    expect(document.querySelector('.gallery-audience')).toBeVisible();
   });
 
   it('keeps the live Album status visible without repeating its consequence copy', async () => {
@@ -1281,14 +1299,16 @@ describe('gallery modes', () => {
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
     const consequence = 'Album link live—later saved membership, metadata, sections, and order changes affect what people with the Album link see when they request it.';
-    const summary = 'Album: 1 photo · Link: Live · Guest gallery: On, 0 published';
+    const summary: Array<[string, string]> = [
+      ['Album', '1 photo'], ['Album link', 'Live'], ['Guest gallery', 'On, 0 published'],
+    ];
 
-    expect(await screen.findByText(summary)).toBeVisible();
+    await waitFor(() => expect(audienceFacts()).toEqual(summary));
     expect(screen.queryByText(consequence)).not.toBeInTheDocument();
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/u }));
 
-    expect(screen.getByText(summary)).toBeVisible();
+    expect(audienceFacts()).toEqual(summary);
     expect(screen.queryByText(consequence)).not.toBeInTheDocument();
   });
 
@@ -1326,16 +1346,18 @@ describe('gallery modes', () => {
       audienceReadErrors: [undefined, 'The refreshed summary failed.'],
     });
     renderWorkspace(fetchMock, { albumJob });
-    const line = await screen.findByText(
-      'Album: 12 photos · Link: Live · Guest gallery: On, 8 published',
-    );
+    const trustedFacts: Array<[string, string]> = [
+      ['Album', '12 photos'], ['Album link', 'Live'], ['Guest gallery', 'On, 8 published'],
+    ];
+    await waitFor(() => expect(audienceFacts()).toEqual(trustedFacts));
 
     await userEvent.setup().click(await screen.findByRole('button', {
       name: 'Pick First dance for the Album',
     }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('The refreshed summary failed.');
-    expect(line).toBeVisible();
+    expect(audienceFacts()).toEqual(trustedFacts);
+    expect(document.querySelector('.gallery-audience')).toBeVisible();
     expect(state.audienceReads).toBe(2);
 
     await userEvent.setup().click(within(screen.getByRole('group', { name: 'Gallery mode' }))
@@ -1370,15 +1392,14 @@ describe('gallery modes', () => {
     await waitFor(() => expect(controlled.state.audienceReads).toBe(1));
 
     rendered.rerenderForEvent('event-b');
-    expect(await screen.findByText(
-      'Album: 1 photo · Link: Off · Guest gallery: Off, 0 published',
-    )).toBeVisible();
+    const factsB: Array<[string, string]> = [
+      ['Album', '1 photo'], ['Album link', 'Off'], ['Guest gallery', 'Off, 0 published'],
+    ];
+    await waitFor(() => expect(audienceFacts()).toEqual(factsB));
     eventA.resolve();
     await act(async () => { await Promise.resolve(); });
 
-    expect(screen.queryByText(
-      'Album: 12 photos · Link: Live · Guest gallery: On, 8 published',
-    )).not.toBeInTheDocument();
+    expect(audienceFacts()).toEqual(factsB);
   });
 
   it('offers Library, Album and Guest gallery without redundant mode explanations', async () => {
@@ -1389,13 +1410,26 @@ describe('gallery modes', () => {
 
     const modes = screen.getByRole('group', { name: 'Gallery mode' });
     expect(within(modes).getAllByRole('button')).toHaveLength(3);
-    expect(within(modes).getByRole('button', { name: 'Guest gallery' })).toBeVisible();
+    expect(within(modes).getByRole('button', { name: /^Guest gallery/u })).toBeVisible();
     expect(within(modes).queryByRole('button', { name: 'Shared' })).not.toBeInTheDocument();
-    expect(screen.queryByText('About this Gallery view')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Delivered photos stay private to hosts/u)).not.toBeInTheDocument();
+    // Each segment carries its own count, so the switch answers how many and where without
+    // costing a second row.
+    await waitFor(() => expect(Array.from(modes.querySelectorAll('button'), (button) => [
+      button.firstChild?.textContent,
+      button.querySelector('.gallery-mode-switch__count')?.textContent,
+    ])).toEqual([['Library', '4'], ['Album', '0'], ['Guest gallery', '0']]));
+    // The mode note is offered once, folded, after the photographs it explains — never as a
+    // paragraph standing between the switch and the first control.
+    expect(contextDisclosure().open).toBe(false);
+    expect(within(contextDisclosure()).getByText('About this Gallery view')).toBeVisible();
+    expect(within(contextDisclosure()).getByText(/^Delivered photos stay private to hosts/u))
+      .not.toBeVisible();
 
     await user.click(within(modes).getByRole('button', { name: /^Album/ }));
     expect(await screen.findByRole('heading', { name: 'Album' })).toBeVisible();
+    expect(within(contextDisclosure()).getByText(/^One Album per event/u)).toBeInTheDocument();
+    expect(within(contextDisclosure()).queryByText(/^Delivered photos stay private to hosts/u))
+      .not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add a section' })).toBeVisible();
     expect(screen.queryByRole('heading', { name: 'The order people with the Album link will see' }))
       .not.toBeInTheDocument();
@@ -1403,7 +1437,9 @@ describe('gallery modes', () => {
 
   it('stacks the three-mode switch at the narrowest layout', () => {
     const styles = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
-    expect(styles).toMatch(/@media \(max-width: 360px\) \{(?:(?!@media)[\s\S])*?\.gallery-mode-switch--three \{ grid-template-columns: 1fr; \}\s*\}/u);
+    // Still the last declaration the narrowest block makes, now that the two-rows-of-three
+    // destination packing it used to sit beside is gone and only its reasoning remains.
+    expect(styles).toMatch(/@media \(max-width: 360px\) \{(?:(?!@media)[\s\S])*?\.gallery-mode-switch--three \{ grid-template-columns: 1fr; \}(?:\s|\/\*(?:(?!\*\/)[\s\S])*?\*\/)*\}/u);
   });
 
   it('clears Guest-gallery selection only after controlled Library adoption', async () => {
@@ -1419,7 +1455,7 @@ describe('gallery modes', () => {
     const user = userEvent.setup();
     const modes = await screen.findByRole('group', { name: 'Gallery mode' });
 
-    await user.click(within(modes).getByRole('button', { name: 'Library' }));
+    await user.click(within(modes).getByRole('button', { name: /^Library/u }));
     expect(onModeChange).toHaveBeenCalledWith('library');
     expect(onSharedSelectedChange).not.toHaveBeenCalled();
 
@@ -1436,28 +1472,54 @@ describe('gallery modes', () => {
     [50, '50 of 50 selected. Remove one to choose another.'],
   ] as const)('uses the same Library and Guest-gallery selection copy at %i selections', (count, expected) => {
     const selected = Array.from({ length: count }, (_, index) => `photo-${index}`);
-    render(<>
-      <SelectionTray count={count} busy={false} onAdd={vi.fn()} onRemove={vi.fn()} onClear={vi.fn()} />
-      <ManagerSharedGallery
-        guestGalleryVisible={event.galleryVisible}
-        media={[]}
-        status="unpublished"
-        selected={selected}
-        selectionAtLimit={count === MANAGER_BULK_SELECTION_MAX}
-        onStatusChange={vi.fn()}
-        onSelectedChange={vi.fn()}
-        onBulk={noop}
-        onChangePublication={noop}
-        onOpenSettings={vi.fn()}
-        settingsBlocked={false}
-        loadingMore={false}
-        hasMore={false}
-        onLoadMore={noop}
-      />
-    </>);
+    render(<SelectionTray
+      count={count}
+      busy={false}
+      primary={{ label: `Pick for Album (${count})`, icon: null, onClick: vi.fn() }}
+      secondary={{ label: `Remove from Album (${count})`, icon: null, onClick: vi.fn() }}
+      note="Pick changes Album membership only. Remove from Album keeps every delivered photo in Library; neither action publishes to the Guest gallery."
+      onClear={vi.fn()}
+    />);
 
     expect(document.querySelector('.selection-tray__count strong')).toHaveTextContent(expected);
     expect(document.getElementById('bulk-selection-status')).toHaveTextContent(expected);
+    expect(screen.getByRole('button', { name: `Pick for Album (${count})` })).toBeEnabled();
+    expect(screen.getByRole('button', { name: `Remove from Album (${count})` })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Clear selection' })).toBeEnabled();
+
+    // Guest gallery raises the same tray, so the two surfaces cannot word a count differently.
+    // One at a time, because `bulk-selection-status` now belongs to the tray rather than to each
+    // surface's own bar, and a document may only answer that id once.
+    cleanup();
+    render(<ManagerSharedGallery
+      guestGalleryVisible={event.galleryVisible}
+      media={[]}
+      status="unpublished"
+      selected={selected}
+      selectionAtLimit={count === MANAGER_BULK_SELECTION_MAX}
+      onStatusChange={vi.fn()}
+      onSelectedChange={vi.fn()}
+      onBulk={noop}
+      onChangePublication={noop}
+      onOpenSettings={vi.fn()}
+      settingsBlocked={false}
+      loadingMore={false}
+      hasMore={false}
+      onLoadMore={noop}
+    />);
+
+    if (count === 0) {
+      // Nothing chosen says nothing: the idle bar holding a zero over the controls that start a
+      // selection is exactly what the tray replaced.
+      expect(document.querySelector('.selection-tray')).toBeNull();
+      return;
+    }
+    expect(screen.getByRole('region', { name: 'Guest gallery' })).toBeVisible();
+    expect(document.querySelector('.selection-tray__count strong')).toHaveTextContent(expected);
+    expect(document.getElementById('bulk-selection-status')).toHaveTextContent(expected);
+    expect(screen.getByRole('button', { name: `Publish (${count})` })).toBeEnabled();
+    expect(screen.getByRole('button', { name: `Hide (${count})` })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Clear selection' })).toBeEnabled();
   });
 
   it('clears a Guest-gallery filter selection through the canonical transition and announces it once', async () => {
@@ -1465,13 +1527,16 @@ describe('gallery modes', () => {
     renderWorkspace(controlled.fetchMock, {}, { resourceBackedShared: true });
     const user = userEvent.setup();
     const modes = await screen.findByRole('group', { name: 'Gallery mode' });
-    await user.click(within(modes).getByRole('button', { name: 'Guest gallery' }));
+    await user.click(within(modes).getByRole('button', { name: /^Guest gallery/u }));
+    await user.click(await screen.findByRole('button', { name: 'Select photos' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select First dance' }));
     await user.click(screen.getByRole('button', { name: /^Published$/ }));
 
     expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
       .toHaveTextContent('Selection cleared.');
-    expect(document.getElementById('bulk-selection-status')).toHaveTextContent('0 of 50 selected');
+    // Nothing selected is now said by the tray retiring rather than by a bar reading zero.
+    expect(document.getElementById('bulk-selection-status')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Guest gallery' })).not.toBeInTheDocument();
     expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
     expect(document.querySelector('.gallery-shared [role="status"]')).toBeNull();
   });
@@ -1484,11 +1549,13 @@ describe('gallery modes', () => {
     const user = userEvent.setup();
     const modes = await screen.findByRole('group', { name: 'Gallery mode' });
 
-    await user.click(within(modes).getByRole('button', { name: 'Guest gallery' }));
-    expect(screen.queryByText('About this Gallery view')).not.toBeInTheDocument();
+    await user.click(within(modes).getByRole('button', { name: /^Guest gallery/u }));
+    // The lede is the only consequence copy standing in the flow; the longer rule is folded away
+    // under the one summary the Gallery offers.
     expect(screen.getByText('Published photos are visible to event guests.')).toBeVisible();
-    expect(screen.queryByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.'))
-      .not.toBeInTheDocument();
+    expect(contextDisclosure().open).toBe(false);
+    expect(screen.getByText('Publish and Hide change what event guests see. They do not change Album membership or the Album link.'))
+      .not.toBeVisible();
     const unpublishedActions = screen.getByRole('button', { name: 'Publish p1.jpg' }).parentElement!;
     expect(Array.from(unpublishedActions.querySelectorAll('button')).map((button) => button.textContent?.trim()))
       .toEqual(['Publish', 'Hide']);
@@ -1508,7 +1575,7 @@ describe('gallery modes', () => {
     expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
       .not.toHaveTextContent('Publishing finished.');
 
-    await user.click(within(modes).getByRole('button', { name: 'Library' }));
+    await user.click(within(modes).getByRole('button', { name: /^Library/u }));
     expect(await screen.findByRole('button', { name: 'Pick First dance for the Album' })).toBeVisible();
     expect(screen.getByText('Guest gallery · Published')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Pick First dance for the Album' }));
@@ -1516,7 +1583,7 @@ describe('gallery modes', () => {
       publicationStatus: 'published', isFavorite: true,
     }));
 
-    await user.click(within(modes).getByRole('button', { name: 'Guest gallery' }));
+    await user.click(within(modes).getByRole('button', { name: /^Guest gallery/u }));
     await user.click(screen.getByRole('button', { name: /^Published$/ }));
     const hide = await screen.findByRole('button', { name: 'Hide p1.jpg' });
     expect(hide).toHaveClass('button--primary');
@@ -1553,13 +1620,14 @@ describe('gallery modes', () => {
     });
     const user = userEvent.setup();
     const modes = await screen.findByRole('group', { name: 'Gallery mode' });
-    await user.click(within(modes).getByRole('button', { name: 'Guest gallery' }));
+    await user.click(within(modes).getByRole('button', { name: /^Guest gallery/u }));
 
     expect(screen.getByText('Publication choices are saved, but the Guest gallery is off.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Open settings' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select First dance' }));
     await user.click(screen.getByRole('checkbox', { name: 'Select p2.jpg' }));
-    await user.click(screen.getByRole('button', { name: 'Publish selected' }));
+    await user.click(screen.getByRole('button', { name: 'Publish (2)' }));
 
     await waitFor(() => expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
       .toHaveTextContent('2 photos are Published in the Guest gallery. The Guest gallery is off, so event guests cannot see this choice yet. Hide them to reverse this.'));
@@ -1580,15 +1648,20 @@ describe('gallery modes', () => {
       audienceReadErrors: [undefined, 'The visibility refresh failed.', 'The publication refresh failed.'],
     });
     const rendered = renderWorkspace(controlled.fetchMock, {}, { resourceBackedShared: true });
-    await screen.findByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published');
+    const galleryOn: Array<[string, string]> = [
+      ['Album', '0 photos'], ['Album link', 'Off'], ['Guest gallery', 'On, 0 published'],
+    ];
+    await waitFor(() => expect(audienceFacts()).toEqual(galleryOn));
 
     rendered.rerenderEvent({ galleryVisible: false });
     rendered.invalidateAudienceSummary();
     expect(await screen.findByRole('alert')).toHaveTextContent('The visibility refresh failed.');
-    expect(screen.getByText('Album: 0 photos · Link: Off · Guest gallery: Off, 0 published')).toBeVisible();
+    expect(audienceFacts()).toEqual([
+      ['Album', '0 photos'], ['Album link', 'Off'], ['Guest gallery', 'Off, 0 published'],
+    ]);
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    await user.click(screen.getByRole('button', { name: /^Guest gallery/u }));
     expect(screen.getByText('Publication choices are saved, but the Guest gallery is off.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Open settings' })).toBeVisible();
     await user.click(await screen.findByRole('button', { name: 'Publish p1.jpg' }));
@@ -1623,15 +1696,18 @@ describe('gallery modes', () => {
     });
     const user = userEvent.setup();
     await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Guest gallery' }));
+      .getByRole('button', { name: /^Guest gallery/u }));
     expect(screen.getByText('Publication choices are saved, but the Guest gallery is off.')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select p1.jpg' }));
-    await user.click(screen.getByRole('button', { name: 'Publish selected' }));
+    await user.click(screen.getByRole('button', { name: 'Publish (1)' }));
 
     summary.resolve();
     expect(await screen.findByText('Published photos are visible to event guests.')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Open settings' })).not.toBeInTheDocument();
-    expect(screen.getByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published')).toBeVisible();
+    expect(audienceFacts()).toEqual([
+      ['Album', '0 photos'], ['Album link', 'Off'], ['Guest gallery', 'On, 0 published'],
+    ]);
 
     bulk.resolve();
     await waitFor(() => expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
@@ -1652,13 +1728,16 @@ describe('gallery modes', () => {
       resourceBackedShared: true,
       eventOverride: { galleryVisible: false },
     });
-    await screen.findByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published');
+    const galleryOn: Array<[string, string]> = [
+      ['Album', '0 photos'], ['Album link', 'Off'], ['Guest gallery', 'On, 0 published'],
+    ];
+    await waitFor(() => expect(audienceFacts()).toEqual(galleryOn));
 
     rendered.rerenderPublicationCallback();
 
-    expect(screen.getByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published')).toBeVisible();
+    expect(audienceFacts()).toEqual(galleryOn);
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Guest gallery' }));
+    await user.click(screen.getByRole('button', { name: /^Guest gallery/u }));
     expect(screen.getByText('Published photos are visible to event guests.')).toBeVisible();
   });
 
@@ -1670,7 +1749,7 @@ describe('gallery modes', () => {
     const user = userEvent.setup();
     await user.click((await screen.findByRole('group', { name: 'Gallery mode' }))
       .querySelector<HTMLButtonElement>('button:last-child')!);
-    await user.click(screen.getByRole('button', { name: 'Publish selected' }));
+    await user.click(screen.getByRole('button', { name: 'Publish (1)' }));
 
     await waitFor(() => expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
       .toHaveTextContent('Publishing could not be completed.'));
@@ -1815,7 +1894,7 @@ describe('audience summary invalidation boundaries', () => {
     const rendered = renderWorkspace(controlled.fetchMock, {}, { resourceBackedShared: true });
     const user = userEvent.setup();
     await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Guest gallery' }));
+      .getByRole('button', { name: /^Guest gallery/u }));
     await user.click(await screen.findByRole('button', { name: 'Publish p1.jpg' }));
     await user.click(screen.getByRole('button', { name: /^Published$/ }));
     expect(await screen.findByRole('heading', { name: 'No published photos.' })).toBeVisible();
@@ -1838,7 +1917,7 @@ describe('audience summary invalidation boundaries', () => {
     });
     expect(publishedReads).toHaveLength(2);
 
-    await user.click(screen.getByRole('button', { name: 'Library' }));
+    await user.click(screen.getByRole('button', { name: /^Library/u }));
     expect(await screen.findByText('Guest gallery · Published')).toBeVisible();
     const libraryReads = controlled.fetchMock.mock.calls.filter(([input, init]) => {
       const url = new URL(String(input), 'https://candidary.test');
@@ -1861,7 +1940,7 @@ describe('audience summary invalidation boundaries', () => {
     const rendered = renderWorkspace(controlled.fetchMock, {}, { resourceBackedShared: true });
     const user = userEvent.setup();
     await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Guest gallery' }));
+      .getByRole('button', { name: /^Guest gallery/u }));
     await user.click(await screen.findByRole('button', { name: 'Publish p1.jpg' }));
     await waitFor(() => expect(controlled.state.publicationWrites).toHaveLength(0));
 
@@ -1877,8 +1956,8 @@ describe('audience summary invalidation boundaries', () => {
   });
 
   it.each([
-    ['publish', 'unpublished', 'Publish selected'],
-    ['hide', 'published', 'Hide selected'],
+    ['publish', 'unpublished', 'Publish (1)'],
+    ['hide', 'published', 'Hide (1)'],
   ] as const)('reloads after a confirmed bulk %s', async (_action, status, buttonName) => {
     const controlled = harness({
       galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z', { publicationStatus: status })],
@@ -1890,6 +1969,7 @@ describe('audience summary invalidation boundaries', () => {
     if (status === 'published') {
       await user.click(await screen.findByRole('button', { name: 'Published' }));
     }
+    await user.click(await screen.findByRole('button', { name: 'Select photos' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select p1.jpg' }));
     await user.click(screen.getByRole('button', { name: buttonName }));
 
@@ -1907,11 +1987,12 @@ describe('audience summary invalidation boundaries', () => {
     const user = userEvent.setup();
     await user.click((await screen.findByRole('group', { name: 'Gallery mode' }))
       .querySelector<HTMLButtonElement>('button:last-child')!);
+    await user.click(await screen.findByRole('button', { name: 'Select photos' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select p1.jpg' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select p2.jpg' }));
     await waitFor(() => expect(controlled.state.audienceReads).toBe(1));
 
-    await user.click(screen.getByRole('button', { name: 'Publish selected' }));
+    await user.click(screen.getByRole('button', { name: 'Publish (2)' }));
 
     await waitFor(() => expect(controlled.state.publicationWrites).toHaveLength(2));
     expect(controlled.state.audienceReads).toBe(2);
@@ -1941,10 +2022,11 @@ describe('audience summary invalidation boundaries', () => {
     });
     const user = userEvent.setup();
     await user.click(within(await screen.findByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Guest gallery' }));
+      .getByRole('button', { name: /^Guest gallery/u }));
+    await user.click(await screen.findByRole('button', { name: 'Select photos' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select p1.jpg' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select p2.jpg' }));
-    await user.click(screen.getByRole('button', { name: 'Publish selected' }));
+    await user.click(screen.getByRole('button', { name: 'Publish (2)' }));
     await user.click(screen.getByRole('button', { name: /^Published$/ }));
     expect(await screen.findByRole('heading', { name: 'No published photos.' })).toBeVisible();
 
@@ -1987,11 +2069,12 @@ describe('audience summary invalidation boundaries', () => {
     const user = userEvent.setup();
     await user.click((await screen.findByRole('group', { name: 'Gallery mode' }))
       .querySelector<HTMLButtonElement>('button:last-child')!);
+    await user.click(await screen.findByRole('button', { name: 'Select photos' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select p1.jpg' }));
     await user.click(await screen.findByRole('checkbox', { name: 'Select p2.jpg' }));
     await waitFor(() => expect(controlled.state.audienceReads).toBe(1));
 
-    await user.click(screen.getByRole('button', { name: 'Publish selected' }));
+    await user.click(screen.getByRole('button', { name: 'Publish (2)' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('The hidden group failed.');
     expect(document.querySelector('[data-gallery-live-host] [role="status"]')).toHaveTextContent(
@@ -2043,10 +2126,15 @@ describe('audience summary invalidation boundaries', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
-    await screen.findByText('Album: 1 photo · Link: Off · Guest gallery: On, 0 published');
+    const withOnePhoto: Array<[string, string]> = [
+      ['Album', '1 photo'], ['Album link', 'Off'], ['Guest gallery', 'On, 0 published'],
+    ];
+    await waitFor(() => expect(audienceFacts()).toEqual(withOnePhoto));
 
     await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
-    await screen.findByText('Album: 0 photos · Link: Off · Guest gallery: On, 0 published');
+    await waitFor(() => expect(audienceFacts()).toEqual([
+      ['Album', '0 photos'], ['Album link', 'Off'], ['Guest gallery', 'On, 0 published'],
+    ]));
     await waitFor(() => expect(controlled.state.albumReads).toBe(2));
 
     controlled.state.galleryRows[1]!.isFavorite = true;
@@ -2066,9 +2154,7 @@ describe('audience summary invalidation boundaries', () => {
     conflictRead.resolve();
 
     await waitFor(() => expect(controlled.state.audienceReads).toBe(3));
-    expect(await screen.findByText(
-      'Album: 1 photo · Link: Off · Guest gallery: On, 0 published',
-    )).toBeVisible();
+    await waitFor(() => expect(audienceFacts()).toEqual(withOnePhoto));
   });
 
   it('still reloads for an unrelated metadata edit coalesced into a membership save', async () => {
@@ -2241,8 +2327,8 @@ describe('selecting photos into the album', () => {
     expect(screen.getByRole('region', { name: 'Album' })).toBeVisible();
 
     const modes = screen.getByRole('group', { name: 'Gallery mode' });
-    await user.click(within(modes).getByRole('button', { name: 'Guest gallery' }));
-    await user.click(within(modes).getByRole('button', { name: 'Library' }));
+    await user.click(within(modes).getByRole('button', { name: /^Guest gallery/u }));
+    await user.click(within(modes).getByRole('button', { name: /^Library/u }));
     expect(screen.queryByRole('region', { name: 'Album' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', {
       name: 'Select First dance, from Jose',
@@ -3039,7 +3125,7 @@ describe('the album', () => {
     expect(title).toHaveFocus();
 
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
     const prompt = await screen.findByRole('region', { name: 'Album changes are not saved yet' });
     expect(prompt).toHaveFocus();
     expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
@@ -3060,11 +3146,11 @@ describe('the album', () => {
     expect(title).toHaveFocus();
 
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
     await user.click(within(await screen.findByRole('region', { name: 'Album changes are not saved yet' }))
       .getByRole('button', { name: 'Discard unsent Album changes and leave' }));
     expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true');
     expect(state.orderWrites).toHaveLength(0);
   });
 
@@ -3078,7 +3164,7 @@ describe('the album', () => {
     });
     const modes = within(screen.getByRole('group', { name: 'Gallery mode' }));
 
-    await user.click(modes.getByRole('button', { name: 'Library' }));
+    await user.click(modes.getByRole('button', { name: /^Library/u }));
     const prompt = await screen.findByRole('region', {
       name: 'Album changes are not saved yet',
     });
@@ -3087,14 +3173,14 @@ describe('the album', () => {
     })).toBeDisabled();
     expect(within(prompt).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
     expect(within(prompt).getByRole('button', { name: 'Stay in Album' })).toBeEnabled();
-    expect(modes.getByRole('button', { name: 'Guest gallery' })).toBeDisabled();
-    await user.click(modes.getByRole('button', { name: 'Guest gallery' }));
+    expect(modes.getByRole('button', { name: /^Guest gallery/u })).toBeDisabled();
+    await user.click(modes.getByRole('button', { name: /^Guest gallery/u }));
     expect(modes.getByRole('button', { name: /^Album/ })).toHaveAttribute('aria-pressed', 'true');
 
     act(() => { save.resolve(); });
-    await waitFor(() => expect(modes.getByRole('button', { name: 'Library' }))
+    await waitFor(() => expect(modes.getByRole('button', { name: /^Library/u }))
       .toHaveAttribute('aria-pressed', 'true'));
-    expect(modes.getByRole('button', { name: 'Guest gallery' })).toHaveAttribute('aria-pressed', 'false');
+    expect(modes.getByRole('button', { name: /^Guest gallery/u })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.queryByRole('region', { name: 'Album changes are not saved yet' }))
       .not.toBeInTheDocument();
   });
@@ -3114,7 +3200,7 @@ describe('the album', () => {
     await screen.findByText('The Album save could not reach Candidary.');
 
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
     const prompt = await screen.findByRole('region', {
       name: 'Album changes are not saved yet',
     });
@@ -3132,7 +3218,7 @@ describe('the album', () => {
     act(() => { retrySave.resolve(); });
 
     await waitFor(() => expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true'));
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true'));
   });
 
   it('renders explicit and fallback covers, photo-only numbers, and independent failed preview tiles', async () => {
@@ -3844,7 +3930,10 @@ describe('the album', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create the Album link?' })).not.toBeInTheDocument());
     const copy = screen.getByRole('button', { name: 'Copy Album link' });
     expect(copy).toHaveFocus();
-    expect(screen.getByText('Album link')).toBeVisible();
+    // Scoped to the share card: the audience chips now name the Album link too, and it is the
+    // card's own label that has to say what the masked value is.
+    expect(within(document.querySelector<HTMLElement>('.album-share')!).getByText('Album link'))
+      .toBeVisible();
     expect(screen.getByText('••••••••••••')).toBeVisible();
     expect(screen.queryByText(url)).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue(url)).not.toBeInTheDocument();
@@ -4005,10 +4094,10 @@ describe('the album', () => {
     await user.click(screen.getByRole('button', { name: 'Back to editing' }));
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Still saving.' } });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
     await waitFor(() => expect(state.metadataWrites.at(-1)?.description).toBe('Still saving.'));
     expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('reloads and keeps Album active when a flushed draft loses the revision race', async () => {
@@ -4042,7 +4131,7 @@ describe('the album', () => {
     controlled.state.albumReadErrors[recoveryRead] = 'The canonical album could not be reloaded.';
     fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Unsaved title' } });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
 
     const prompt = await screen.findByRole('region', {
       name: 'Album changes are not saved yet',
@@ -4054,7 +4143,7 @@ describe('the album', () => {
     await user.click(within(prompt).getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(controlled.state.albumReads).toBeGreaterThan(readsBeforeRetry));
     await waitFor(() => expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true'));
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true'));
   });
 
   it('navigates an empty album back to Library', async () => {
@@ -4066,7 +4155,7 @@ describe('the album', () => {
     expect(screen.getByText('Pick photos in Library. Each pick makes a photo In Album for every host on this event. It does not publish to the Guest gallery.')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Go to Library' }));
     expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('starts an album-only export with the exact kind selector and disables an empty album', async () => {
@@ -4618,14 +4707,14 @@ describe('album review regressions', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
     expect(screen.getByLabelText('Album title')).toBeVisible();
     await act(async () => { unpick.resolve(); });
     await waitFor(() => expect(controlled.state.albumReads).toBe(read + 1));
     expect(screen.getByLabelText('Album title')).toBeVisible();
     await act(async () => { refresh.resolve(); });
     await waitFor(() => expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true'));
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true'));
   });
 
   it('retires a removed-section inverse when later metadata, cover, and reorder intent exists', async () => {
@@ -5106,7 +5195,7 @@ describe('album review regressions', () => {
 
     rendered.rerenderForEvent('event-b');
     await waitFor(() => expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true'));
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true'));
     await openAlbum(user);
     fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Event B album' } });
     fireEvent.blur(screen.getByLabelText('Album title'));
@@ -5234,13 +5323,13 @@ describe('album review regressions', () => {
     await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
     await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(1));
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
     expect(screen.getByLabelText('Album title')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
 
     removal.resolve();
     await waitFor(() => expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true'));
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true'));
     expect(screen.queryByLabelText('Album title')).not.toBeInTheDocument();
     await user.click(await screen.findByRole('button', { name: 'Undo' }));
 
@@ -5272,13 +5361,13 @@ describe('album review regressions', () => {
     await user.click(await screen.findByRole('button', { name: 'Start empty' }));
     await waitFor(() => expect(controlled.state.startWrites).toEqual(['empty']));
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
     expect(screen.getByRole('button', { name: 'Start empty' })).toBeVisible();
 
     start.resolve();
 
     await waitFor(() => expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true'));
+      .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true'));
     expect(screen.queryByLabelText('Album title')).not.toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Undo' })).toBeEnabled();
   });
@@ -5328,7 +5417,7 @@ describe('album review regressions', () => {
     }
     await screen.findByRole('button', { name: 'Undo' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
-      .getByRole('button', { name: 'Library' }));
+      .getByRole('button', { name: /^Library/u }));
     await waitFor(() => expect(screen.queryByLabelText('Album title')).not.toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Undo' }));

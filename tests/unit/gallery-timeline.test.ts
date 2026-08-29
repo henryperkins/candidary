@@ -185,23 +185,23 @@ describe('formatMomentHeading', () => {
 
 describe('mosaicPlacement', () => {
   it('applies the exact span pattern for two columns', () => {
-    // The phone hero spans two rows so it stays roughly square rather than becoming the
-    // flattest crop in the grid; position eight closes the block that leaves.
+    // The phone hero spans two rows so it stays square; every supporting photo keeps the
+    // same one-cell weight, even when the final row is intentionally incomplete.
     expect(mosaicPlacement(1, 2)).toEqual({ columnSpan: 2, rowSpan: 2 });
-    expect(mosaicPlacement(8, 2)).toEqual({ columnSpan: 2, rowSpan: 1 });
+    expect(mosaicPlacement(8, 2)).toEqual({ columnSpan: 1, rowSpan: 1 });
     expect(mosaicPlacement(2, 2)).toEqual({ columnSpan: 1, rowSpan: 1 });
     expect(mosaicPlacement(6, 2)).toEqual({ columnSpan: 1, rowSpan: 1 });
   });
 
   it('applies the exact span pattern for three columns', () => {
     expect(mosaicPlacement(1, 3)).toEqual({ columnSpan: 2, rowSpan: 2 });
-    expect(mosaicPlacement(7, 3)).toEqual({ columnSpan: 2, rowSpan: 1 });
+    expect(mosaicPlacement(7, 3)).toEqual({ columnSpan: 1, rowSpan: 1 });
     expect(mosaicPlacement(2, 3)).toEqual({ columnSpan: 1, rowSpan: 1 });
   });
 
   it('applies the exact span pattern for four columns', () => {
     expect(mosaicPlacement(1, 4)).toEqual({ columnSpan: 2, rowSpan: 2 });
-    expect(mosaicPlacement(2, 4)).toEqual({ columnSpan: 2, rowSpan: 1 });
+    expect(mosaicPlacement(2, 4)).toEqual({ columnSpan: 1, rowSpan: 1 });
     expect(mosaicPlacement(3, 4)).toEqual({ columnSpan: 1, rowSpan: 1 });
   });
 
@@ -223,6 +223,17 @@ describe('mosaicPlacement', () => {
       '--gallery-row-span-4': 2,
     });
     expect(mosaicStyleVars(9)).toEqual({
+      '--gallery-col-span-2': 1,
+      '--gallery-row-span-2': 1,
+      '--gallery-col-span-3': 1,
+      '--gallery-row-span-3': 1,
+      '--gallery-col-span-4': 1,
+      '--gallery-row-span-4': 1,
+    });
+  });
+
+  it('keeps the first tile of later moments at the supporting-photo size', () => {
+    expect(mosaicStyleVars(1, false)).toEqual({
       '--gallery-col-span-2': 1,
       '--gallery-row-span-2': 1,
       '--gallery-col-span-3': 1,

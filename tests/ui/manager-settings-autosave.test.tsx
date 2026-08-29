@@ -319,8 +319,9 @@ describe('manager settings autosave guards', () => {
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
     expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
-    await user.click(await screen.findByRole('button', { name: 'Guest gallery' }));
-    expect(within(screen.getByRole('group', { name: 'Publication status' }))
+    // The mode segments carry their counts in their accessible names now.
+    await user.click(await screen.findByRole('button', { name: /^Guest gallery/u }));
+    expect(within(await screen.findByRole('group', { name: 'Publication status' }))
       .getByRole('button', { name: 'Unpublished' })).toHaveClass('active');
   });
 

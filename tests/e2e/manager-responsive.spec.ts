@@ -189,7 +189,7 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
     }
     controlBoxes.push(controlBox);
     expect(controlBox.width, `${DESTINATIONS[index]} target width`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
-    expect(controlBox.height, `${DESTINATIONS[index]} target height`).toBeGreaterThanOrEqual(58);
+    expect(controlBox.height, `${DESTINATIONS[index]} target height`).toBeGreaterThanOrEqual(52);
     expect(labelBox.x, `${DESTINATIONS[index]} label starts inside its control`).toBeGreaterThanOrEqual(controlBox.x);
     expect(labelBox.x + labelBox.width, `${DESTINATIONS[index]} label ends inside its control`)
       .toBeLessThanOrEqual(controlBox.x + controlBox.width);
@@ -204,16 +204,20 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
     if (!rows.some((rowStart) => Math.abs(rowStart - box.y) <= GEOMETRY_TOLERANCE)) rows.push(box.y);
     return rows;
   }, []);
-  expect(rowStarts, 'Manager destinations render as exactly two rows').toHaveLength(2);
+  // One swipeable row, not a wrapped grid. Six destinations wrapped into two rows of three cost
+  // 189px of a 568px screen before the product said anything; one row a thumb moves along costs 52.
+  expect(rowStarts, 'Manager destinations render as exactly one row').toHaveLength(1);
   for (let index = 0; index < controlBoxes.length; index += 1) {
-    const expectedRow = index < 3 ? rowStarts[0]! : rowStarts[1]!;
     expect(
-      Math.abs(controlBoxes[index]!.y - expectedRow),
-      `${DESTINATIONS[index]} remains in its source-ordered row`,
+      Math.abs(controlBoxes[index]!.y - rowStarts[0]!),
+      `${DESTINATIONS[index]} shares the single destination row`,
     ).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
   }
-  expect(rowStarts[1]!, 'second Manager row follows the first')
-    .toBeGreaterThanOrEqual(rowStarts[0]! + controlBoxes[0]!.height - GEOMETRY_TOLERANCE);
+  // Source order still reads left to right, which is what a swipe follows.
+  for (let index = 1; index < controlBoxes.length; index += 1) {
+    expect(controlBoxes[index]!.x, `${DESTINATIONS[index]} follows ${DESTINATIONS[index - 1]}`)
+      .toBeGreaterThan(controlBoxes[index - 1]!.x);
+  }
 
   const counts = controls.locator('.manager-nav__count');
   await expect(counts).toHaveCount(2);
@@ -260,9 +264,10 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
   if (!managerNavBox || !controlRowBox || !mosaicControlBox) {
     throw new Error('Narrow Gallery requires rendered navigation, control-row, and mosaic-control bounds.');
   }
-  expect(stickyOffset, 'narrow Manager sticky offset').toBe(169);
-  expect(managerNavBox.height, 'two-row Manager navigation fits its declared offset').toBeLessThanOrEqual(stickyOffset);
-  expect(managerNavBox.height, 'two-row Manager navigation consumes the declared offset').toBeGreaterThan(stickyOffset - 1);
+  // 53, not 169: the brand joined the destinations on one row, and the second row is gone.
+  expect(stickyOffset, 'narrow Manager sticky offset').toBe(53);
+  expect(managerNavBox.height, 'one-row Manager navigation fits its declared offset').toBeLessThanOrEqual(stickyOffset);
+  expect(managerNavBox.height, 'one-row Manager navigation consumes the declared offset').toBeGreaterThan(stickyOffset - 1);
   expect(await boxesIntersect(managerNav, controlRow), 'Manager navigation and Gallery control row').toBe(false);
   const managerToGalleryGap = controlRowBox.y - (managerNavBox.y + managerNavBox.height);
   expect(managerToGalleryGap, 'Gallery row does not overlap the Manager navigation')
@@ -278,11 +283,27 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
   expect(scrollY, 'the 320 mosaic target is measured after scrolling').toBeGreaterThan(0);
   expect(mosaicControlBox.y, 'scrolled 320 mosaic target clears the measured sticky stack')
     .toBeGreaterThanOrEqual(combinedStickyBottom - GEOMETRY_TOLERANCE);
+  // The row is a flex scroller now, so it resolves no grid tracks at all — the topology assertion
+  // is that there is no track structure left to wrap the destinations into.
   const managerTracks = await measureGridTracks(page.locator('.manager-nav nav'));
-  expect(managerTracks, 'Manager destination topology').toHaveLength(3);
+  expect(managerTracks, 'Manager destination topology').toHaveLength(0);
+  const navScrolls = await page.locator('.manager-nav nav').evaluate((element) => ({
+    overflowX: getComputedStyle(element).overflowX,
+    reachable: element.scrollWidth > element.clientWidth,
+  }));
+  expect(navScrolls.overflowX, 'the destination row scrolls sideways').toBe('auto');
+  expect(navScrolls.reachable, 'the off-screen destinations are reachable by swiping').toBe(true);
   expect(managerHeadingMargin, 'narrow Manager heading scroll margin').toBe(stickyOffset + 12);
-  expect(galleryHeadingMargin, 'narrow Gallery heading scroll margin').toBe(stickyOffset + 190 + 12);
-  expect(mosaicMargin, 'narrow Gallery mosaic-control scroll margin').toBe(stickyOffset + 190 + 12);
+  // 150, not 190: the audience facts left the pinned row for normal flow, so the Gallery
+  // obstruction is the stacked mode switch alone — which still stacks at 320, because three
+  // cramped columns would repeat the collision the destination row just fixed. Read from the
+  // custom property rather than repeating the literal, so the budget and the scroll margins
+  // cannot drift apart again.
+  const narrowObstruction = await page.locator('.manager-shell').evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).getPropertyValue('--gallery-control-obstruction')));
+  expect(narrowObstruction, 'narrow Gallery obstruction budget').toBe(150);
+  expect(galleryHeadingMargin, 'narrow Gallery heading scroll margin').toBe(stickyOffset + narrowObstruction + 12);
+  expect(mosaicMargin, 'narrow Gallery mosaic-control scroll margin').toBe(stickyOffset + narrowObstruction + 12);
   await expectContained(page, 320);
 });
 
@@ -390,7 +411,7 @@ test('a new Album section enters the mobile viewport without focus-induced scrol
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await destination(page, 'Gallery').click();
   await page.getByRole('group', { name: 'Gallery mode' })
-    .getByRole('button', { name: /^Album \(10\)$/u }).click();
+    .getByRole('button', { name: /^Album, 10$/u }).click();
 
   const addSection = page.getByRole('button', { name: 'Add a section' });
   await addSection.scrollIntoViewIfNeeded();
@@ -685,18 +706,28 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await destination(page, 'Gallery').click();
     await page.getByRole('button', { name: 'Guest gallery' }).click();
     await expectTouchTargets(page, '.filter-tabs button', `publication filter at ${width}`);
-    await expectTouchTargets(page, '.bulk-bar .button', `bulk control at ${width}`);
+    await expectTouchTargets(page, '.gallery-shared .gallery-select-toggle', `publication select toggle at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type button', `gallery card control at ${width}`);
 
-    // Gallery's copy of the bulk bar is scoped a class deeper than the shared rule, so it outranks
-    // the 761 layout unless it opts back in by name. Touch targets and containment both survive a
-    // full-bleed stack, so only the row itself reports that the wide layout was lost.
-    const bulkTops = await page.locator('.gallery-shared .bulk-bar .button').evaluateAll(
+    // Guest gallery raises the same tray Library does, so its verbs only exist once a host has
+    // chosen something for them to act on — the always-on bar holding a zero is gone.
+    await expect(page.locator('.gallery-shared .selection-tray'), `no idle tray at ${width}`).toHaveCount(0);
+    await page.locator('.gallery-shared .gallery-select-toggle').click();
+    await page.locator('.gallery-shared .intake-select input').first().check();
+    const sharedTray = page.locator('.gallery-shared .selection-tray');
+    await expect(sharedTray, `selecting raises the tray at ${width}`).toBeVisible();
+    await expectTouchTargets(page, '.gallery-shared .selection-tray .button', `bulk control at ${width}`);
+    await expectTouchTargets(page, '.gallery-shared .selection-tray__clear', `clear selection at ${width}`);
+
+    // Both verbs share a row and `Clear selection` takes its own, at every width the tray is drawn
+    // at — the disposition already recorded for Library's tray, now one pattern rather than two.
+    const bulkTops = await sharedTray.locator('.selection-tray__actions .button').evaluateAll(
       (nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().top)),
     );
     expect(bulkTops.length, `two bulk controls at ${width}`).toBe(2);
-    expect(new Set(bulkTops).size, `bulk controls share one row from 761 and stack below it at ${width}`)
-      .toBe(width >= 761 ? 1 : 2);
+    expect(new Set(bulkTops).size, `bulk controls share one row at ${width}`).toBe(1);
+    await sharedTray.locator('.selection-tray__clear').click();
+    await expect(sharedTray, `clearing retires the tray at ${width}`).toHaveCount(0);
 
     // The card clips its own corners, so a control pushed past its edge still measures 44x44 and still
     // stays inside the viewport. Only the row that holds them reports that it ran out of width.
@@ -816,9 +847,33 @@ test('Library first photo intersects the initial 390 by 844 viewport', async ({ 
   const controlRow = page.locator('.gallery-control-row');
   const collapsedControlRow = await controlRow.boundingBox();
   if (!collapsedControlRow) throw new Error('Collapsed Gallery controls require rendered bounds.');
-  await expect(page.getByText('About this Gallery view', { exact: true })).toHaveCount(0);
   await expect(page.getByText('What the complete download includes', { exact: true })).toHaveCount(0);
+
+  // The mode note is back, and below the mode's content rather than above it: it is the rule for
+  // the mode, read once, and standing between the switch and the first control it was a collapsed
+  // paragraph occupying a quarter of the fold.
+  const contextDisclosure = page.locator('.gallery-context-disclosure');
+  await expect(contextDisclosure.locator('summary')).toHaveText('About this Gallery view');
+  const [disclosureBox, foldPhotoBox] = await Promise.all([
+    contextDisclosure.boundingBox(),
+    firstPhoto.boundingBox(),
+  ]);
+  if (!disclosureBox || !foldPhotoBox) {
+    throw new Error('The context disclosure and the first Library photo require rendered bounds.');
+  }
+  expect(disclosureBox.y, 'the mode note reads after the photographs, not above them')
+    .toBeGreaterThan(foldPhotoBox.y + foldPhotoBox.height);
+
+  // `Download all` is the mode's one action and it is docked to the thumb, not stacked above the
+  // photographs — where it was landing about two pixels inside a 390 viewport.
+  const actionDock = page.locator('.gallery-action');
   await expect(page.getByRole('button', { name: 'Download all' })).toBeVisible();
+  await expect(actionDock.getByRole('button', { name: 'Download all' })).toBeVisible();
+  const dockBox = await actionDock.boundingBox();
+  if (!dockBox) throw new Error('The docked Gallery action requires rendered bounds.');
+  expect(dockBox.y + dockBox.height, 'the action bar sits on the bottom edge').toBeCloseTo(844, 0);
+  expect(dockBox.x, 'the action bar spans the viewport').toBeCloseTo(0, 0);
+  expect(dockBox.width, 'the action bar spans the viewport').toBeCloseTo(390, 0);
 
   const stickyTarget = page.locator('.gallery-mosaic__open').first();
   await stickyTarget.evaluate((element) => {
@@ -867,8 +922,102 @@ test('Library first photo intersects the initial 390 by 844 viewport', async ({ 
   expect(stickyTargetBox.y, 'focused mosaic control clears the actual sticky Gallery row')
     .toBeGreaterThanOrEqual(stickyControlRow.y + stickyControlRow.height - GEOMETRY_TOLERANCE);
 
+  // Whatever is docked, the workspace reserves its measured height — a reservation hardcoded for
+  // one occupant is what stranded the last row behind another.
+  await page.evaluate(() => {
+    const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    document.documentElement.style.scrollBehavior = previousScrollBehavior;
+  });
+  const [scrolledDock, scrolledDisclosure, reservation] = await Promise.all([
+    actionDock.boundingBox(),
+    contextDisclosure.boundingBox(),
+    page.locator('.manager-shell').evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).getPropertyValue('--gallery-dock'))),
+  ]);
+  if (!scrolledDock || !scrolledDisclosure) {
+    throw new Error('The docked action and the last workspace block require scrolled bounds.');
+  }
+  expect(reservation, 'the reservation is the measured bar, not a literal')
+    .toBeCloseTo(scrolledDock.height, 0);
+  expect(scrolledDisclosure.y + scrolledDisclosure.height, 'the last workspace block clears the dock')
+    .toBeLessThanOrEqual(scrolledDock.y + GEOMETRY_TOLERANCE);
+
   await page.evaluate(() => window.scrollTo(0, 0));
   await expectContained(page, 390);
+});
+
+test('Library mosaic keeps one 2 by 2 hero over equal square supporting tiles', async ({ page }) => {
+  const media = makeMedia(8);
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media, nextCursor: null } },
+    event: { storedMediaCount: media.length },
+    exports: [],
+    album: {
+      pickedMediaIds: [media[7]!.id, media[5]!.id],
+    },
+    galleryAudienceSummary: {
+      albumPhotoCount: 2,
+      albumEntryCount: 2,
+      albumLink: { active: false, sharedAt: null },
+      guestGalleryVisible: true,
+      guestGalleryPublishedCount: media.length,
+    },
+  });
+  await page.route(`**/api/media/${media[6]!.id}/preview`, (route) => route.fulfill({
+    status: 404,
+    contentType: 'application/json',
+    body: JSON.stringify({ code: 'PREVIEW_UNAVAILABLE', message: 'Preview unavailable.' }),
+  }));
+  await page.goto(managerUrl);
+  await destination(page, 'Gallery').click();
+  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+
+  const mosaic = page.locator('.gallery-mosaic').first();
+  const tiles = mosaic.locator('.gallery-mosaic__item');
+  await expect(tiles).toHaveCount(8);
+  await expect(tiles.nth(1).getByText('Preview unavailable', { exact: true })).toBeVisible();
+  await expect(tiles.first().getByRole('button', { name: /Remove .* from Album/u })).toContainText('In Album');
+  await expect(tiles.nth(1).getByRole('button', { name: /Pick .* for the Album/u })).toContainText('Pick');
+
+  for (const width of [320, 760, 761, 1101]) {
+    await page.setViewportSize({ width, height: 900 });
+    const expectedColumns = width <= 760 ? 2 : 4;
+    const expectedGap = width <= 760 ? 6 : 10;
+    expect(await measureGridTracks(mosaic), `Library mosaic columns at ${width}`)
+      .toHaveLength(expectedColumns);
+
+    const [gap, hero, firstSupport, fallback, lastSupport, heroPill, heroRadius] = await Promise.all([
+      mosaic.evaluate((element) => Number.parseFloat(getComputedStyle(element).columnGap)),
+      tiles.first().boundingBox(),
+      tiles.nth(1).boundingBox(),
+      tiles.nth(1).boundingBox(),
+      tiles.last().boundingBox(),
+      tiles.first().getByRole('button', { name: /Remove .* from Album/u }).boundingBox(),
+      tiles.first().getByRole('button', { name: /Remove .* from Album/u })
+        .evaluate((element) => Number.parseFloat(getComputedStyle(element).borderRadius)),
+    ]);
+    if (!hero || !firstSupport || !fallback || !lastSupport || !heroPill) {
+      throw new Error(`Library mosaic geometry is required at ${width}.`);
+    }
+
+    expect(gap, `Library mosaic gutter at ${width}`).toBe(expectedGap);
+    expect(Math.abs(firstSupport.width - firstSupport.height), `supporting tile stays square at ${width}`)
+      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(Math.abs(fallback.width - fallback.height), `fallback tile stays square at ${width}`)
+      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(Math.abs(lastSupport.width - firstSupport.width), `last tile keeps supporting weight at ${width}`)
+      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(Math.abs(hero.width - ((firstSupport.width * 2) + expectedGap)), `hero spans two columns at ${width}`)
+      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(Math.abs(hero.height - hero.width), `hero stays square at ${width}`)
+      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(Math.abs(heroPill.y - hero.y), `hero membership pill sits at its top edge at ${width}`)
+      .toBeLessThanOrEqual(7 + GEOMETRY_TOLERANCE);
+    expect(heroRadius, `membership control uses pill geometry at ${width}`).toBeGreaterThan(100);
+    await expectContained(page, width);
+  }
 });
 
 test('audience failure stays below the mobile Gallery sticky row', async ({ page }) => {
@@ -1016,7 +1165,10 @@ test('audience failure stays below the mobile Gallery sticky row', async ({ page
     audienceReadShouldFail = false;
     await retry.click();
     await expect(audienceFailure, `audience failure clears after Retry at ${width}`).toHaveCount(0);
-    await expect(page.locator('.gallery-audience-summary')).toContainText('Album: 0 photos');
+    const audienceFacts = page.locator('.gallery-audience');
+    await expect(audienceFacts).toBeVisible();
+    await expect(audienceFacts).toContainText('0 photos');
+    await expect(audienceFacts).toContainText('Album link');
     const [successfulRowBox, successfulBudget] = await Promise.all([
       controlRow.boundingBox(),
       page.locator('.manager-shell').evaluate((element) =>
@@ -1301,8 +1453,10 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
   expect.soft(shortTrayStyle.overflowY, 'selection tray has a reachable constrained-height scroll surface').toBe('auto');
   expect.soft(Number.parseFloat(shortUndoStyle.maxHeight), 'Undo has its 116px constrained-height budget')
     .toBeCloseTo(116, 5);
-  expect.soft(Number.parseFloat(shortTrayStyle.maxHeight), 'tray consumes the remaining 263px safe-height budget')
-    .toBeCloseTo(263, 5);
+  // 379, not 263: the destination row gave back 116px of pinned header, and the tray's budget is
+  // `100svh - the sticky offset - the Undo dock - 12`.
+  expect.soft(Number.parseFloat(shortTrayStyle.maxHeight), 'tray consumes the remaining 379px safe-height budget')
+    .toBeCloseTo(379, 5);
   expect.soft(await boxesIntersect(shortGalleryRow, shortTray), 'Gallery controls and tray at 320 by 568')
     .toBe(false);
   expect.soft(await boxesIntersect(shortUndo, shortTray), 'Undo and tray at 320 by 568').toBe(false);
@@ -1400,19 +1554,22 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
     expect(controlBox.y + controlBox.height, `Gallery control ${index + 1} ends inside the 568 viewport`)
       .toBeLessThanOrEqual(568 + GEOMETRY_TOLERANCE);
   }
-  const shortAudienceSummary = shortGalleryRow.locator('.gallery-audience-summary');
+  // The audience facts are read on arrival, not consulted while scrolling, so they sit below the
+  // pinned row in normal flow. Only the mode is pinned; this asserts the summary follows the row
+  // rather than riding inside it, and still lands inside the shortest supported viewport.
+  const shortAudienceSummary = page.locator('.gallery-audience');
   await expect(shortAudienceSummary).toBeVisible();
-  const [audienceSummaryBox, visibleGalleryRowBox] = await Promise.all([
+  const [audienceSummaryBox, visibleGalleryRowBox, audienceSummaryPosition] = await Promise.all([
     shortAudienceSummary.boundingBox(),
     shortGalleryRow.boundingBox(),
+    shortAudienceSummary.evaluate((summary) => getComputedStyle(summary).position),
   ]);
   if (!audienceSummaryBox || !visibleGalleryRowBox) {
     throw new Error('The short-height audience summary requires row and content bounds.');
   }
-  expect(audienceSummaryBox.y, 'audience summary starts inside the Gallery row at 320 by 568')
-    .toBeGreaterThanOrEqual(visibleGalleryRowBox.y - GEOMETRY_TOLERANCE);
-  expect(audienceSummaryBox.y + audienceSummaryBox.height, 'audience summary ends inside the Gallery row at 320 by 568')
-    .toBeLessThanOrEqual(visibleGalleryRowBox.y + visibleGalleryRowBox.height + GEOMETRY_TOLERANCE);
+  expect(audienceSummaryPosition, 'audience summary stays in normal flow at 320 by 568').toBe('static');
+  expect(audienceSummaryBox.y, 'audience summary starts after the pinned Gallery row at 320 by 568')
+    .toBeGreaterThanOrEqual(visibleGalleryRowBox.y + visibleGalleryRowBox.height - GEOMETRY_TOLERANCE);
   expect(audienceSummaryBox.y + audienceSummaryBox.height, 'audience summary ends inside the 568 viewport')
     .toBeLessThanOrEqual(568 + GEOMETRY_TOLERANCE);
 
@@ -1525,14 +1682,27 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
   await page.setViewportSize({ width: 390, height: 844 });
 
   await page.getByRole('button', { name: 'Clear selection' }).click();
-  await page.getByRole('button', { name: /^Album \(1\)$/u }).click();
+  await page.getByRole('button', { name: /^Album, 1$/u }).click();
   await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Add a section' })).toBeVisible();
   await expectTouchTargets(page, '.gallery-album button', 'Album controls at 390');
 
   await page.getByRole('button', { name: 'Guest gallery' }).click();
   await expect(page.getByRole('heading', { name: 'Gallery', exact: true })).toBeVisible();
-  await expect(page.getByText(/Publish and Hide change what event guests see/u)).toHaveCount(0);
+  // The mode's rule is filed under its content, closed, rather than standing between the switch
+  // and the photographs.
+  const guestContext = page.locator('.gallery-context-disclosure');
+  await expect(guestContext).not.toHaveAttribute('open', '');
+  await expect(guestContext).toContainText(/Publish and Hide change what event guests see/u);
+  const [guestContextBox, guestGridBox] = await Promise.all([
+    guestContext.boundingBox(),
+    page.locator('.intake-grid').boundingBox(),
+  ]);
+  if (!guestContextBox || !guestGridBox) {
+    throw new Error('Guest gallery requires rendered context and grid bounds at 390.');
+  }
+  expect(guestContextBox.y, 'the Guest gallery note reads after its photographs')
+    .toBeGreaterThan(guestGridBox.y + guestGridBox.height);
   await expect(page.getByRole('button', { name: 'Shared' })).toHaveCount(0);
   await expectTouchTargets(page, '.gallery-shared button', 'Guest-gallery controls at 390');
   const documentSize = await measureDocument(page);

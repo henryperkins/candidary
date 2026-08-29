@@ -73,6 +73,7 @@ import {
   type DomainAutosaveState,
 } from '../settings/autosave-queue';
 import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
+import { useWideViewport } from './viewport';
 import type { GalleryAnchor } from '../../app/manager-history-state';
 import {
   captureRenderedGalleryAnchor,
@@ -116,6 +117,13 @@ interface ManagerAlbumProps {
   onAccessFailure?(failure: LoadFailure | null): void;
   onAnnouncement?(message: string): void;
   onAnchorReady?(): void;
+  /**
+   * The workspace's docked action bar, passed only while Album is the chosen mode.
+   * The share action is portalled into it rather than copied, so it keeps the ref,
+   * disabled rule and confirmation contract it already has here, and there is never
+   * a second `Create Album link` in the document.
+   */
+  actionDock?: HTMLElement | null;
 }
 
 export type AlbumLeavePreparation =
@@ -866,6 +874,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   onAccessFailure,
   onAnnouncement,
   onAnchorReady,
+  actionDock = null,
 }, ref) {
   const [album, setAlbum] = useState<AlbumView | null>(null);
   const [draft, setDraft] = useState<AlbumDraft>(() => ({
@@ -879,6 +888,8 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const [announcement, setAnnouncement] = useState('');
   const [starting, setStarting] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [albumDetailsOpen, setAlbumDetailsOpen] = useState(false);
+  const [titleFocusRequest, setTitleFocusRequest] = useState(0);
   const [share, setShare] = useState<AlbumShareStatus>(null);
   const [sharePending, setSharePending] = useState(false);
   const [createShareSnapshot, setCreateShareSnapshot] = useState<CreateShareSnapshot | null>(null);
@@ -899,6 +910,14 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const [pendingOperationCount, setPendingOperationCount] = useState(0);
   const [failedPreviewIds, setFailedPreviewIds] = useState<ReadonlySet<string>>(() => new Set());
   const [reconciliationFailure, setReconciliationFailure] = useState<LoadFailure | null>(null);
+
+  /**
+   * The details fold is a phone affordance: from 761 its summary is hidden and the
+   * fields stand open. The width is read here rather than left to a media query so
+   * `aria-expanded` stays honest, and so a focus request can never aim at a field
+   * that CSS alone had taken off the screen.
+   */
+  const wide = useWideViewport();
 
   const undo = useManagerUndo();
   const dismissUndo = undo.dismiss;
@@ -1015,6 +1034,10 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   function presentPendingStartAlbumInverse(): void {
     const pending = pendingStartInverse.current;
     if (!pending) return;
+    // Where Undo returns focus, not a request to edit anything. A phone with the
+    // details folded away has no title input, and the chain then lands on a control
+    // the host can actually see — opening the fold for a parking spot would push the
+    // order back down for no reason.
     const fallback = titleRef.current
       ?? rootRef.current?.querySelector<HTMLElement>(
         '.album-order-heading button:not(:disabled), .album-exits button:not(:disabled)',
@@ -1519,9 +1542,36 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     return running;
   }
 
+  const invalidTitle = titleIsInvalid(draft);
+
+  /**
+   * `Fix the highlighted field to save` has to be able to point at something. An
+   * empty title opens the fold wherever the refusal is raised, so the field, its
+   * message and its `aria-invalid` are on screen with it.
+   */
+  useEffect(() => {
+    if (invalidTitle) setAlbumDetailsOpen(true);
+  }, [invalidTitle]);
+
+  useEffect(() => {
+    if (titleFocusRequest === 0) return;
+    titleRef.current?.focus();
+  }, [titleFocusRequest]);
+
+  /**
+   * Send focus to the Album title, opening the fold on the way. The direct call lands
+   * whenever the fields are already on screen; the request carries the rest of the
+   * way, after the render a closed fold needs before that input exists.
+   */
+  const focusAlbumTitle = useCallback(() => {
+    setAlbumDetailsOpen(true);
+    titleRef.current?.focus();
+    setTitleFocusRequest((current) => current + 1);
+  }, []);
+
   function focusBlockingRecovery(state: AutosaveState) {
     if (state.status === 'invalid') {
-      titleRef.current?.focus();
+      focusAlbumTitle();
       return;
     }
     if (reconciliationFailureRef.current?.retryable) {
@@ -1639,11 +1689,11 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
 
   const restoreLeaveFocus = useCallback((outcome: AlbumLeavePreparation) => {
     if (outcome.status === 'invalid') {
-      titleRef.current?.focus();
+      focusAlbumTitle();
       return;
     }
     leaveHeadingRef.current?.focus();
-  }, []);
+  }, [focusAlbumTitle]);
 
   useImperativeHandle(ref, () => ({
     prepareToLeave: () => settleDraft({ focusRecovery: false }),
@@ -2262,13 +2312,27 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const overCapacityReason = reconciliation?.kind === 'over-capacity'
     ? `Start from picks is unavailable because ${reconciliation.pickCount} picks exceed the ${ALBUM_MAX_ENTRIES}-entry Album limit.`
     : null;
-  const invalidTitle = titleIsInvalid(draft);
+  const albumDetailsExpanded = wide || albumDetailsOpen;
   const visibleAutosave = effectiveAlbumAutosaveState(
     autosave,
     loading,
     pendingOperationCount,
     reconciliationFailure ?? loadFailure,
   );
+  /**
+   * One element, rendered in one of two places. Portalling it keeps the ref, the
+   * disabled rule and both confirmations with the component that owns the link, so
+   * the docked control is the same button rather than a copy of it.
+   */
+  const shareAction = <button
+    type="button"
+    ref={shareActionRef}
+    className="button button--secondary"
+    disabled={(!share && photoCount === 0) || sharePending}
+    onClick={() => { if (share) requestStopShare(); else requestCreateShare(); }}
+  ><Link aria-hidden="true" /> {share
+    ? 'Stop Album link'
+    : sharePending ? 'Creating Album link…' : 'Create Album link'}</button>;
 
   let photoPosition = 0;
   return <div className="gallery-album" ref={rootRef}>
@@ -2398,101 +2462,118 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
               />
             : <div className="album-editor">
                 <section className="album-metadata" aria-label="Album details">
-                  <div className="album-cover">
-                    {effectiveCover
-                      ? failedPreviewIds.has(effectiveCover.id)
-                        ? <div
-                            className="album-cover__placeholder"
-                            role="img"
-                            aria-label={`Album cover: ${galleryPhotoTitle(effectiveCover)}, from ${effectiveCover.guestName}`}
-                          ><ImageOff aria-hidden="true" /><span>Preview unavailable</span></div>
-                        : <img
-                            className="album-cover__image"
-                            src={mediaPreview(effectiveCover.id)}
-                            alt={`Album cover: ${galleryPhotoTitle(effectiveCover)}`}
-                            onError={() => setFailedPreviewIds((current) => new Set(current).add(effectiveCover.id))}
-                          />
-                      : <div className="album-cover__placeholder"><span>Nothing to show yet</span></div>}
-                    <small>{effectiveCover
-                      ? `${explicitCover ? 'Cover · ' : 'Cover · first photo, until you star another · '}${galleryPhotoTitle(effectiveCover)}`
-                      : 'The first photo becomes the cover.'}</small>
-                    {coverRetainedSlot && coverRetainedDeadline && <small className="album-cover__retained">
-                      <strong>Your chosen cover is a {RETAINED_SLOT_NAME.toLowerCase()}.</strong>{' '}
-                      {coverRetainedExpired
-                        ? <>{RETAINED_SLOT_EXPIRED}. Recovery ended{' '}
-                            <RetentionInstant display={coverRetainedDeadline} />, so the first photo
-                            stays the cover. Star another photo to choose a different one.</>
-                        : <>Restore it in Recently deleted by{' '}
-                            <RetentionInstant display={coverRetainedDeadline} /> and it is the cover
-                            again. Until then people with the Album link see the first photo, and starring another photo
-                            replaces the choice.</>}
-                    </small>}
-                    {(explicitCover || coverRetainedSlot) && <button
-                      type="button"
-                      className="text-button"
-                      onClick={() => {
-                        coverIntentGeneration.current += 1;
-                        applyDraft(
-                          { ...draftRef.current, coverMediaId: null },
-                          false,
-                          [{ kind: 'set-cover', value: null }],
-                        );
-                        setAnnouncement('The first photo is the album cover.');
-                      }}
-                    >Use the first photo instead</button>}
-                  </div>
+                  {/*
+                    A host opens the Album to reorder it, not to retype its title, so on a
+                    phone the details fold away and the order starts near the top.
 
-                  <div className="album-metadata__fields">
-                    <label htmlFor="album-title">Album title</label>
-                    <input
-                      id="album-title"
-                      ref={titleRef}
-                      value={draft.title}
-                      placeholder={eventName}
-                      aria-invalid={invalidTitle}
-                      aria-describedby={invalidTitle ? 'album-title-error' : undefined}
-                      onChange={(change) => {
-                        const title = clampCodePoints(change.target.value, ALBUM_TITLE_MAX_LENGTH);
-                        applyDraft(
-                          { ...draftRef.current, title },
-                          false,
-                          [{ kind: 'set-title', value: title }],
-                        );
-                      }}
-                      onBlur={() => {
-                        const current = draftRef.current;
-                        const trimmed = current.title.trim();
-                        if (trimmed && trimmed !== current.title) {
+                    A real button over a conditional body, never a `<details>`: setting
+                    `details.open` imperatively can strand a collapsed block from 761,
+                    where the summary is hidden and nothing is left to reopen it.
+                  */}
+                  <button
+                    type="button"
+                    className="album-metadata__summary"
+                    aria-expanded={albumDetailsExpanded}
+                    aria-controls="album-metadata-body"
+                    onClick={() => setAlbumDetailsOpen((current) => !current)}
+                  >Album details</button>
+                  {albumDetailsExpanded && <div className="album-metadata__body" id="album-metadata-body">
+                    <div className="album-cover">
+                      {effectiveCover
+                        ? failedPreviewIds.has(effectiveCover.id)
+                          ? <div
+                              className="album-cover__placeholder"
+                              role="img"
+                              aria-label={`Album cover: ${galleryPhotoTitle(effectiveCover)}, from ${effectiveCover.guestName}`}
+                            ><ImageOff aria-hidden="true" /><span>Preview unavailable</span></div>
+                          : <img
+                              className="album-cover__image"
+                              src={mediaPreview(effectiveCover.id)}
+                              alt={`Album cover: ${galleryPhotoTitle(effectiveCover)}`}
+                              onError={() => setFailedPreviewIds((current) => new Set(current).add(effectiveCover.id))}
+                            />
+                        : <div className="album-cover__placeholder"><span>Nothing to show yet</span></div>}
+                      <small>{effectiveCover
+                        ? `${explicitCover ? 'Cover · ' : 'Cover · first photo, until you star another · '}${galleryPhotoTitle(effectiveCover)}`
+                        : 'The first photo becomes the cover.'}</small>
+                      {coverRetainedSlot && coverRetainedDeadline && <small className="album-cover__retained">
+                        <strong>Your chosen cover is a {RETAINED_SLOT_NAME.toLowerCase()}.</strong>{' '}
+                        {coverRetainedExpired
+                          ? <>{RETAINED_SLOT_EXPIRED}. Recovery ended{' '}
+                              <RetentionInstant display={coverRetainedDeadline} />, so the first photo
+                              stays the cover. Star another photo to choose a different one.</>
+                          : <>Restore it in Recently deleted by{' '}
+                              <RetentionInstant display={coverRetainedDeadline} /> and it is the cover
+                              again. Until then people with the Album link see the first photo, and starring another photo
+                              replaces the choice.</>}
+                      </small>}
+                      {(explicitCover || coverRetainedSlot) && <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => {
+                          coverIntentGeneration.current += 1;
                           applyDraft(
-                            { ...current, title: trimmed },
+                            { ...draftRef.current, coverMediaId: null },
                             false,
-                            [{ kind: 'set-title', value: trimmed }],
+                            [{ kind: 'set-cover', value: null }],
                           );
-                        }
-                        queue.flush();
-                      }}
-                    />
-                    {invalidTitle && <small className="field-error" id="album-title-error">Give this album a title.</small>}
-                    <label htmlFor="album-description">Description</label>
-                    <textarea
-                      id="album-description"
-                      rows={2}
-                      value={draft.description}
-                      onChange={(change) => {
-                        const description = clampCodePoints(
-                          change.target.value,
-                          ALBUM_DESCRIPTION_MAX_LENGTH,
-                        );
-                        applyDraft(
-                          { ...draftRef.current, description },
-                          false,
-                          [{ kind: 'set-description', value: description }],
-                        );
-                      }}
-                      onBlur={() => queue.flush()}
-                    />
-                    <small>People with the Album link see this. It is optional.</small>
-                  </div>
+                          setAnnouncement('The first photo is the album cover.');
+                        }}
+                      >Use the first photo instead</button>}
+                    </div>
+
+                    <div className="album-metadata__fields">
+                      <label htmlFor="album-title">Album title</label>
+                      <input
+                        id="album-title"
+                        ref={titleRef}
+                        value={draft.title}
+                        placeholder={eventName}
+                        aria-invalid={invalidTitle}
+                        aria-describedby={invalidTitle ? 'album-title-error' : undefined}
+                        onChange={(change) => {
+                          const title = clampCodePoints(change.target.value, ALBUM_TITLE_MAX_LENGTH);
+                          applyDraft(
+                            { ...draftRef.current, title },
+                            false,
+                            [{ kind: 'set-title', value: title }],
+                          );
+                        }}
+                        onBlur={() => {
+                          const current = draftRef.current;
+                          const trimmed = current.title.trim();
+                          if (trimmed && trimmed !== current.title) {
+                            applyDraft(
+                              { ...current, title: trimmed },
+                              false,
+                              [{ kind: 'set-title', value: trimmed }],
+                            );
+                          }
+                          queue.flush();
+                        }}
+                      />
+                      {invalidTitle && <small className="field-error" id="album-title-error">Give this album a title.</small>}
+                      <label htmlFor="album-description">Description</label>
+                      <textarea
+                        id="album-description"
+                        rows={2}
+                        value={draft.description}
+                        onChange={(change) => {
+                          const description = clampCodePoints(
+                            change.target.value,
+                            ALBUM_DESCRIPTION_MAX_LENGTH,
+                          );
+                          applyDraft(
+                            { ...draftRef.current, description },
+                            false,
+                            [{ kind: 'set-description', value: description }],
+                          );
+                        }}
+                        onBlur={() => queue.flush()}
+                      />
+                      <small>People with the Album link see this. It is optional.</small>
+                    </div>
+                  </div>}
                 </section>
 
                 <div className="album-order-heading">
@@ -2748,15 +2829,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                 disabled={photoCount === 0}
                 onClick={() => { void togglePreview(); }}
               ><Eye aria-hidden="true" /> {previewOpen ? 'Back to editing' : 'Preview album'}</button>
-              <button
-                type="button"
-                ref={shareActionRef}
-                className="button button--secondary"
-                disabled={(!share && photoCount === 0) || sharePending}
-                onClick={() => { if (share) requestStopShare(); else requestCreateShare(); }}
-              ><Link aria-hidden="true" /> {share
-                ? 'Stop Album link'
-                : sharePending ? 'Creating Album link…' : 'Create Album link'}</button>
+              {actionDock === null && shareAction}
               <AlbumExportControl
                 job={exportJob}
                 activeJob={activeExport}
@@ -2769,6 +2842,8 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                 live={false}
               />
             </div>
+
+            {actionDock !== null && createPortal(shareAction, actionDock)}
 
             {share && <div className="album-share">
               <p>

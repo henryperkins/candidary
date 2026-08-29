@@ -1,16 +1,16 @@
-import { Eye, EyeOff, Image as ImageIcon, ImageOff } from 'lucide-react';
+import { Eye, EyeOff, Image as ImageIcon, ImageOff, ListChecks } from 'lucide-react';
 import { forwardRef, useImperativeHandle, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { createPortal } from 'react-dom';
 
 import { mediaPreview } from '../../app/api';
 import type { MediaView } from '../../app/types';
 import type { PublicationStatus } from '../../../shared/contracts';
 import { galleryPhotoTitle } from './gallery-timeline';
 import {
-  selectionCapacityMessage,
-  selectionCountMessage,
   transitionSelection,
   type GallerySelectionAction,
 } from './selection-state';
+import { SelectionTray } from './SelectionTray';
 import type { GalleryAnchor, PublicationFilter } from '../../app/manager-history-state';
 import { captureRenderedGalleryAnchor, restoreRenderedGalleryAnchor } from './gallery-anchor';
 
@@ -63,6 +63,8 @@ interface ManagerSharedGalleryProps {
   onOpenSettings(status: PublicationFilter): void;
   /** True while a guest-list commit holds every destination, matching the Manager's own guard. */
   settingsBlocked: boolean;
+  /** The workspace's fixed dock, present only while this mode owns it. See the action dock. */
+  actionDock?: HTMLElement | null;
   loadingMore: boolean;
   hasMore: boolean;
   onLoadMore(): Promise<void>;
@@ -109,6 +111,7 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
   onChangePublication,
   onOpenSettings,
   settingsBlocked,
+  actionDock = null,
   loadingMore,
   hasMore,
   onLoadMore,
@@ -116,6 +119,7 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
 }, ref) {
   const empty = SHARED_EMPTY_COPY[status];
   const [activeBulk, setActiveBulk] = useState<'publish' | 'hide' | null>(null);
+  const [selecting, setSelecting] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const settingsActionRef = useRef<HTMLButtonElement>(null);
 
@@ -143,6 +147,12 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
     if (transition.message !== null) onAnnouncement?.(transition.message);
   }
 
+  /** Leaving selection drops the set with it, so the tray can never outlive the checkboxes. */
+  function toggleSelecting() {
+    if (selecting) commitSelection({ type: 'clear' });
+    setSelecting(!selecting);
+  }
+
   function openSettings() {
     commitSelection({ type: 'clear' });
     onOpenSettings(status);
@@ -163,55 +173,72 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
     }
   }
 
+  // Weight follows the filter the host is standing in: inside `Published` the verb that does
+  // anything is Hide, so it leads and Publish steps back. The per-card buttons have always made
+  // that swap, and the two must not disagree about which action this filter is for.
+  const hideLeads = status === 'published';
+  const publishAction = {
+    label: activeBulk === 'publish' ? 'Publishing…' : `Publish (${selected.length})`,
+    icon: <Eye aria-hidden="true" />,
+    variant: hideLeads ? 'secondary' as const : 'approve' as const,
+    onClick: () => void runBulk('publish'),
+  };
+  const hideAction = {
+    label: activeBulk === 'hide' ? 'Hiding…' : `Hide (${selected.length})`,
+    icon: <EyeOff aria-hidden="true" />,
+    variant: hideLeads ? 'primary' as const : 'secondary' as const,
+    onClick: () => void runBulk('hide'),
+  };
+
+  // Portalled rather than copied when the workspace offers its dock: one element, one ref, so
+  // `focusSettingsAction` still reaches the button a host was sent to.
+  const settingsAction = <button
+    type="button"
+    className={actionDock ? 'button button--secondary' : 'text-button'}
+    ref={settingsActionRef}
+    disabled={settingsBlocked}
+    onClick={openSettings}
+  >Open settings</button>;
+
   return <div className="gallery-shared" ref={rootRef}>
     <p className="gallery-shared__lede">
       {guestGalleryVisible
         ? 'Published photos are visible to event guests.'
         : 'Publication choices are saved, but the Guest gallery is off.'}
     </p>
-    <div className="filter-tabs" role="group" aria-label="Publication status">
-      {(['all', 'unpublished', 'published', 'hidden'] as const).map((value) => (
-        <button
-          type="button"
-          className={status === value ? 'active' : ''}
-          aria-pressed={status === value}
-          key={value}
-          onClick={() => changeStatus(value)}
-        >{PUBLICATION_FILTER_LABELS[value]}</button>
-      ))}
-    </div>
-    {!guestGalleryVisible && <div className="manager-notice">
+    {/* Row B. The same rail Library uses, so a host who has learned one has learned both —
+        four status tabs do not fit a phone row as a grid, and stacked they cost a second one. */}
+    <div className="gallery-toolbar">
+      <div className="filter-tabs" role="group" aria-label="Publication status">
+        {(['all', 'unpublished', 'published', 'hidden'] as const).map((value) => (
+          <button
+            type="button"
+            className={status === value ? 'active' : ''}
+            aria-pressed={status === value}
+            key={value}
+            onClick={() => changeStatus(value)}
+          >{PUBLICATION_FILTER_LABELS[value]}</button>
+        ))}
+      </div>
       <button
+        type="button"
+        className="button button--secondary gallery-select-toggle"
+        aria-pressed={selecting}
+        onClick={toggleSelecting}
+      ><ListChecks aria-hidden="true" /> {selecting ? 'Done selecting' : 'Select photos'}</button>
+      {selecting && media.length > 0 && <button
         type="button"
         className="text-button"
-        ref={settingsActionRef}
-        disabled={settingsBlocked}
-        onClick={openSettings}
-      >Open settings</button>
-    </div>}
-    <div className="bulk-bar" aria-busy={activeBulk !== null}>
-      <span
-        id="bulk-selection-status"
-      >
-        {selectionAtLimit
-          ? selectionCapacityMessage()
-          : selectionCountMessage(selected.length)}
-      </span>
-      <button
-        type="button"
-        className={`button ${status === 'published' ? 'button--secondary' : 'button--approve'}`}
-        disabled={!selected.length || activeBulk !== null}
-        aria-busy={activeBulk === 'publish' || undefined}
-        onClick={() => void runBulk('publish')}
-      ><Eye aria-hidden="true" /> {activeBulk === 'publish' ? 'Publishing…' : 'Publish selected'}</button>
-      <button
-        type="button"
-        className={`button ${status === 'published' ? 'button--primary' : 'button--secondary'}`}
-        disabled={!selected.length || activeBulk !== null}
-        aria-busy={activeBulk === 'hide' || undefined}
-        onClick={() => void runBulk('hide')}
-      ><EyeOff aria-hidden="true" /> {activeBulk === 'hide' ? 'Hiding…' : 'Hide selected'}</button>
+        onClick={() => commitSelection({
+          type: 'select-many',
+          ids: media.map(({ id }) => id),
+          label: 'these results',
+        })}
+      >Select all {media.length} loaded photo{media.length === 1 ? '' : 's'}</button>}
     </div>
+    {!guestGalleryVisible && (actionDock
+      ? createPortal(settingsAction, actionDock)
+      : <div className="manager-notice">{settingsAction}</div>)}
     {media.length === 0
       ? <div className="empty-state"><ImageIcon aria-hidden="true" /><h3>{empty.title}</h3><p>{empty.body}</p></div>
       : <>
@@ -229,14 +256,14 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
                 key={item.id}
               >
                 <div className="intake-photo">
-                  <label className="intake-select"><input
+                  {selecting && <label className="intake-select"><input
                     type="checkbox"
                     aria-label={`Select ${title}`}
                     aria-describedby={selectionUnavailable ? 'bulk-selection-status' : undefined}
                     checked={isSelected}
                     disabled={selectionUnavailable}
                     onChange={() => commitSelection({ type: 'toggle', id: item.id, label: title })}
-                  /></label>
+                  /></label>}
                   <SharedPhotoPreview item={item} title={title} />
                 </div>
                 <div>
@@ -276,5 +303,14 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
             >{loadingMore ? 'Loading more photos…' : 'Load more photos'}</button>
           </div>}
         </>}
+    {selected.length > 0 && <SelectionTray
+      count={selected.length}
+      busy={activeBulk !== null}
+      label="Guest gallery"
+      primary={hideLeads ? hideAction : publishAction}
+      secondary={hideLeads ? publishAction : hideAction}
+      note="Publish and Hide change what event guests see. Neither changes Album membership."
+      onClear={() => commitSelection({ type: 'clear' })}
+    />}
   </div>;
 });

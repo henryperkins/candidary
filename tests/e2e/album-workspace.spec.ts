@@ -23,7 +23,14 @@ test('Library adds and removes Album picks, then its export stays visible from q
 
   const modes = page.getByRole('group', { name: 'Gallery mode' });
   await expect(modes.getByRole('button', { name: 'Library' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByText('About this Gallery view', { exact: true })).toHaveCount(0);
+  // The mode's rule is back, but as a disclosure under the mode's content and closed on arrival —
+  // one row of chrome rather than a paragraph of the screen the photographs are owed.
+  const modeContext = page.locator('.gallery-context-disclosure');
+  await expect(modeContext.locator('summary')).toHaveText('About this Gallery view');
+  await expect(modeContext).not.toHaveAttribute('open', '');
+  await expect(modeContext).toContainText(
+    'Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.',
+  );
   const picksFilter = page.getByRole('button', { name: 'Album picks' });
   await expect(picksFilter.locator('.lucide-check')).toHaveCount(1);
 
@@ -53,7 +60,8 @@ test('Library adds and removes Album picks, then its export stays visible from q
     .getByRole('button', { name: 'Remove from Album (1)' }).click();
   await expect(page.getByText('In Album')).toHaveCount(2);
 
-  await modes.getByRole('button', { name: /^Album \(2\)$/u }).click();
+  // The count moved onto its own line inside the segment, so the accessible name is `Album 2`.
+  await modes.getByRole('button', { name: /^Album, 2$/u }).click();
   await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Add a section' })).toBeVisible();
   await page.getByRole('button', { name: 'Download album photos' }).click();
@@ -91,7 +99,7 @@ test('Library adds and removes Album picks, then its export stays visible from q
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
   await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
   await page.getByRole('group', { name: 'Gallery mode' })
-    .getByRole('button', { name: /^Album \(2\)$/u }).click();
+    .getByRole('button', { name: /^Album, 2$/u }).click();
   await expect(exportState.getByText('Ready', { exact: true })).toBeVisible();
   await exportState.getByRole('button', { name: 'Get download links' }).click();
   await expect(exportState.getByRole('link', { name: 'Photo manifest' })).toBeVisible();
@@ -114,9 +122,13 @@ test('Guest gallery clears selection by filter and keeps one failed preview and 
   await openGallery(page);
   await page.getByRole('button', { name: 'Guest gallery' }).click();
 
-  await expect(page.getByText(
+  // This mode's rule reads the same way Library's does: filed in the disclosure under the mode's
+  // content, closed on arrival, so it is never prose the host scrolls past to reach the photographs.
+  const modeContext = page.locator('.gallery-context-disclosure');
+  await expect(modeContext).not.toHaveAttribute('open', '');
+  await expect(modeContext).toContainText(
     'Publish and Hide change what event guests see. They do not change Album membership or the Album link.',
-  )).toHaveCount(0);
+  );
   const shared = page.locator('.gallery-shared');
   await expect(shared.getByText('Preview unavailable')).toHaveCount(1);
   await expect(shared.locator('.intake-photo img')).toHaveCount(1);
@@ -126,26 +138,39 @@ test('Guest gallery clears selection by filter and keeps one failed preview and 
   await expect(secondaryHide).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   await expect(secondaryHide).toHaveCSS('border-top-color', 'rgb(74, 36, 21)');
 
+  // Guest gallery selects the way Library does now: the checkboxes and the verbs both arrive with
+  // the intent to use them, so nothing idle is docked over the controls that start a selection.
+  const tray = page.getByRole('region', { name: 'Guest gallery' });
+  await expect(tray).toHaveCount(0);
+  await shared.getByRole('button', { name: 'Select photos' }).click();
   const choice = shared.getByRole('checkbox', { name: `Select ${rows[1]!.caption}` });
   await choice.check();
+  await expect(tray).toBeVisible();
   await shared.getByRole('button', { name: 'Published', exact: true }).click();
-  await expect(choice).not.toBeChecked();
   await expect(page.locator('[data-gallery-live-host] [role="status"]')).toHaveText('Selection cleared.');
-  await expect(shared.getByRole('button', { name: 'Publish selected' })).toBeDisabled();
-  await expect(shared.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+  // Both verbs retire with the selection rather than standing by holding a zero.
+  await expect(tray).toHaveCount(0);
+  await expect(shared.getByRole('button', { name: /^Publish \(/u })).toHaveCount(0);
+  await expect(shared.getByRole('button', { name: /^Hide \(/u })).toHaveCount(0);
 
+  // Nothing here is published, so the photo the selection held is only observable again once the
+  // filter that shows it comes back — and it comes back unchecked.
   await shared.getByRole('button', { name: 'Unpublished', exact: true }).click();
+  await expect(choice).not.toBeChecked();
   await shared.getByRole('checkbox', { name: `Select ${rows[0]!.caption}` }).check();
   await choice.check();
-  await shared.getByRole('button', { name: 'Publish selected' }).click();
-  await expect(shared.getByRole('button', { name: 'Publishing…' })).toBeDisabled();
-  await expect(shared.getByRole('button', { name: 'Publishing…' })).toHaveAttribute('aria-busy', 'true');
-  await expect(shared.getByRole('button', { name: 'Hide selected' })).toBeDisabled();
+  await tray.getByRole('button', { name: 'Publish (2)' }).click();
+  await expect(tray.getByRole('button', { name: 'Publishing…' })).toBeDisabled();
+  // `aria-busy` is the tray's now rather than the verb's: one region reports the write, so the
+  // state is announced once instead of twice.
+  await expect(tray).toHaveAttribute('aria-busy', 'true');
+  await expect(tray.getByRole('button', { name: 'Publishing…' })).not.toHaveAttribute('aria-busy', 'true');
+  await expect(tray.getByRole('button', { name: 'Hide (2)' })).toBeDisabled();
   await expect(shared.getByRole('button', { name: 'Hiding…' })).toHaveCount(0);
-  await expect(shared.locator('.bulk-bar')).toHaveAttribute('aria-busy', 'true');
 
   releaseBulk();
-  await expect(shared.getByRole('button', { name: 'Publish selected' })).toBeDisabled();
+  // The confirmed write consumed the selection, so the tray goes with it.
+  await expect(tray).toHaveCount(0);
   await expect(page.locator('[data-gallery-live-host] [role="status"]')).toHaveText(
     '2 photos are Published in the Guest gallery for event guests. Hide them to reverse this.',
   );
