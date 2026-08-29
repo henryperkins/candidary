@@ -209,7 +209,9 @@ function entryKey(entry: AlbumEntryView): string {
 function entryName(entry: AlbumEntryView): string {
   if (isPhotoEntry(entry)) return galleryPhotoTitle(entry.photo);
   if (isRetainedEntry(entry)) return RETAINED_SLOT_NAME;
-  return entry.heading;
+  // Never blank: this becomes the accessible name of the row's move and remove controls, and an
+  // unnamed section is a row a host cannot tell apart from the one above it.
+  return entry.heading || 'Untitled section';
 }
 
 /**
@@ -2580,20 +2582,31 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                   </div>}
                 </section>
 
-                <div className="album-order-heading">
-                  <button type="button" className="button button--secondary" onClick={addSection}>
-                    <Plus aria-hidden="true" /> Add a section
-                  </button>
-                  <button
-                    type="button"
-                    className="text-button"
-                    disabled={!undo.canPresent}
-                    aria-describedby="album-reset-consequence"
-                    onClick={(click) => resetOrder(click.detail)}
-                  >
-                    Reset to timeline order
-                  </button>
-                </div>
+                <header className="album-order-heading">
+                  <div>
+                    <h3>Album order</h3>
+                    {/* Both ways to move a row, said once at the top of the list they act on: the
+                        rows are draggable, and every row also carries move controls for a host who
+                        is not dragging. */}
+                    {draft.entries.length > 0 && <p>
+                      {photoCount} photo{photoCount === 1 ? '' : 's'} · drag a photo, or use the move controls
+                    </p>}
+                  </div>
+                  <div className="album-order-heading__controls">
+                    <button type="button" className="button button--secondary" onClick={addSection}>
+                      <Plus aria-hidden="true" /> Add a section
+                    </button>
+                    <button
+                      type="button"
+                      className="text-button"
+                      disabled={!undo.canPresent}
+                      aria-describedby="album-reset-consequence"
+                      onClick={(click) => resetOrder(click.detail)}
+                    >
+                      Reset to timeline order
+                    </button>
+                  </div>
+                </header>
                 <small id="album-reset-consequence">
                   Reset removes every section and can be undone for {UNDO_WINDOW_MS / 1_000} seconds.
                 </small>
@@ -2670,7 +2683,10 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                                 <div className="album-section__field">
                                   <input
                                     className="album-section__input"
-                                    aria-label="Section name"
+                                    // Named for what it becomes: the Album link renders this as a
+                                    // heading over the photos beneath it.
+                                    aria-label="Section heading"
+                                    placeholder="Untitled section"
                                     value={entry.heading}
                                     onChange={(change) => renameSection(
                                       entry.id,
@@ -2789,8 +2805,8 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                               type="button"
                               className="icon-button album-entry__cover"
                               aria-label={isCover
-                                ? `${name} is the album cover`
-                                : `Use ${name} as the album cover`}
+                                ? `${name} is the Album cover`
+                                : `Use ${name} as the Album cover`}
                               aria-pressed={isCover}
                               onClick={() => {
                                 coverIntentGeneration.current += 1;
@@ -2799,7 +2815,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                                   false,
                                   [{ kind: 'set-cover', value: entry.photo.id }],
                                 );
-                                setAnnouncement(`${name} is the album cover.`);
+                                setAnnouncement(`${name} is the Album cover.`);
                               }}
                             ><Star aria-hidden="true" /></button>}
                             {/* A retained slot has no Remove: the row is held for recovery, and
@@ -2811,8 +2827,8 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                               disabled={!undo.canPresent
                                 || (entry.kind === 'photo' && pendingPickIds.has(entry.photo.id))}
                               aria-label={entry.kind === 'section'
-                                ? `Remove section ${name}`
-                                : `Remove ${name} from Album`}
+                                ? `Remove the section ${name}`
+                                : `Remove ${name} from the Album`}
                               onClick={(click) => {
                                 if (entry.kind === 'section') removeSection(entry.id, click.detail);
                                 else void trackOperation(() => removePhoto(entry, click.detail));

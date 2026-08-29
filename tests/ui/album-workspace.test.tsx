@@ -43,7 +43,7 @@ import {
   type ManagerGalleryWorkspaceHandle,
 } from '../../src/features/gallery/ManagerGalleryWorkspace';
 import { ManagerSharedGallery } from '../../src/features/gallery/ManagerSharedGallery';
-import { SelectionTray } from '../../src/features/gallery/SelectionTray';
+import { ALBUM_TRAY_NOTE, SelectionTray } from '../../src/features/gallery/SelectionTray';
 import {
   ManagerUndoBar,
   ManagerUndoProvider,
@@ -1477,7 +1477,7 @@ describe('gallery modes', () => {
       busy={false}
       primary={{ label: `Pick for Album (${count})`, icon: null, onClick: vi.fn() }}
       secondary={{ label: `Remove from Album (${count})`, icon: null, onClick: vi.fn() }}
-      note="Pick changes Album membership only. Remove from Album keeps every delivered photo in Library; neither action publishes to the Guest gallery."
+      note={ALBUM_TRAY_NOTE}
       onClear={vi.fn()}
     />);
 
@@ -2099,7 +2099,7 @@ describe('audience summary invalidation boundaries', () => {
     const user = await openAlbum();
     await waitFor(() => expect(controlled.state.audienceReads).toBe(1));
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
 
     await waitFor(() => expect(controlled.state.albumReads).toBe(2));
     expect(controlled.state.orderWrites).toHaveLength(1);
@@ -2131,7 +2131,7 @@ describe('audience summary invalidation boundaries', () => {
     ];
     await waitFor(() => expect(audienceFacts()).toEqual(withOnePhoto));
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(audienceFacts()).toEqual([
       ['Album', '0 photos'], ['Album link', 'Off'], ['Guest gallery', 'On, 0 published'],
     ]));
@@ -2169,7 +2169,7 @@ describe('audience summary invalidation boundaries', () => {
     const user = await openAlbum();
     await waitFor(() => expect(controlled.state.audienceReads).toBe(1));
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.pickWrites).toHaveLength(1));
     fireEvent.change(screen.getByLabelText('Album title'), { target: { value: 'Coalesced title' } });
     membership.resolve();
@@ -2187,7 +2187,7 @@ describe('audience summary invalidation boundaries', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.albumReads).toBe(2));
     const readsAfterRemove = controlled.state.audienceReads;
 
@@ -2231,7 +2231,7 @@ describe('selecting photos into the album', () => {
     const tray = await screen.findByRole('region', { name: 'Album' });
     expect(within(tray).getByText('1 of 50 selected')).toBeVisible();
     expect(within(tray).getByText(
-      'Pick changes Album membership only. Remove from Album keeps every delivered photo in Library; neither action publishes to the Guest gallery.',
+      ALBUM_TRAY_NOTE,
     )).toBeVisible();
     const remove = within(tray).getByRole('button', { name: 'Remove from Album (1)' });
     expect(remove.querySelector('.lucide-minus')).not.toBeNull();
@@ -3262,7 +3262,7 @@ describe('the album', () => {
 
     await user.click(screen.getByRole('button', { name: 'Use the first photo instead' }));
     expect(screen.getByText(/Cover · first photo, until you star another · First dance/)).toBeVisible();
-    expect(screen.getByRole('button', { name: 'First dance is the album cover' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'First dance is the Album cover' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('moves entries with earlier/later controls and equivalent native drag/drop', async () => {
@@ -3392,7 +3392,7 @@ describe('the album', () => {
     middleEntryControl.focus();
     await user.click(screen.getByRole('button', { name: 'Add a section' }));
 
-    const sectionName = screen.getByLabelText('Section name') as HTMLInputElement;
+    const sectionName = screen.getByLabelText('Section heading') as HTMLInputElement;
     await waitFor(() => {
       expect(sectionName).toHaveFocus();
       expect(sectionName.selectionStart).toBe(0);
@@ -3430,10 +3430,10 @@ describe('the album', () => {
     screen.getByRole('button', { name: 'Move p2.jpg earlier' }).focus();
     const addSection = screen.getByRole('button', { name: 'Add a section' });
     fireEvent.click(addSection);
-    const firstSectionKey = screen.getByLabelText('Section name').closest('li')
+    const firstSectionKey = screen.getByLabelText('Section heading').closest('li')
       ?.getAttribute('data-entry-key');
     fireEvent.click(addSection);
-    const sectionKeys = screen.getAllByLabelText('Section name').map((input) => (
+    const sectionKeys = screen.getAllByLabelText('Section heading').map((input) => (
       input.closest('li')?.getAttribute('data-entry-key')
     ));
 
@@ -3490,7 +3490,7 @@ describe('the album', () => {
 
     const staleSection = await screen.findByDisplayValue('Remove me');
     staleSection.focus();
-    await user.click(screen.getByRole('button', { name: 'Remove section Remove me' }));
+    await user.click(screen.getByRole('button', { name: 'Remove the section Remove me' }));
     await user.click(screen.getByRole('button', { name: 'Add a section' }));
 
     expect(Array.from(document.querySelectorAll('.album-review-grid > li')).map((item) => (
@@ -3557,14 +3557,14 @@ describe('the album', () => {
     renderWorkspace(fetchMock);
     await openAlbum();
 
-    const sectionName = await screen.findByLabelText('Section name');
+    const sectionName = await screen.findByLabelText('Section heading');
     vi.useFakeTimers();
     fireEvent.change(sectionName, { target: { value: '  Speeches  ' } });
     fireEvent.blur(sectionName);
     await act(async () => { await vi.advanceTimersByTimeAsync(600); });
     expect(state.orderWrites.at(-1)?.[0]).toMatchObject({ kind: 'section', heading: 'Speeches' });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Remove section Speeches' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove the section Speeches' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     const undoButton = screen.getByRole('button', { name: 'Undo' });
     expect(screen.getAllByText('Section removed.')
@@ -3596,7 +3596,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     await openAlbum();
-    const sectionName = await screen.findByLabelText('Section name');
+    const sectionName = await screen.findByLabelText('Section heading');
     vi.useFakeTimers();
     sectionName.focus();
     fireEvent.change(sectionName, { target: { value: 'Speeches' } });
@@ -3626,7 +3626,7 @@ describe('the album', () => {
     renderWorkspace(fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     expect(screen.getByText('Saving…')).toBeVisible();
     removal.resolve();
     await waitFor(() => expect(screen.getByText('Saved')).toBeVisible());
@@ -3659,7 +3659,7 @@ describe('the album', () => {
     const user = await openAlbum();
 
     await user.click(await screen.findByRole('button', { name: 'Reset to timeline order' }));
-    expect(screen.queryByLabelText('Section name')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Section heading')).not.toBeInTheDocument();
     expect(Array.from(document.querySelectorAll('.album-review-grid > li')).map((item) => (
       item.getAttribute('data-entry-key')
     ))).toEqual(['photo:p1', 'photo:p2']);
@@ -3728,13 +3728,13 @@ describe('the album', () => {
     renderWorkspace(fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p2.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' }));
     expect((await screen.findAllByText('1 photo removed from Album. The delivered photo remains.'))
       .some((node) => node.classList.contains('album-undo__message'))).toBe(true);
     expect(screen.getByText(/Cover · first photo, until you star another · p1.jpg/)).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Undo' }));
-    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from Album' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
     expect(screen.getByText('Cover · p2.jpg')).toBeVisible();
     expect(Array.from(document.querySelectorAll('.album-review-grid > li')).map((item) => (
       item.getAttribute('data-entry-key')
@@ -3761,15 +3761,15 @@ describe('the album', () => {
     renderWorkspace(fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p2.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' }));
     await screen.findByRole('button', { name: 'Undo' });
-    await user.click(screen.getByRole('button', { name: 'Use p3.jpg as the album cover' }));
+    await user.click(screen.getByRole('button', { name: 'Use p3.jpg as the Album cover' }));
     await user.click(screen.getByRole('button', { name: 'Use the first photo instead' }));
 
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
     await waitFor(() => expect(state.metadataWrites.at(-1)?.coverMediaId).toBeNull());
     expect(state.pickWrites).toEqual([{ mediaIds: ['p2'], picked: false }]);
-    expect(screen.queryByRole('button', { name: 'Remove p2.jpg from Album' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove p2.jpg from the Album' })).not.toBeInTheDocument();
     expect(screen.getByText(/Cover · first photo, until you star another · p1.jpg/)).toBeVisible();
   });
 
@@ -4197,7 +4197,7 @@ describe('the album', () => {
     renderWorkspace(controlled.fetchMock, { onPrepare });
     const user = await openAlbum();
 
-    expect(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' })).toBeVisible();
     const prepare = screen.getByRole('button', { name: 'Download album photos' });
     expect(prepare.closest('.album-export')).toHaveTextContent('Current Album: 0 photos.');
     expect(prepare).toBeDisabled();
@@ -4468,7 +4468,7 @@ describe('the album', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Add a section' }));
     await waitFor(() => expect(state.orderWrites.at(-1)?.some((entry) => entry.kind === 'section')).toBe(true));
-    expect(screen.getByLabelText('Section name')).toHaveValue('New section');
+    expect(screen.getByLabelText('Section heading')).toHaveValue('New section');
   });
 
   it('names the delivered original when a photo leaves the album', async () => {
@@ -4481,7 +4481,7 @@ describe('the album', () => {
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
-    await user.click(await screen.findByRole('button', { name: 'Remove First dance from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove First dance from the Album' }));
     expect((await screen.findAllByText('1 photo removed from Album. The delivered photo remains.'))
       .some((node) => node.classList.contains('album-undo__message'))).toBe(true);
   });
@@ -4503,7 +4503,7 @@ describe('the album', () => {
       .closest('.album-export');
     expect(exportControl).toHaveTextContent('Current Album: 2 photos.');
 
-    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from Album' }));
+    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from the Album' }));
 
     await waitFor(() => expect(exportControl).toHaveTextContent('Current Album: 1 photo.'));
   });
@@ -4518,9 +4518,9 @@ describe('the album', () => {
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
-    await screen.findByRole('button', { name: 'Remove p1.jpg from Album' });
+    await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' });
     state.albumReadErrors[state.albumReads] = 'The updated album could not be refreshed.';
-    await user.click(screen.getByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(screen.getByRole('button', { name: 'Remove p1.jpg from the Album' }));
 
     expect(state.pickWrites).toEqual([{ mediaIds: ['p1'], picked: false }]);
     expect(await screen.findByRole('button', { name: 'Undo' })).toBeEnabled();
@@ -4545,15 +4545,15 @@ describe('the album', () => {
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
-    await screen.findByRole('button', { name: 'Remove p2.jpg from Album' });
+    await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' });
     const authoritativeRead = controlled.state.albumReads;
     controlled.state.albumReadGates[authoritativeRead] = refresh.promise;
-    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from Album' }));
+    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.albumReads).toBe(authoritativeRead + 1));
     controlled.state.galleryRows.find(({ id }) => id === 'p2')!.isFavorite = true;
     await act(async () => { refresh.resolve(); });
 
-    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from Album' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Download album photos' }).closest('.album-export'))
       .toHaveTextContent('Current Album: 1 photo.');
   });
@@ -4584,7 +4584,7 @@ describe('the album', () => {
     const authoritativeRead = controlled.state.albumReads;
     controlled.state.albumReadGates[authoritativeRead] = refresh.promise;
     controlled.state.albumReadGates[authoritativeRead + 1] = refresh.promise;
-    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from Album' }));
+    await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.pickWrites).toEqual([
       { mediaIds: ['p2'], picked: false },
     ]));
@@ -4602,7 +4602,7 @@ describe('the album', () => {
     controlled.state.album.revision = 41;
     await act(async () => { refresh.resolve(); });
 
-    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from Album' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Download album photos' }).closest('.album-export'))
       .toHaveTextContent('Current Album: 2 photos.');
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
@@ -4662,7 +4662,7 @@ describe('album review regressions', () => {
 
     expect(await screen.findByText('What people with the Album link see')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Back to editing' }));
-    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from Album' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
     expect(screen.getByLabelText('Description')).toHaveValue('Newest intent');
   });
 
@@ -4680,9 +4680,9 @@ describe('album review regressions', () => {
     const read = controlled.state.albumReads;
     controlled.state.albumReadGates[read] = refresh.promise;
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     fireEvent.change(screen.getByLabelText('Album title'), { target: { value: 'Kept during removal' } });
-    await user.click(screen.getByRole('button', { name: 'Use p2.jpg as the album cover' }));
+    await user.click(screen.getByRole('button', { name: 'Use p2.jpg as the Album cover' }));
     await act(async () => { unpick.resolve(); });
     await waitFor(() => expect(controlled.state.albumReads).toBe(read + 1));
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Kept during refresh' } });
@@ -4705,7 +4705,7 @@ describe('album review regressions', () => {
     const read = controlled.state.albumReads;
     controlled.state.albumReadGates[read] = refresh.promise;
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Library/u }));
     expect(screen.getByLabelText('Album title')).toBeVisible();
@@ -4735,9 +4735,9 @@ describe('album review regressions', () => {
     renderWorkspace(fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove section Reception' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove the section Reception' }));
     fireEvent.change(screen.getByLabelText('Album title'), { target: { value: 'Later title' } });
-    await user.click(screen.getByRole('button', { name: 'Use p2.jpg as the album cover' }));
+    await user.click(screen.getByRole('button', { name: 'Use p2.jpg as the Album cover' }));
     await user.click(screen.getByRole('button', { name: 'Move p2.jpg earlier' }));
     fireEvent.blur(screen.getByLabelText('Album title'));
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument());
@@ -4754,7 +4754,7 @@ describe('album review regressions', () => {
     const controlled = harness({ galleryRows: [p1], pickErrors: [undefined, 'Could not restore the photo.'] });
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     const undoButton = await screen.findByRole('button', { name: 'Undo' });
 
     vi.useFakeTimers();
@@ -4770,7 +4770,7 @@ describe('album review regressions', () => {
     expect(await screen.findByText(UNDO_FAILED_MESSAGE, { selector: '.album-undo__error' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled();
     await user.click(screen.getByRole('button', { name: 'Undo' }));
-    expect(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' })).toBeEnabled();
   });
 
   it.each([
@@ -4815,7 +4815,7 @@ describe('album review regressions', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     const refreshAlert = await screen.findByRole('alert');
     expect(refreshAlert).toHaveTextContent('The photo was removed from Album, but the Album could not be refreshed.');
     await user.click(within(refreshAlert).getByRole('button', { name: 'Dismiss error' }));
@@ -4985,7 +4985,7 @@ describe('album review regressions', () => {
     };
     screen.getByRole('button', { name: 'Move p2.jpg earlier' }).focus();
     await user.click(screen.getByRole('button', { name: 'Add a section' }));
-    const insertedKey = screen.getByLabelText('Section name').closest('li')
+    const insertedKey = screen.getByLabelText('Section heading').closest('li')
       ?.getAttribute('data-entry-key');
     expect(insertedKey).toMatch(/^section:/u);
     conflictRead.resolve();
@@ -5037,11 +5037,11 @@ describe('album review regressions', () => {
       ],
     };
     await user.click(screen.getByRole('button', { name: 'Add a section' }));
-    const inserted = screen.getAllByLabelText('Section name').at(-1)!;
+    const inserted = screen.getAllByLabelText('Section heading').at(-1)!;
     await user.clear(inserted);
     await user.type(inserted, 'After party');
     fireEvent.blur(inserted);
-    await user.click(screen.getByRole('button', { name: 'Remove section Remove me' }));
+    await user.click(screen.getByRole('button', { name: 'Remove the section Remove me' }));
     conflictRead.resolve();
 
     await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(2));
@@ -5084,7 +5084,7 @@ describe('album review regressions', () => {
         { kind: 'photo', photo: p2 },
       ],
     };
-    const sectionName = screen.getByLabelText('Section name');
+    const sectionName = screen.getByLabelText('Section heading');
     fireEvent.change(sectionName, { target: { value: '  Renamed section  ' } });
     fireEvent.blur(sectionName);
     conflictRead.resolve();
@@ -5213,11 +5213,11 @@ describe('album review regressions', () => {
     fireEvent.change(title, { target: { value: emoji.repeat(121) } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: emoji.repeat(1_001) } });
     await user.click(screen.getByRole('button', { name: 'Add a section' }));
-    fireEvent.change(screen.getByLabelText('Section name'), { target: { value: emoji.repeat(81) } });
+    fireEvent.change(screen.getByLabelText('Section heading'), { target: { value: emoji.repeat(81) } });
 
     expect(Array.from((title as HTMLInputElement).value)).toHaveLength(120);
     expect(Array.from((screen.getByLabelText('Description') as HTMLTextAreaElement).value)).toHaveLength(1_000);
-    expect(Array.from((screen.getByLabelText('Section name') as HTMLInputElement).value)).toHaveLength(80);
+    expect(Array.from((screen.getByLabelText('Section heading') as HTMLInputElement).value)).toHaveLength(80);
   });
 
   it('gives native drag complete transfer cleanup while an Album link is active', async () => {
@@ -5256,7 +5256,7 @@ describe('album review regressions', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
-    await user.click(await screen.findByRole('button', { name: 'Remove section Reception' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove the section Reception' }));
     await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(1));
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
     removal.resolve();
@@ -5320,7 +5320,7 @@ describe('album review regressions', () => {
     const rendered = renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(1));
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Library/u }));
@@ -5409,7 +5409,7 @@ describe('album review regressions', () => {
     const user = await openAlbum();
 
     if (operation === 'section removal') {
-      await user.click(await screen.findByRole('button', { name: 'Remove section Reception' }));
+      await user.click(await screen.findByRole('button', { name: 'Remove the section Reception' }));
     } else if (operation === 'Reset') {
       await user.click(await screen.findByRole('button', { name: 'Reset to timeline order' }));
     } else {
@@ -5475,7 +5475,7 @@ describe('album review regressions', () => {
 
     expect(controlled.state.pickWrites).toEqual([]);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.pickWrites).toEqual([
       { mediaIds: ['p1'], picked: false },
     ]));
@@ -5518,7 +5518,7 @@ describe('album review regressions', () => {
     renderWorkspace(fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await user.click(await screen.findByRole('button', { name: 'Undo' }));
 
     await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(2));
@@ -5547,7 +5547,7 @@ describe('album review regressions', () => {
     renderWorkspace(fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.albumReads).toBeGreaterThan(1));
 
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
@@ -5577,7 +5577,7 @@ describe('album review regressions', () => {
     const rendered = renderWorkspace(fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.albumReads).toBeGreaterThan(1));
 
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
@@ -5596,7 +5596,7 @@ describe('album review regressions', () => {
     renderWorkspace(controlled.fetchMock);
     await openAlbum();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove section Reception' }), { detail: 1 });
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove the section Reception' }), { detail: 1 });
     const title = screen.getByLabelText('Album title');
     fireEvent.change(title, { target: { value: 'Newer title' } });
     fireEvent.blur(title);
@@ -5624,10 +5624,10 @@ describe('album review regressions', () => {
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
 
-    await user.click(await screen.findByRole('button', { name: 'Remove section Reception' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove the section Reception' }));
     expect(await screen.findByRole('button', { name: 'Undo' })).toBeVisible();
 
-    await user.click(screen.getByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(screen.getByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(controlled.state.pickWrites).toHaveLength(1));
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
 
@@ -5682,21 +5682,21 @@ describe('album review regressions', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
-    await user.click(await screen.findByRole('button', { name: 'Remove section Dinner' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove the section Dinner' }));
     await user.click(await screen.findByRole('button', { name: 'Undo' }));
     await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(2));
 
     expect(screen.getByRole('button', { name: 'Reset to timeline order' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Remove section Dancing' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Remove p1.jpg from Album' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove the section Dancing' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove p1.jpg from the Album' })).toBeDisabled();
 
     restoration.resolve();
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Undoing…' })).not.toBeInTheDocument());
   });
 
   it.each([
-    ['the next photo', ['p1', 'p2'], 'p1', 'Remove p2.jpg from Album'],
-    ['the previous photo', ['p1', 'p2'], 'p2', 'Remove p1.jpg from Album'],
+    ['the next photo', ['p1', 'p2'], 'p1', 'Remove p2.jpg from the Album'],
+    ['the previous photo', ['p1', 'p2'], 'p2', 'Remove p1.jpg from the Album'],
     ['the Album heading', ['p1'], 'p1', 'Album'],
   ] as const)('keeps pointer focus on %s after photo removal', async (
     _fallback,
@@ -5721,7 +5721,7 @@ describe('album review regressions', () => {
     await openAlbum();
 
     fireEvent.click(await screen.findByRole('button', {
-      name: `Remove ${removedId}.jpg from Album`,
+      name: `Remove ${removedId}.jpg from the Album`,
     }), { detail: 1 });
     await screen.findByRole('button', { name: 'Undo' });
 
@@ -5739,7 +5739,7 @@ describe('album review regressions', () => {
         { kind: 'section' as const, id: 's2', heading: 'Dancing' },
       ],
       'Dinner',
-      'Remove section Dancing',
+      'Remove the section Dancing',
     ],
     [
       'the previous entry',
@@ -5748,7 +5748,7 @@ describe('album review regressions', () => {
         { kind: 'section' as const, id: 's2', heading: 'Dancing' },
       ],
       'Dancing',
-      'Remove section Dinner',
+      'Remove the section Dinner',
     ],
     [
       'the Album heading',
@@ -5769,7 +5769,7 @@ describe('album review regressions', () => {
     await openAlbum();
 
     fireEvent.click(await screen.findByRole('button', {
-      name: `Remove section ${removedName}`,
+      name: `Remove the section ${removedName}`,
     }), { detail: 1 });
     await screen.findByRole('button', { name: 'Undo' });
 
@@ -5795,8 +5795,8 @@ describe('album review regressions', () => {
     renderWorkspace(controlled.fetchMock);
     await openAlbum();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove section Dinner' }), { detail: 0 });
-    const fallback = screen.getByRole('button', { name: 'Remove section Dancing' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove the section Dinner' }), { detail: 0 });
+    const fallback = screen.getByRole('button', { name: 'Remove the section Dancing' });
     expect(fallback).toHaveFocus();
     removal.resolve();
 
@@ -5819,7 +5819,7 @@ describe('album review regressions', () => {
     renderWorkspace(controlled.fetchMock);
     await openAlbum();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove section Dinner' }), { detail: 0 });
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove the section Dinner' }), { detail: 0 });
     const title = screen.getByLabelText('Album title');
     title.focus();
     removal.resolve();
@@ -5830,7 +5830,7 @@ describe('album review regressions', () => {
 
   it.each([
     [0, 'Undo'],
-    [1, 'Remove p2.jpg from Album'],
+    [1, 'Remove p2.jpg from the Album'],
   ] as const)('uses the nearest surviving entry after Reset click detail %i', async (detail, focusedName) => {
     const p1 = photo('p1', '2026-08-15T23:00:00.000Z', { isFavorite: true });
     const p2 = photo('p2', '2026-08-15T22:00:00.000Z', { isFavorite: true });
@@ -5956,7 +5956,7 @@ describe('album review regressions', () => {
     const controlled = harness({ galleryRows: [p1] });
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     const undo = await screen.findByRole('button', { name: 'Undo' });
     controlled.state.albumReadErrors[controlled.state.albumReads] = 'The restored album could not be refreshed.';
     await user.click(undo);
@@ -5964,7 +5964,7 @@ describe('album review regressions', () => {
     expect(await screen.findByText(UNDO_FAILED_MESSAGE, { selector: '.album-undo__error' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled();
     await user.click(screen.getByRole('button', { name: 'Undo' }));
-    expect(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' })).toBeEnabled();
   });
 
   it('keeps offer-producing Album actions locked when a photo inverse is rejected', async () => {
@@ -5986,9 +5986,9 @@ describe('album review regressions', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = await openAlbum();
-    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await user.click(await screen.findByRole('button', { name: 'Undo' }));
-    const removeSection = screen.getByRole('button', { name: 'Remove section Dinner' });
+    const removeSection = screen.getByRole('button', { name: 'Remove the section Dinner' });
     expect(removeSection).toBeDisabled();
     await user.click(removeSection);
     restore.resolve();
@@ -6134,7 +6134,7 @@ describe('album review regressions', () => {
     const user = await openAlbum();
     const transfer = { effectAllowed: '', setData: vi.fn(), clearData: vi.fn() };
     fireEvent.dragStart(document.querySelector('[data-entry-key="photo:p2"]')!, { dataTransfer: transfer });
-    await user.click(screen.getByRole('button', { name: 'Remove p1.jpg from Album' }));
+    await user.click(screen.getByRole('button', { name: 'Remove p1.jpg from the Album' }));
     await waitFor(() => expect(document.querySelector('[data-entry-key="photo:p1"]')).not.toBeInTheDocument());
     fireEvent.drop(document.querySelector('[data-entry-key="photo:p3"]')!, { dataTransfer: transfer });
 
@@ -6246,7 +6246,7 @@ describe('recently deleted photos in the album', () => {
     // Nor is it numbered: the number is the guest's reading position, and no guest sees this.
     expect(within(marker).queryByTestId('album-photo-position')).not.toBeInTheDocument();
     expect(within(marker).queryByRole('button', { name: /^Remove/ })).not.toBeInTheDocument();
-    expect(within(marker).queryByRole('button', { name: /album cover/ })).not.toBeInTheDocument();
+    expect(within(marker).queryByRole('button', { name: /Album cover/ })).not.toBeInTheDocument();
 
     expect(within(marker).getByText(RECOVERABLE_IN_CHICAGO)).toBeVisible();
     expect(marker.querySelector('time')).toHaveAttribute('datetime', RECOVERABLE_UNTIL);
@@ -6421,7 +6421,7 @@ describe('recently deleted photos in the album', () => {
     renderAlbum(fetchMock, { eventTimezone: 'America/Chicago' });
 
     await userEvent.setup().click(
-      await screen.findByRole('button', { name: 'Use p2.jpg as the album cover' }),
+      await screen.findByRole('button', { name: 'Use p2.jpg as the Album cover' }),
     );
 
     await waitFor(() => expect(state.metadataWrites.at(-1)?.coverMediaId).toBe('p2'));
@@ -6580,7 +6580,7 @@ describe('stopping the album link', () => {
       'The Album link was stopped. People with the old link cannot open it now, and the Album itself is unchanged.',
     );
     // The album itself is untouched, and a replacement link is one action away.
-    expect(screen.getByRole('button', { name: 'Remove p1.jpg from Album' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Remove p1.jpg from the Album' })).toBeEnabled();
     expect(state.orderWrites).toEqual([]);
     const replacement = screen.getByRole('button', { name: 'Create Album link' });
     expect(replacement).toBeEnabled();

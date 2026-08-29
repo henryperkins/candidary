@@ -10,7 +10,7 @@ import {
   transitionSelection,
   type GallerySelectionAction,
 } from './selection-state';
-import { SelectionTray } from './SelectionTray';
+import { GUEST_TRAY_NOTE, SelectionTray } from './SelectionTray';
 import type { GalleryAnchor, PublicationFilter } from '../../app/manager-history-state';
 import { captureRenderedGalleryAnchor, restoreRenderedGalleryAnchor } from './gallery-anchor';
 
@@ -309,7 +309,7 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
       label="Guest gallery"
       primary={hideLeads ? hideAction : publishAction}
       secondary={hideLeads ? publishAction : hideAction}
-      note="Publish and Hide change what event guests see. Neither changes Album membership."
+      note={GUEST_TRAY_NOTE}
       onClear={() => commitSelection({ type: 'clear' })}
     />}
   </div>;

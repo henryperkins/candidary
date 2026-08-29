@@ -428,7 +428,7 @@ test('a new Album section enters the mobile viewport without focus-induced scrol
 
   await addSection.click();
 
-  const sectionName = page.getByLabel('Section name');
+  const sectionName = page.getByLabel('Section heading');
   await expect(sectionName).toHaveValue('New section');
   await expect(sectionName).toBeFocused();
   const bounds = await sectionName.boundingBox();

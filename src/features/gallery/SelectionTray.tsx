@@ -27,11 +27,22 @@ interface SelectionTrayProps {
   label?: string;
   primary: SelectionTrayAction;
   secondary: SelectionTrayAction;
-  note: string;
+  /** What the two verbs do and do not change. Defaults to the Album sentence. */
+  note?: string;
   onClear(): void;
 }
 
 export type SelectionTrayInput = 'keyboard' | 'pointer';
+
+/**
+ * The two tray notes, side by side and next to the tray that renders them.
+ *
+ * Each one's job is to deny what the *other* mode does — picking never publishes, publishing
+ * never changes the Album — so split across the two mode components they drift, and the drift is
+ * invisible: each sentence reads fine alone.
+ */
+export const ALBUM_TRAY_NOTE = 'Pick changes Album membership only. Remove from Album keeps every delivered photo in Library; neither action publishes to the Guest gallery.';
+export const GUEST_TRAY_NOTE = 'Publish and Hide change what event guests see. Neither changes Album membership or the Album link.';
 
 function activationInput(event: MouseEvent<HTMLButtonElement>): SelectionTrayInput {
   return event.detail === 0 ? 'keyboard' : 'pointer';
@@ -57,7 +68,7 @@ export function SelectionTray({
   label = 'Album',
   primary,
   secondary,
-  note,
+  note = ALBUM_TRAY_NOTE,
   onClear,
 }: SelectionTrayProps) {
   const countMessage = count >= MANAGER_BULK_SELECTION_MAX

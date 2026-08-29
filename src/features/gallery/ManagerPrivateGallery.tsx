@@ -1013,7 +1013,6 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
         icon: <Minus aria-hidden="true" />,
         onClick: (input) => void applyPicks(false, input),
       }}
-      note="Pick changes Album membership only. Remove from Album keeps every delivered photo in Library; neither action publishes to the Guest gallery."
       onClear={clearSelection}
     />}
     {viewerPhotoId !== null && viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer
