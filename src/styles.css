@@ -1714,8 +1714,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-metadata__fields > small:not(.field-error) { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
 
 .album-order-heading { margin: 22px 0 14px; display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
-.album-order-heading h3 { margin: 0; font-size: 1.05rem; letter-spacing: -.02em; }
-.album-order-heading p { margin: 3px 0 0; color: var(--muted); font-size: .78rem; }
+.album-order-heading h3 { margin: 0; font-size: 1.2rem; letter-spacing: -.015em; }
+.album-order-heading p { margin: 3px 0 0; color: var(--muted); font-size: .8rem; line-height: 1.45; }
 .album-order-heading__controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .album-review-grid { margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 196px), 1fr)); gap: 14px; list-style: none; }
 .album-review-grid__photo { min-width: 0; padding: 10px; display: grid; align-content: start; gap: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); cursor: grab; }
