@@ -190,6 +190,7 @@ const guestbookColumns: Record<string, string[]> = {
     'publication_status', 'idempotency_key', 'reservation_expires_at', 'created_at', 'published_at',
     'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
     'captured_at', 'timeline_at', 'favorited_at', 'trashed_at', 'restore_until',
+    'album_pick_version',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
@@ -795,8 +796,10 @@ describe('fresh local D1 verification', () => {
     const indexes = statements[29]!;
     expect(indexes).toContain("'event_access_tokens_one_live_manager'");
     expect(indexes).toContain("'event_sessions_manager_upload_actor'");
+    expect(indexes.match(/SELECT i\.name AS name,/gu)).toHaveLength(2);
     expect(indexes).toContain('i.partial AS partial');
     expect(indexes).toContain('x.sql AS sql');
+    expect(indexes).toMatch(/ORDER BY name$/u);
   });
 
   it('keeps the legacy cover-index envelope at exactly four fields', async () => {

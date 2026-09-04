@@ -355,12 +355,12 @@ SELECT 'event_sessions' AS tbl, f."table" AS parent,
        f."from" AS col, f."to" AS parent_col, f.on_delete AS on_delete
   FROM pragma_foreign_key_list('event_sessions') AS f
   WHERE f."from" = 'manager_upload_account_id';
-SELECT i.name, i."unique" AS uniq, i.partial AS partial, x.sql AS sql
+SELECT i.name AS name, i."unique" AS uniq, i.partial AS partial, x.sql AS sql
   FROM pragma_index_list('event_access_tokens') AS i
   JOIN sqlite_master AS x ON x.type = 'index' AND x.name = i.name
   WHERE i.name = 'event_access_tokens_one_live_manager'
 UNION ALL
-SELECT i.name, i."unique" AS uniq, i.partial AS partial, x.sql AS sql
+SELECT i.name AS name, i."unique" AS uniq, i.partial AS partial, x.sql AS sql
   FROM pragma_index_list('event_sessions') AS i
   JOIN sqlite_master AS x ON x.type = 'index' AND x.name = i.name
   WHERE i.name = 'event_sessions_manager_upload_actor'
@@ -644,6 +644,8 @@ const EXPECTED_GUESTBOOK_COLUMNS: Record<string, readonly string[]> = {
     'captured_at', 'timeline_at', 'favorited_at',
     // 0019, appended so every earlier ordinal is unmoved.
     'trashed_at', 'restore_until',
+    // 0021, appended so every earlier ordinal is unmoved.
+    'album_pick_version',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
