@@ -1592,7 +1592,7 @@ describe('cover publication', () => {
     `).bind(access.event.id).first()).toEqual({
       cover_config: JSON.stringify({
         version: 1,
-        source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+        source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 2 },
         effect: 'film',
       }),
       cover_object_key: null,
