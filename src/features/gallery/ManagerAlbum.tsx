@@ -211,7 +211,7 @@ function entryName(entry: AlbumEntryView): string {
   if (isRetainedEntry(entry)) return RETAINED_SLOT_NAME;
   // Never blank: this becomes the accessible name of the row's move and remove controls, and an
   // unnamed section is a row a host cannot tell apart from the one above it.
-  return entry.heading || 'Untitled section';
+  return entry.heading.trim() || 'Untitled section';
 }
 
 /**
@@ -2523,7 +2523,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                             false,
                             [{ kind: 'set-cover', value: null }],
                           );
-                          setAnnouncement('The first photo is the album cover.');
+                          setAnnouncement('The first photo is the Album cover.');
                         }}
                       >Use the first photo instead</button>}
                     </div>
@@ -2589,7 +2589,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                         rows are draggable, and every row also carries move controls for a host who
                         is not dragging. */}
                     {draft.entries.length > 0 && <p>
-                      {photoCount} photo{photoCount === 1 ? '' : 's'} · drag a photo, or use the move controls
+                      {photoCount} photo{photoCount === 1 ? '' : 's'} · drag an entry, or use the move controls
                     </p>}
                   </div>
                   <div className="album-order-heading__controls">

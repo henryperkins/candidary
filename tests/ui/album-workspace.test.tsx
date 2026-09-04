@@ -43,7 +43,7 @@ import {
   type ManagerGalleryWorkspaceHandle,
 } from '../../src/features/gallery/ManagerGalleryWorkspace';
 import { ManagerSharedGallery } from '../../src/features/gallery/ManagerSharedGallery';
-import { ALBUM_TRAY_NOTE, SelectionTray } from '../../src/features/gallery/SelectionTray';
+import { SelectionTray } from '../../src/features/gallery/SelectionTray';
 import {
   ManagerUndoBar,
   ManagerUndoProvider,
@@ -1477,7 +1477,6 @@ describe('gallery modes', () => {
       busy={false}
       primary={{ label: `Pick for Album (${count})`, icon: null, onClick: vi.fn() }}
       secondary={{ label: `Remove from Album (${count})`, icon: null, onClick: vi.fn() }}
-      note={ALBUM_TRAY_NOTE}
       onClear={vi.fn()}
     />);
 
@@ -2231,7 +2230,7 @@ describe('selecting photos into the album', () => {
     const tray = await screen.findByRole('region', { name: 'Album' });
     expect(within(tray).getByText('1 of 50 selected')).toBeVisible();
     expect(within(tray).getByText(
-      ALBUM_TRAY_NOTE,
+      'Pick changes Album membership only. Remove from Album keeps every delivered photo in Library; neither action publishes to the Guest gallery.',
     )).toBeVisible();
     const remove = within(tray).getByRole('button', { name: 'Remove from Album (1)' });
     expect(remove.querySelector('.lucide-minus')).not.toBeNull();
@@ -3221,6 +3220,21 @@ describe('the album', () => {
       .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true'));
   });
 
+  it('describes section-only Album rows as draggable entries', async () => {
+    const { fetchMock } = harness({
+      album: {
+        revision: 2,
+        saved: true,
+        entries: [{ kind: 'section', id: 's1', heading: 'Reception' }],
+      },
+    });
+    renderAlbum(fetchMock);
+
+    expect(await screen.findByText(
+      '0 photos · drag an entry, or use the move controls',
+    )).toBeVisible();
+  });
+
   it('renders explicit and fallback covers, photo-only numbers, and independent failed preview tiles', async () => {
     const p1 = photo('p1', '2026-08-15T22:42:00.000Z', {
       caption: 'First dance',
@@ -3263,6 +3277,29 @@ describe('the album', () => {
     await user.click(screen.getByRole('button', { name: 'Use the first photo instead' }));
     expect(screen.getByText(/Cover · first photo, until you star another · First dance/)).toBeVisible();
     expect(screen.getByRole('button', { name: 'First dance is the Album cover' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('announces the first photo with the Album-cover terminology', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const p2 = photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true });
+    const { fetchMock } = harness({
+      galleryRows: [p1, p2],
+      album: {
+        revision: 3,
+        saved: true,
+        entries: [{ kind: 'photo', photo: p1 }, { kind: 'photo', photo: p2 }],
+        coverMediaId: 'p2',
+      },
+    });
+    const { onAnnouncement } = renderAlbum(fetchMock);
+
+    await userEvent.setup().click(
+      await screen.findByRole('button', { name: 'Use the first photo instead' }),
+    );
+
+    await waitFor(() => expect(onAnnouncement).toHaveBeenCalledWith(
+      'The first photo is the Album cover.',
+    ));
   });
 
   it('moves entries with earlier/later controls and equivalent native drag/drop', async () => {
@@ -3539,6 +3576,31 @@ describe('the album', () => {
       const input = screen.getByDisplayValue(heading);
       expect(within(input.closest('li')!).queryByText(emptyNote)).not.toBeInTheDocument();
     }
+  });
+
+  it('keeps section action names trimmed and identifiable while the heading is edited', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const { fetchMock } = harness({
+      galleryRows: [p1],
+      album: {
+        revision: 2,
+        saved: true,
+        entries: [
+          { kind: 'section', id: 's1', heading: 'Reception' },
+          { kind: 'photo', photo: p1 },
+        ],
+      },
+    });
+    renderAlbum(fetchMock);
+
+    const heading = await screen.findByLabelText('Section heading');
+    fireEvent.change(heading, { target: { value: '  Speeches  ' } });
+    expect(screen.getByRole('button', { name: 'Move Speeches later' }))
+      .toHaveAttribute('aria-label', 'Move Speeches later');
+
+    fireEvent.change(heading, { target: { value: '   ' } });
+    expect(screen.getByRole('button', { name: 'Move Untitled section later' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Remove the section Untitled section' })).toBeEnabled();
   });
 
   it('trims section names and keeps section removal undoable for nine seconds while focus is inside', async () => {
