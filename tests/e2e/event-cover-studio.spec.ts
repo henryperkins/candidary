@@ -245,6 +245,30 @@ test('Compose uses one real canvas, promotes the first 3px drag to manual framin
   expect(records(audit, 'publication')).toHaveLength(0);
 });
 
+test('uploaded Film previews layer v2 grain exactly once on the thumbnail and draft canvas', async ({ page }, testInfo) => {
+  desktopOnly(testInfo);
+  await openManagerStudio(page);
+  await page.getByLabel('Choose photo').setInputFiles(UPLOAD);
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('heading', { name: 'Position the photo' })).toBeFocused();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.getByRole('heading', { name: 'Choose a style' })).toBeFocused();
+
+  const filmRadio = page.getByRole('radio', { name: /^Film/u });
+  await expect(filmRadio).toBeEnabled();
+  await filmRadio.check();
+
+  const filmThumbnail = page.locator('.cover-style-picker li', { has: filmRadio })
+    .locator('.cover-style-picker__thumbnail');
+  await expect(filmThumbnail).toHaveClass(/\bresponsive-cover--film-grain-v2\b/u);
+  await expect(filmThumbnail.locator(':scope > .responsive-cover__treatment')).toHaveCount(1);
+
+  const draftCanvas = page.getByRole('dialog', { name: 'Cover Studio' })
+    .locator('.event-appearance-canvas__local-cover');
+  await expect(draftCanvas).toHaveClass(/\bresponsive-cover--film-grain-v2\b/u);
+  await expect(draftCanvas.locator(':scope > .responsive-cover__treatment')).toHaveCount(1);
+});
+
 test('upload validation stays inside the Studio and resets the native picker', async ({ page }) => {
   const audit = await openManagerStudio(page);
   const studio = page.getByRole('dialog', { name: 'Cover Studio' });
@@ -857,7 +881,7 @@ test('preset styles load five static effect thumbnails without draft or preview 
   expect(await images.evaluateAll((nodes) => nodes.map((node) => (
     new URL((node as HTMLImageElement).src).pathname
   )))).toEqual(effects.map((effect) => (
-    `/assets/event-covers/v1/warm-linen/${effect}/standard-default-1x.webp`
+    `/assets/event-covers/v2/warm-linen/${effect}/standard-default-1x.webp`
   )));
   for (const name of ['Natural', 'Warm', 'Film', 'Soft', 'Monochrome']) {
     await expect(page.getByRole('radio', { name: new RegExp(`^${name}`, 'u') })).toBeEnabled();
@@ -870,7 +894,7 @@ test('preset styles load five static effect thumbnails without draft or preview 
 test('missing preset style artwork keeps its named radio usable without upload fallbacks', async ({ page }, testInfo) => {
   desktopOnly(testInfo);
   await page.route(
-    '**/assets/event-covers/v1/warm-linen/film/standard-default-1x.webp',
+    '**/assets/event-covers/v2/warm-linen/film/standard-default-1x.webp',
     (route) => route.fulfill({ status: 404, body: 'Missing fixture artwork.' }),
   );
   const audit = await openManagerStudio(page);

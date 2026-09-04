@@ -385,15 +385,18 @@ const INVARIANT_STATEMENT_COUNT = 30;
  * attempt-owned execution ledger without reinterpreting existing jobs.
  * Twenty-one with `0021_manager_upload_and_album_era.sql`, which adds the
  * account upload actor and database-owned Album-era generation.
+ * Twenty-two with `0022_event_cover_preset_asset_v2.sql`, which admits only
+ * immutable preset asset versions 1 and 2 without widening other cover guards.
  * Count and terminal schema assertions move together here.
  */
-const EXPECTED_MIGRATION_COUNT = 21;
+const EXPECTED_MIGRATION_COUNT = 22;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
  * existing invariant bodies, all fifteen 0015 bodies, the twelve 0019 recovery
  * and source-hold bodies, the nine 0020 execution/progress/admission bodies,
- * and the eight 0021 actor/Album bodies cannot drift behind a name-only check.
+ * the eight 0021 actor/Album bodies, and the two 0022 cover bodies cannot drift
+ * behind a name-only check.
  *
  * Two of these names are older than their bodies: 0019 replaces
  * `media_object_write_tombstone_guard_update` and `media_stored_legacy_guard_update`
@@ -408,8 +411,8 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   event_cover_render_set_live_reference_delete: '43562a5276ac0183b67e68c0872e5dda3facb5639a4242b40759a3bf599479b0',
   event_cover_render_set_manifest_insert: 'df734d0e6c3695c545043c6dec35fc7752982df931df8bae7d7e740747771cf8',
   event_cover_render_set_manifest_update: '90ce5414d984e4adeeefa901a20d2e169ff0a5f80f943d922bc0e95081ab4815',
-  event_cover_source_pointer_insert: 'a9fbab82a3e6ad5e3f98cae72d0c5cddddaf10a1e94d823bc0d3090fb91d7991',
-  event_cover_source_pointer_update: '047746e2f68a3b5560756f3d750cc45aa78688349f922bcab86102775dea99fd',
+  event_cover_source_pointer_insert: '270ca07efe6ff0a16bef909c30eff4bc656629c1a2ae6ef4624ada45bc4b8a5e',
+  event_cover_source_pointer_update: 'd8ab96cbd3e926853bd02dbaf34ac77ae356e1ba9d4813b958997faccfa882f7',
   event_hosts_revoke_manager_upload_actor: '20b22dfbccc7c6c0c855f8acaf52432c0fc06a70c97efbcd3fd442bdbe3e3cea',
   event_sessions_manager_upload_actor_insert: 'b53da7fb6734359b954bc62d7c82fb1da46526c51a528eff9f82c1ce3a3f3db3',
   event_sessions_manager_upload_actor_update: '6c6407acf6e08f6e17e87fb2c78ba9d4749d41f491d528d0de101aaf8740f6ee',

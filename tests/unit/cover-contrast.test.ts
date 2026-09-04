@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   COVER_COPY_BAND_TOP,
   COVER_GRAIN_LAYER_OPACITY,
+  COVER_GRAIN_LAYER_OPACITY_V1,
   COVER_GRAIN_TEXEL_ALPHA,
   type CoverRgb,
   coverContrastRatio,
@@ -239,10 +240,14 @@ describe('the fixed scrim protects an arbitrary uploaded photo', () => {
   });
 
   it('holds the grain constants the shipped tile was generated with', () => {
-    expect(COVER_GRAIN_LAYER_OPACITY).toBe(0.18);
+    expect(COVER_GRAIN_LAYER_OPACITY).toBe(0.10);
+    expect(COVER_GRAIN_LAYER_OPACITY_V1).toBe(0.18);
     const stylesheet = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
     // The opacity the proof assumes is the opacity the stylesheet applies.
-    expect(stylesheet).toMatch(/responsive-cover--film-grain[^}]*opacity: \.18/u);
+    expect(stylesheet).toMatch(/responsive-cover--film-grain-v1[^}]*opacity: \.18/u);
+    expect(stylesheet).toMatch(/responsive-cover--film-grain-v2[^}]*opacity: \.10/u);
     expect(existsSync(resolve(process.cwd(), `public${manifest.surfaceTreatment.path}`))).toBe(true);
+    expect(existsSync(resolve(process.cwd(), 'public/assets/event-covers/v1/manifest.json'))).toBe(true);
+    expect(existsSync(resolve(process.cwd(), 'public/assets/event-covers/v1/film-grain-v1.png'))).toBe(true);
   });
 });

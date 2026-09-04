@@ -98,7 +98,16 @@ export function CoverStylePicker({
               <span className="cover-style-picker__name">{name}</span>
             </span>
             {preview.url
-              ? <img src={preview.url} alt="" aria-hidden="true" />
+              ? <span className={[
+                  'cover-style-picker__thumbnail',
+                  effect === 'film' ? 'responsive-cover--film-grain-v2' : '',
+                ].filter(Boolean).join(' ')}>
+                  <img src={preview.url} alt="" aria-hidden="true" />
+                  {effect === 'film' && <span
+                    className="responsive-cover__treatment"
+                    aria-hidden="true"
+                  />}
+                </span>
               : <span className="cover-style-picker__placeholder" aria-hidden="true" />}
             <span className="cover-style-picker__note">{STYLE_DESCRIPTIONS[effect]}</span>
           </label>

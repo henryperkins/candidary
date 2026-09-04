@@ -67,7 +67,7 @@ const eventColumnNames = [
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// post-cutover verifier refuses a candidate whose ledger is not exactly twenty-one.
+// post-cutover verifier refuses a candidate whose ledger is not exactly twenty-two.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
@@ -77,6 +77,7 @@ const migrationFileNames = [
   '0015_curated_private_guestbook.sql', '0016_host_private_gallery.sql',
   '0017_event_album.sql', '0018_album_end_to_end.sql', '0019_media_recovery.sql',
   '0020_export_progress.sql', '0021_manager_upload_and_album_era.sql',
+  '0022_event_cover_preset_asset_v2.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -898,7 +899,7 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly twenty-one migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly twenty-two migrations', async () => {
     const candidate = await fixture();
     const twenty = candidate.ledgerNames.slice(0, -1);
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;

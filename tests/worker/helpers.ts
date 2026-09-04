@@ -188,6 +188,7 @@ export function hostWriteHeaders(host: { cookie: string; csrf: string }, extraCo
 export interface RecordedImagesCall {
   input: { byteLength: number };
   transforms: unknown[];
+  draws: Array<{ image: ReadableStream; options: unknown }>;
   output: unknown;
 }
 
@@ -234,14 +235,17 @@ export function withRecordingImages(
       return Promise.resolve({ format: 'image/jpeg', ...source });
     },
     input(stream: ReadableStream) {
-      const call: RecordedImagesCall = { input: { byteLength: 0 }, transforms: [], output: {} };
+      const call: RecordedImagesCall = { input: { byteLength: 0 }, transforms: [], draws: [], output: {} };
       void stream;
       const transformer = {
         transform(transform: unknown) {
           call.transforms.push(transform);
           return transformer;
         },
-        draw() { return transformer; },
+        draw(image: ReadableStream, drawOptions: unknown) {
+          call.draws.push({ image, options: drawOptions });
+          return transformer;
+        },
         output(output: unknown) {
           call.output = output;
           calls.push(call);

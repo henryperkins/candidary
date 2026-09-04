@@ -942,8 +942,15 @@ describe('event appearance editor', () => {
       expect(within(item).getByRole('radio')).toBeEnabled();
       expect(item.querySelector('img')).toHaveAttribute(
         'src',
-        `/assets/event-covers/v1/warm-linen/${effect}/standard-default-1x.webp`,
+        `/assets/event-covers/v2/warm-linen/${effect}/standard-default-1x.webp`,
       );
+      if (effect === 'film') {
+        expect(item.querySelector('.cover-style-picker__thumbnail'))
+          .toHaveClass('responsive-cover--film-grain-v2');
+        expect(item.querySelectorAll('.responsive-cover__treatment')).toHaveLength(1);
+      } else {
+        expect(item.querySelectorAll('.responsive-cover__treatment')).toHaveLength(0);
+      }
     }
     expect(fetchMock).not.toHaveBeenCalled();
   });

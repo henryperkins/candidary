@@ -154,7 +154,8 @@ export function ResponsiveEventCover({
     className={[
       'responsive-cover',
       showPicture ? 'responsive-cover--image' : 'responsive-cover--gradient',
-      cover.surfaceTreatment === 'film-grain-v1' ? 'responsive-cover--film-grain' : '',
+      cover.surfaceTreatment === 'film-grain-v1' ? 'responsive-cover--film-grain-v1' : '',
+      cover.surfaceTreatment === 'film-grain-v2' ? 'responsive-cover--film-grain-v2' : '',
     ].filter(Boolean).join(' ')}
     data-cover-profile={profile ?? undefined}
   >

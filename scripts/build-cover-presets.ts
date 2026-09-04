@@ -9,7 +9,7 @@ import { presetCoverAssetPath } from '../shared/event-cover-assets.ts';
 /**
  * Generates the complete bounded preset matrix: six art-directed masters, five
  * tonal effects, six layout profiles, two densities, two formats — 720 versioned
- * static files — plus the one `film-grain-v1` tile they share.
+ * static files — plus the one version-matched Film grain tile they share.
  *
  * Three things about this file are deliberate.
  *
@@ -27,8 +27,8 @@ import { presetCoverAssetPath } from '../shared/event-cover-assets.ts';
  * JSON that comes back. This extends `scripts/generate-app-icons.mjs`, which
  * already rasterizes a checked-in SVG through the same browser.
  *
- * **The effects are the runtime recipes, not new ones.** `EFFECT_RECIPES` in
- * `worker/storage/event-cover-images.ts` is what an uploaded cover is rendered
+ * **The effects are the runtime recipes, not new ones.** The calibrated table in
+ * `worker/storage/event-cover-effects.ts` is what an uploaded cover is rendered
  * with; the canvas filters below are that table expressed in the one vocabulary
  * a browser has. `natural` carries no sharpening because the source is vector
  * art downscaled by the browser's own resampler, and there is nothing an
@@ -39,7 +39,7 @@ import { presetCoverAssetPath } from '../shared/event-cover-assets.ts';
  * The restated registry
  * ------------------------------------------------------------------ */
 
-export const PRESET_ASSET_VERSION = 1;
+export const PRESET_ASSET_VERSION = 2;
 
 export const COVER_PRESET_IDS = [
   'warm-linen',
@@ -152,11 +152,17 @@ export const COVER_PAPER_MATTE = '#fffaf3';
  */
 export const COVER_EFFECT_CANVAS_FILTERS: Record<CoverEffectId, string> = {
   natural: 'none',
-  warm: 'brightness(1.05) saturate(1.08) contrast(0.96)',
-  film: 'contrast(1.12) saturate(0.88)',
-  soft: 'brightness(1.06) contrast(0.9)',
-  monochrome: 'grayscale(1) contrast(1.05)',
+  warm: 'saturate(1.04) contrast(0.99)',
+  film: 'contrast(0.95) saturate(0.8)',
+  soft: 'saturate(0.96) contrast(0.92)',
+  monochrome: 'grayscale(1) contrast(1.02)',
 };
+
+export const COVER_WARM_WASH = {
+  color: '#e7b78d',
+  opacity: 0.05,
+  composite: 'source-over',
+} as const;
 
 /**
  * Every master is authored at this size, and every profile takes a centred crop
@@ -168,7 +174,7 @@ export const COVER_EFFECT_CANVAS_FILTERS: Record<CoverEffectId, string> = {
 export const COVER_PRESET_MASTER = { width: 2400, height: 1600 } as const;
 export const COVER_PRESET_COMPOSITION = 'center';
 
-export const COVER_SURFACE_TREATMENT_ID = 'film-grain-v1';
+export const COVER_SURFACE_TREATMENT_ID = 'film-grain-v2';
 export const COVER_GRAIN_TILE = {
   width: 128,
   height: 128,
@@ -194,7 +200,7 @@ export const COVER_PRESET_MANIFEST_KIND = 'candidary-cover-preset-manifest';
  * ------------------------------------------------------------------ */
 
 export function presetGrainTilePath(assetVersion: number): string {
-  return `/assets/event-covers/v${assetVersion}/${COVER_SURFACE_TREATMENT_ID}.png`;
+  return `/assets/event-covers/v${assetVersion}/film-grain-v${assetVersion}.png`;
 }
 
 export function presetManifestPath(assetVersion: number): string {
@@ -482,6 +488,14 @@ window.__candidaryCoverPresets = (function () {
       toned.context.filter = request.filter;
       toned.context.drawImage(source, 0, 0);
       toned.context.filter = 'none';
+      if (request.warmWash) {
+        toned.context.globalCompositeOperation = request.warmWash.composite;
+        toned.context.globalAlpha = request.warmWash.opacity;
+        toned.context.fillStyle = request.warmWash.color;
+        toned.context.fillRect(0, 0, slot.width, slot.height);
+        toned.context.globalAlpha = 1;
+        toned.context.globalCompositeOperation = 'source-over';
+      }
 
       var chosen = null;
       for (var rung = 0; rung < slot.qualities.length; rung += 1) {
@@ -609,6 +623,7 @@ export async function buildCoverPresets(options: {
       for (const effect of COVER_EFFECT_IDS) {
         const request = {
           filter: COVER_EFFECT_CANVAS_FILTERS[effect],
+          warmWash: effect === 'warm' ? COVER_WARM_WASH : null,
           bandTop: COVER_COPY_BAND_TOP,
           slots: slots
             .filter((slot) => slot.presetId === presetId && slot.effect === effect)
@@ -689,7 +704,7 @@ export async function buildCoverPresets(options: {
       master: { width: COVER_PRESET_MASTER.width, height: COVER_PRESET_MASTER.height },
       versions: {
         cropProfileRegistry: 1,
-        tonalEffect: 1,
+        tonalEffect: 2,
         outputQualityLadder: 1,
         presetAsset: PRESET_ASSET_VERSION,
       },

@@ -14,6 +14,7 @@ import {
   type EventCoverEffectId,
   type EventCoverFormat,
   type EventCoverProfileId,
+  type EventCoverTonalEffectVersion,
   coverByteCeiling,
   coverOutputQualities,
   coverProfile,
@@ -23,6 +24,7 @@ import {
 import { ApiError } from '../../shared/errors';
 import type { AppEnv } from '../env';
 import { coverMasterKey, coverPreviewKey, coverRenderKey } from './event-cover-keys';
+import { applyCoverTonalEffect } from './event-cover-effects';
 
 /**
  * Every Images call the cover pipeline makes, and the only module allowed to
@@ -102,22 +104,6 @@ export interface CoverManifestVerdict {
   /** SHA-256 of the canonical, server-owned expected slot manifest. */
   manifestSha256: string;
 }
-
-/**
- * The five fixed tonal recipes.
- *
- * Implementation constants built only from allowlisted operations. A host never
- * submits a numeric value, and `film` carries only its tonal half — the grain is
- * one versioned tileable asset layered at runtime, so it never multiplies the
- * rendered matrix and a reduced-motion or contrast change does not re-render.
- */
-const EFFECT_RECIPES: Record<EventCoverEffectId, Record<string, number>> = {
-  natural: { sharpen: 1 },
-  warm: { gamma: 1.05, saturation: 1.08, contrast: 0.96, sharpen: 1 },
-  film: { contrast: 1.12, saturation: 0.88, sharpen: 1 },
-  soft: { brightness: 1.06, contrast: 0.9, sharpen: 0.6 },
-  monochrome: { saturation: 0, contrast: 1.05, sharpen: 1 },
-};
 
 const OUTPUT_CONTENT_TYPE: Record<EventCoverFormat, 'image/webp' | 'image/jpeg'> = {
   webp: 'image/webp',
@@ -318,16 +304,19 @@ export async function renderCoverPreview(
 
   for (const [index, rung] of COVER_PREVIEW_LADDER.entries()) {
     const target = rungTarget(source, rung);
-    const result = await images
+    const transformer = images
       .input(new Response(master).body!)
       .transform({
         width: target.width,
         height: target.height,
         fit: 'scale-down',
         background: COVER_PAPER_MATTE,
-      })
-      .transform(EFFECT_RECIPES[input.effect])
-      .output({
+      });
+    const result = await applyCoverTonalEffect(
+      transformer,
+      input.effect,
+      COVER_PIPELINE_VERSIONS.tonalEffect,
+    ).output({
         format: 'image/webp',
         quality: rung.quality,
         background: COVER_PAPER_MATTE,
@@ -382,6 +371,7 @@ export async function renderCoverProfileObject(
     master: CoverPixelBounds;
     focus: CoverFocusPoint;
     effect: EventCoverEffectId;
+    tonalEffectVersion: EventCoverTonalEffectVersion;
     profile: EventCoverProfileId;
     density: EventCoverDensity;
     format: EventCoverFormat;
@@ -439,7 +429,7 @@ export async function renderCoverProfileObject(
   const ceiling = coverByteCeiling(profile, input.density, input.format);
 
   for (const [index, quality] of coverOutputQualities(input.format).entries()) {
-    const result = await images
+    const transformer = images
       .input(new Response(master).body!)
       .transform({
         trim: { left: trim.left, top: trim.top, width: trim.width, height: trim.height },
@@ -453,9 +443,12 @@ export async function renderCoverProfileObject(
         fit: 'cover',
         gravity,
         background: COVER_PAPER_MATTE,
-      })
-      .transform(EFFECT_RECIPES[input.effect])
-      .output({
+      });
+    const result = await applyCoverTonalEffect(
+      transformer,
+      input.effect,
+      input.tonalEffectVersion,
+    ).output({
         format: OUTPUT_CONTENT_TYPE[input.format],
         quality,
         background: COVER_PAPER_MATTE,

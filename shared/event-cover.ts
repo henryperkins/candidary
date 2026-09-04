@@ -58,7 +58,11 @@ export type EventCoverProfileId =
 export type EventCoverDensity = '1x' | '2x';
 export type EventCoverFormat = 'webp' | 'jpeg';
 
-export type EventCoverSurfaceTreatmentId = 'none' | 'film-grain-v1';
+export type EventCoverPresetAssetVersion = 1 | 2;
+export type EventCoverTonalEffectVersion = 1 | 2;
+export type EventCoverSurfaceTreatmentId = 'none' | 'film-grain-v1' | 'film-grain-v2';
+
+export const CURRENT_EVENT_COVER_PRESET_ASSET_VERSION: EventCoverPresetAssetVersion = 2;
 
 /* ------------------------------------------------------------------ *
  * Version axes
@@ -78,17 +82,17 @@ export const COVER_PIPELINE_VERSIONS = {
   compositionModel: 1,
   inspectionRecipe: 1,
   /** The `{recipeVersion}` segment of a draft preview object key. */
-  previewRecipe: 1,
+  previewRecipe: 2,
   normalizationLadder: 1,
-  imagesParameterRecipe: 1,
+  imagesParameterRecipe: 2,
   matte: 1,
   metadataPolicy: 1,
   cropProfileRegistry: 1,
-  tonalEffect: 1,
+  tonalEffect: 2,
   sharpening: 1,
   outputQualityLadder: 1,
   /** The `assetVersion` pinned into a published preset config. */
-  presetAsset: 1,
+  presetAsset: CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
 } as const;
 
 export type CoverPipelineVersionAxis = keyof typeof COVER_PIPELINE_VERSIONS;
@@ -117,7 +121,7 @@ export type StoredEventCoverConfigV1 =
       source: {
         kind: 'preset';
         presetId: EventCoverPresetId;
-        assetVersion: 1;
+        assetVersion: EventCoverPresetAssetVersion;
       };
       effect: EventCoverEffectId;
     }
@@ -581,7 +585,7 @@ const storedCoverConfigSchema: z.ZodType<StoredEventCoverConfigV1> = z.union([
     source: z.strictObject({
       kind: z.literal('preset'),
       presetId: presetIdSchema,
-      assetVersion: z.literal(1),
+      assetVersion: z.union([z.literal(1), z.literal(2)]),
     }),
     effect: effectSchema,
   }),
@@ -645,6 +649,46 @@ export function canonicalCoverConfig(config: StoredEventCoverConfigV1): string {
   });
 }
 
+export interface CoverRenderRecipe {
+  config: StoredEventCoverConfigV1;
+  tonalEffectVersion: EventCoverTonalEffectVersion;
+}
+
+const coverRenderRecipeV2Schema = z.strictObject({
+  version: z.literal(2),
+  config: storedCoverConfigSchema,
+  tonalEffectVersion: z.literal(2),
+});
+
+/**
+ * Writes the private render-set envelope without changing the public config.
+ * The nested config is reconstructed from its canonical spelling so key order
+ * supplied by a caller can never change the render-set digest.
+ */
+export function canonicalCoverRenderRecipe(
+  config: StoredEventCoverConfigV1,
+  tonalEffectVersion: EventCoverTonalEffectVersion,
+): string {
+  if (tonalEffectVersion !== 2) {
+    throw new Error(`Render-recipe envelopes require tonal effect version 2, received ${tonalEffectVersion}.`);
+  }
+  return JSON.stringify({
+    version: 2,
+    config: JSON.parse(canonicalCoverConfig(config)) as StoredEventCoverConfigV1,
+    tonalEffectVersion,
+  });
+}
+
+/** Legacy bare recipes are the durable meaning of tonal recipe v1. */
+export function parseCoverRenderRecipe(value: unknown): CoverRenderRecipe | null {
+  const envelope = coverRenderRecipeV2Schema.safeParse(value);
+  if (envelope.success) {
+    return { config: envelope.data.config, tonalEffectVersion: envelope.data.tonalEffectVersion };
+  }
+  const legacy = parseStoredCoverConfig(value);
+  return legacy ? { config: legacy, tonalEffectVersion: 1 } : null;
+}
+
 export function canonicalCoverRequest(request: EventCoverPublishRequestV1): string {
   const { operationId, expectedRevision } = request;
   if (!('effect' in request)) {
@@ -696,9 +740,16 @@ export function canonicalCoverDraftCreate(request: EventCoverDraftCreateRequestV
  * from the effect itself because the grain is one versioned tileable asset
  * layered at runtime rather than baked into every rendered output.
  */
-export function coverSurfaceTreatment(config: StoredEventCoverConfigV1): EventCoverSurfaceTreatmentId {
+export function coverSurfaceTreatment(
+  config: StoredEventCoverConfigV1,
+  tonalEffectVersion: EventCoverTonalEffectVersion = 1,
+): EventCoverSurfaceTreatmentId {
   if (!('effect' in config)) return 'none';
-  return config.effect === 'film' ? 'film-grain-v1' : 'none';
+  if (config.effect !== 'film') return 'none';
+  const version = config.source.kind === 'preset'
+    ? config.source.assetVersion
+    : tonalEffectVersion;
+  return `film-grain-v${version}`;
 }
 
 export function coverHasSource(config: StoredEventCoverConfigV1): boolean {
@@ -790,9 +841,10 @@ export function coverContrastRatio(first: CoverRgb, second: CoverRgb): number {
  */
 export const COVER_COPY_BAND_TOP = 0.4;
 
-/** The `film-grain-v1` tile's maximum texel alpha, before its layer opacity. */
+/** The Film grain tile's maximum texel alpha, before its layer opacity. */
 export const COVER_GRAIN_TEXEL_ALPHA = 96 / 255;
-export const COVER_GRAIN_LAYER_OPACITY = 0.18;
+export const COVER_GRAIN_LAYER_OPACITY_V1 = 0.18;
+export const COVER_GRAIN_LAYER_OPACITY = 0.10;
 
 export interface CoverContrastInput {
   /** The worst-case source pixel for this region, straight out of the output. */
