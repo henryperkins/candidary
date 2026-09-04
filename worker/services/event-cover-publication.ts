@@ -8,10 +8,12 @@ import {
 import {
   CANONICAL_NONE_COVER_CONFIG,
   COVER_PIPELINE_VERSIONS,
+  CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
   EVENT_COVER_PROFILES,
   type EventCoverPreparationView,
   type EventCoverPublishRequestV1,
   canonicalCoverConfig,
+  canonicalCoverRenderRecipe,
 } from '../../shared/event-cover';
 import { ApiError } from '../../shared/errors';
 import { chargeCoverRateEvent } from '../db/event-covers';
@@ -603,7 +605,10 @@ export async function acceptCoverPublication(
         SELECT ?, ?, ?, ?, ?, ?, 'staging', ?, ? WHERE changes() = 1
       `).bind(
         renderSetId, event.id, draft.master_id, draft.id,
-        canonicalCoverConfig(publishedConfig(request)), requestDigest,
+        canonicalCoverRenderRecipe(
+          publishedConfig(request),
+          COVER_PIPELINE_VERSIONS.tonalEffect,
+        ), requestDigest,
         // Both formats for all six 1x profiles is the floor; the Workflow's
         // preflight raises it once the master's 2x eligibility is known.
         EVENT_COVER_PROFILES.length * 2, timestamp,
@@ -681,7 +686,7 @@ function publishedConfig(request: EventCoverPublishRequestV1) {
     source: {
       kind: 'preset' as const,
       presetId: request.source.presetId,
-      assetVersion: 1 as const,
+      assetVersion: CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
     },
     effect: request.effect,
   };

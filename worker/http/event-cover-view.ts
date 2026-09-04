@@ -7,6 +7,7 @@ import {
   type EventCoverProfileId,
   type EventCoverView,
   type GuestEventCoverView,
+  parseCoverRenderRecipe,
   parseStoredCoverConfig,
 } from '../../shared/event-cover';
 import type { EventRecord } from '../db/types';
@@ -78,7 +79,7 @@ export async function selectManagerEventCoverView(
   }
 
   const active = await db.prepare(`
-    SELECT s.id
+    SELECT s.id, s.recipe_json
     FROM event_cover_render_sets s
     JOIN event_cover_masters m
       ON m.id = s.master_id AND m.event_id = s.event_id
@@ -92,8 +93,17 @@ export async function selectManagerEventCoverView(
     event.id,
     event.coverRevision,
     event.coverObjectKey,
-  ).first<{ id: string }>();
+  ).first<{ id: string; recipe_json: string }>();
   if (!active) return projectionInvariant('active-set-mismatch');
+  let renderRecipe: ReturnType<typeof parseCoverRenderRecipe>;
+  try {
+    renderRecipe = parseCoverRenderRecipe(JSON.parse(active.recipe_json) as unknown);
+  } catch {
+    return projectionInvariant('active-set-mismatch');
+  }
+  if (!renderRecipe || renderRecipe.config.source.kind !== 'upload') {
+    return projectionInvariant('active-set-mismatch');
+  }
 
   const inventory = await db.prepare(`
     SELECT profile_id
@@ -118,7 +128,7 @@ export async function selectManagerEventCoverView(
     revision: event.coverRevision,
     hasCover: true,
     available2xProfiles,
-    surfaceTreatment: coverSurfaceTreatment(config),
+    surfaceTreatment: coverSurfaceTreatment(config, renderRecipe.tonalEffectVersion),
     preparation,
   };
 }

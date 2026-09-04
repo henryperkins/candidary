@@ -39,6 +39,8 @@ import {
   EVENT_COVER_EFFECTS,
   EVENT_COVER_PRESETS,
   EVENT_COVER_PROFILES,
+  CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
+  canonicalCoverRenderRecipe,
   canonicalCoverConfig,
   canonicalCoverRequest,
   coverProfileCrop,
@@ -48,6 +50,7 @@ import {
   eventCoverDraftCreateSchema,
   eventCoverPublishSchema,
   parseStoredCoverConfig,
+  parseCoverRenderRecipe,
   qualifiedCover2xProfiles,
   resolveCoverProfile,
   safeCoverZoomMaximum,
@@ -188,22 +191,22 @@ describe('cover registries', () => {
     }
   });
 
-  it('pins every version axis at 1', () => {
+  it('pins independently released pipeline axes without changing stored config version 1', () => {
     expect(COVER_PIPELINE_VERSIONS).toEqual({
       compositionModel: 1,
       inspectionRecipe: 1,
-      previewRecipe: 1,
+      previewRecipe: 2,
       normalizationLadder: 1,
-      imagesParameterRecipe: 1,
+      imagesParameterRecipe: 2,
       matte: 1,
       metadataPolicy: 1,
       cropProfileRegistry: 1,
-      tonalEffect: 1,
+      tonalEffect: 2,
       sharpening: 1,
       outputQualityLadder: 1,
-      presetAsset: 1,
+      presetAsset: 2,
     });
-    expect(Object.values(COVER_PIPELINE_VERSIONS).every((value) => value === 1)).toBe(true);
+    expect(CURRENT_EVENT_COVER_PRESET_ASSET_VERSION).toBe(2);
   });
 
   it('pins the master, preview, and output ladders in order', () => {
@@ -420,18 +423,55 @@ describe('canonical cover serialization', () => {
     expect(canonicalCoverRequest(first)).toBe(canonicalCoverRequest(second));
   });
 
-  it('resolves the surface treatment from the published effect only', () => {
+  it('resolves versioned Film treatments from durable preset and upload intent', () => {
     expect(coverSurfaceTreatment({ version: 1, source: { kind: 'none' } })).toBe('none');
     expect(coverSurfaceTreatment({
       version: 1, source: { kind: 'upload' }, focus: { mode: 'auto' }, effect: 'film',
     })).toBe('film-grain-v1');
     expect(coverSurfaceTreatment({
+      version: 1, source: { kind: 'upload' }, focus: { mode: 'auto' }, effect: 'film',
+    }, 2)).toBe('film-grain-v2');
+    expect(coverSurfaceTreatment({
       version: 1, source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 }, effect: 'film',
     })).toBe('film-grain-v1');
+    expect(coverSurfaceTreatment({
+      version: 1, source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 2 }, effect: 'film',
+    })).toBe('film-grain-v2');
     for (const effect of ['natural', 'warm', 'soft', 'monochrome'] as const) {
       expect(coverSurfaceTreatment({
         version: 1, source: { kind: 'upload' }, focus: { mode: 'auto' }, effect,
-      })).toBe('none');
+      }, 2)).toBe('none');
+    }
+  });
+
+  it('serializes and parses the strict v2 server render-recipe envelope', () => {
+    const config: StoredEventCoverConfigV1 = {
+      version: 1,
+      source: { kind: 'upload' },
+      focus: { mode: 'manual', x: 0.75, y: 0.25, zoom: 1.5 },
+      effect: 'warm',
+    };
+    const canonical = canonicalCoverRenderRecipe(config, 2);
+    expect(canonical).toBe('{"version":2,"config":{"version":1,"source":{"kind":"upload"},"focus":{"mode":"manual","x":0.75,"y":0.25,"zoom":1.5},"effect":"warm"},"tonalEffectVersion":2}');
+    expect(parseCoverRenderRecipe(JSON.parse(canonical))).toEqual({ config, tonalEffectVersion: 2 });
+  });
+
+  it('reads legacy bare render recipes as tonal v1 and rejects enriched or unknown envelopes', () => {
+    const legacy = {
+      version: 1,
+      source: { kind: 'upload' },
+      focus: { mode: 'auto' },
+      effect: 'film',
+    };
+    expect(parseCoverRenderRecipe(legacy)).toEqual({ config: legacy, tonalEffectVersion: 1 });
+    for (const invalid of [
+      { ...legacy, tonalEffectVersion: 2 },
+      { version: 3, config: legacy, tonalEffectVersion: 2 },
+      { version: 2, config: legacy, tonalEffectVersion: 1 },
+      { version: 2, config: legacy, tonalEffectVersion: 2, extra: true },
+      { version: 2, config: { ...legacy, extra: true }, tonalEffectVersion: 2 },
+    ]) {
+      expect(parseCoverRenderRecipe(invalid)).toBeNull();
     }
   });
 });
@@ -460,10 +500,21 @@ describe('parseStoredCoverConfig', () => {
       { version: 2, source: { kind: 'none' } },
       { version: 1, source: { kind: 'none' }, effect: 'natural' },
       { version: 1, source: { kind: 'upload' }, focus: { mode: 'auto' } },
-      { version: 1, source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 2 }, effect: 'natural' },
+      { version: 1, source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 0 }, effect: 'natural' },
+      { version: 1, source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 3 }, effect: 'natural' },
       { version: 1, source: { kind: 'upload', objectKey: 'events/e/cover/x' }, focus: { mode: 'auto' }, effect: 'natural' },
     ]) {
       expect(parseStoredCoverConfig(invalid)).toBeNull();
+    }
+  });
+
+  it('accepts exactly preset asset versions 1 and 2', () => {
+    for (const assetVersion of [1, 2] as const) {
+      expect(parseStoredCoverConfig({
+        version: 1,
+        source: { kind: 'preset', presetId: 'warm-linen', assetVersion },
+        effect: 'natural',
+      })).not.toBeNull();
     }
   });
 });

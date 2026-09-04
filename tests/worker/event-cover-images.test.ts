@@ -179,6 +179,13 @@ describe('cover preview rendering', () => {
   });
 
   it('renders every effect uncropped through the four-rung ladder', async () => {
+    const recipes = {
+      natural: { sharpen: 1 },
+      warm: { saturation: 1.04, contrast: 0.99, sharpen: 1 },
+      film: { contrast: 0.95, saturation: 0.8, sharpen: 1 },
+      soft: { saturation: 0.96, contrast: 0.92, sharpen: 0.6 },
+      monochrome: { saturation: 0, contrast: 1.02, sharpen: 1 },
+    } as const;
     for (const effect of EVENT_COVER_EFFECTS) {
       const { env, calls } = withRecordingImages({
         source: { width: 2400, height: 1600 },
@@ -187,7 +194,7 @@ describe('cover preview rendering', () => {
       const preview = await renderCoverPreview(env, {
         eventId: 'e1', draftId: 'd1', masterKey: MASTER_KEY, effect,
       });
-      expect(preview.objectKey).toBe(`events/e1/cover/previews/d1/${effect}-1.webp`);
+      expect(preview.objectKey).toBe(`events/e1/cover/previews/d1/${effect}-2.webp`);
       expect(preview.rung).toBe(1);
       // Resize, then the fixed tonal recipe. No trim and no crop: the browser
       // applies focus and zoom to this one file locally.
@@ -195,7 +202,16 @@ describe('cover preview rendering', () => {
       const resize = calls[0]!.transforms[0] as { width: number; fit: string };
       expect(resize.fit).toBe('scale-down');
       expect(resize.width).toBe(COVER_PREVIEW_LADDER[0]!.longEdge);
-      expect(calls[0]!.transforms[1]).not.toHaveProperty('width');
+      expect(calls[0]!.transforms[1]).toEqual(recipes[effect]);
+      if (effect === 'warm') {
+        expect(calls[0]!.draws).toHaveLength(1);
+        expect(calls[0]!.draws[0]!.image).toBeInstanceOf(ReadableStream);
+        expect(calls[0]!.draws[0]!.options).toEqual({
+          opacity: 0.05, repeat: true, composite: 'over',
+        });
+      } else {
+        expect(calls[0]!.draws).toEqual([]);
+      }
       expect(calls[0]!.output).toMatchObject({ format: 'image/webp', quality: 82, anim: false });
     }
   });
@@ -228,6 +244,7 @@ describe('cover profile rendering', () => {
     master,
     focus: { x: 0.5, y: 0.5, zoom: 1 },
     effect: 'natural' as const,
+    tonalEffectVersion: 2 as const,
     profile: 'wide-expanded' as const,
     density: '1x' as const,
     format: 'webp' as const,
@@ -251,6 +268,16 @@ describe('cover profile rendering', () => {
     expect(crop!.gravity.y).toBeCloseTo(0.5, 5);
     expect(effect).toEqual({ sharpen: 1 });
     expect(rendered).toMatchObject({ width: 620, height: 420, rung: 1, adopted: false });
+  });
+
+  it('keeps the v1 Warm recipe for legacy render sets without drawing a wash', async () => {
+    const { env, calls } = withRecordingImages({ encode: fixedSize(50_000) });
+    await renderCoverProfileObject(env, slot({ effect: 'warm', tonalEffectVersion: 1 }));
+
+    expect(calls[0]!.transforms.at(-1)).toEqual({
+      gamma: 1.05, saturation: 1.08, contrast: 0.96, sharpen: 1,
+    });
+    expect(calls[0]!.draws).toEqual([]);
   });
 
   it('renders every profile, density, and format inside its own byte ceiling', async () => {
@@ -348,7 +375,7 @@ describe('manifest verification', () => {
     const rendered = await renderCoverProfileObject(env, {
       eventId: 'e1', renderSetId: 's1', masterKey: MASTER_KEY,
       master: { width: 2480, height: 1680 }, focus: { x: 0.5, y: 0.5, zoom: 1 },
-      effect: 'natural', profile: profileId as never, density, format,
+      effect: 'natural', tonalEffectVersion: 2, profile: profileId as never, density, format,
     });
     await testEnv.DB.prepare(`
       INSERT INTO event_cover_render_objects (id, render_set_id, event_id, profile_id, density,

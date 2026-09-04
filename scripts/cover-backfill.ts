@@ -89,12 +89,12 @@ export const WRANGLER_CONFIG_PATH = 'wrangler.jsonc';
  */
 export const COVER_BACKFILL_DEPENDENCY_VERSIONS = {
   normalizationLadder: 1,
-  imagesParameterRecipe: 1,
+  imagesParameterRecipe: 2,
   matte: 1,
   metadataPolicy: 1,
   compositionModel: 1,
   cropProfileRegistry: 1,
-  tonalEffect: 1,
+  tonalEffect: 2,
   sharpening: 1,
   outputQualityLadder: 1,
 } as const;

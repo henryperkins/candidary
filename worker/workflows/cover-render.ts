@@ -7,7 +7,7 @@ import {
   type EventCoverFormat,
   type EventCoverProfileId,
   canonicalCoverConfig,
-  parseStoredCoverConfig,
+  parseCoverRenderRecipe,
   qualifiedCover2xProfiles,
   resolvedCoverFocusPoint,
 } from '../../shared/event-cover';
@@ -259,8 +259,8 @@ export async function coverRenderPreflight(
     return currentPreflightOutcome(env, payload);
   }
 
-  const config = parseStoredCoverConfig(JSON.parse(set.recipe_json) as unknown);
-  if (!config || !('effect' in config) || !('focus' in config)) {
+  const recipe = parseCoverRenderRecipe(JSON.parse(set.recipe_json) as unknown);
+  if (!recipe || !('effect' in recipe.config) || !('focus' in recipe.config)) {
     await recordSafeFailure(
       env, payload, 'COVER_RENDER_UNAVAILABLE', false, now,
       receipt.dispatch_generation, set.id, draft.id,
@@ -268,7 +268,7 @@ export async function coverRenderPreflight(
     return currentPreflightOutcome(env, payload);
   }
 
-  const slots = deriveCoverSlots(master, config.focus);
+  const slots = deriveCoverSlots(master, recipe.config.focus);
   const timestamp = now.toISOString();
   // Freeze the derived manifest and move to rendering in one guarded write, so
   // a replay of this step cannot re-derive a different slot count.
@@ -420,10 +420,11 @@ export async function coverRenderProfileStep(
     };
   }
 
-  const config = parseStoredCoverConfig(JSON.parse(set.recipe_json) as unknown);
-  if (!config || !('focus' in config)) {
+  const recipe = parseCoverRenderRecipe(JSON.parse(set.recipe_json) as unknown);
+  if (!recipe || !('focus' in recipe.config)) {
     throw new ApiError('COVER_RENDER_UNAVAILABLE', 'This cover could not be prepared.', 503);
   }
+  const { config } = recipe;
   const point = resolvedCoverFocusPoint(
     config.focus,
     master.auto_focus_x !== null && master.auto_focus_y !== null
@@ -443,6 +444,7 @@ export async function coverRenderProfileStep(
       master: { width: master.width, height: master.height },
       focus: point,
       effect: config.effect as EventCoverEffectId,
+      tonalEffectVersion: recipe.tonalEffectVersion,
       profile: slot.profile,
       density: slot.density,
       format: slot.format,
@@ -647,14 +649,15 @@ export async function coverRenderFinalize(
     };
   }
 
-  const config = parseStoredCoverConfig(JSON.parse(set.recipe_json) as unknown);
-  if (!config || !('focus' in config)) {
+  const recipe = parseCoverRenderRecipe(JSON.parse(set.recipe_json) as unknown);
+  if (!recipe || !('focus' in recipe.config)) {
     await recordSafeFailure(
       env, payload, 'COVER_OUTPUT_BUDGET_EXHAUSTED', false, now,
       receipt.dispatch_generation, set.id, draft.id,
     );
     return currentRenderOutcome(env, payload);
   }
+  const { config } = recipe;
   if (receipt.status === 'rendering'
     || (receipt.status === 'finalizing' && set.state === 'staging')) {
     const verdict = await verifyCoverManifest(env, set.id, deriveCoverSlots(master, config.focus));

@@ -215,13 +215,18 @@ describe('event theme primitives', () => {
       event={previewEvent}
       theme={coastalTheme}
       sourceFor={sourceFor}
-      preview={{ kind: 'draft', url: 'blob:draft', focus: { x: 0.2, y: 0.7, zoom: 1.25 } }}
+      preview={{
+        kind: 'draft', url: 'blob:draft', focus: { x: 0.2, y: 0.7, zoom: 1.25 }, effect: 'film',
+      }}
       onCoverUnavailable={unavailable}
       onRefreshCoverEvent={refresh}
     />);
     const draftImage = view.container.querySelector<HTMLImageElement>('.responsive-cover__image')!;
     expect(draftImage).toHaveAttribute('src', 'blob:draft');
     expect(draftImage).toHaveStyle({ objectPosition: '20% 70%', transform: 'scale(1.25)' });
+    expect(draftImage.closest('.responsive-cover')).toHaveClass('responsive-cover--film-grain-v2');
+    expect(view.container.querySelectorAll('.event-appearance-canvas__local-cover .responsive-cover__treatment'))
+      .toHaveLength(1);
     fireEvent.error(draftImage);
     expect(sourceFor).not.toHaveBeenCalled();
     expect(unavailable).not.toHaveBeenCalled();
@@ -232,13 +237,24 @@ describe('event theme primitives', () => {
       event={previewEvent}
       theme={coastalTheme}
       sourceFor={sourceFor}
-      preview={{ kind: 'preset', presetId: 'coastal-haze', effect: 'film', assetVersion: 1 }}
+      preview={{ kind: 'preset', presetId: 'coastal-haze', effect: 'film', assetVersion: 2 }}
       onCoverUnavailable={unavailable}
       onRefreshCoverEvent={refresh}
     />);
     await waitFor(() => expect(view.container.querySelector<HTMLImageElement>('.responsive-cover__image')?.getAttribute('src'))
-      .toContain(presetCoverAssetPath(1, 'coastal-haze', 'film', 'framed-default', '1x', 'jpeg')));
+      .toContain(presetCoverAssetPath(2, 'coastal-haze', 'film', 'framed-default', '1x', 'jpeg')));
     expect(sourceFor).not.toHaveBeenCalled();
+
+    view.rerender(<EventAppearanceCanvas
+      event={previewEvent}
+      theme={coastalTheme}
+      sourceFor={sourceFor}
+      preview={{
+        kind: 'draft', url: 'blob:natural', focus: { x: 0.5, y: 0.5, zoom: 1 }, effect: 'natural',
+      }}
+    />);
+    expect(view.container.querySelector('.event-appearance-canvas__local-cover'))
+      .not.toHaveClass('responsive-cover--film-grain-v2');
   });
 
   it('emits one sanitized observation per audience tuple', () => {

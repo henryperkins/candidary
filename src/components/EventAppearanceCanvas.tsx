@@ -4,6 +4,7 @@ import {
   allCover2xProfiles,
   coverSurfaceTreatment,
   type EventCoverEffectId,
+  type EventCoverPresetAssetVersion,
   type EventCoverPresetId,
 } from '../../shared/event-cover';
 import { presetCoverAssetPath } from '../../shared/event-cover-assets';
@@ -22,9 +23,9 @@ export type EventAppearanceCanvasPreview =
       kind: 'preset';
       presetId: EventCoverPresetId;
       effect: EventCoverEffectId;
-      assetVersion: 1;
+      assetVersion: EventCoverPresetAssetVersion;
     }
-  | { kind: 'draft'; url: string; focus: CoverFocusValue };
+  | { kind: 'draft'; url: string; focus: CoverFocusValue; effect: EventCoverEffectId };
 
 export interface EventAppearanceCanvasProps {
   event: Pick<EventView, 'id' | 'name' | 'eventDate' | 'welcomeMessage' | 'cover'>;
@@ -55,7 +56,12 @@ export function EventAppearanceCanvas({
   onRefreshCoverEvent,
 }: EventAppearanceCanvasProps) {
   const coverLayer = preview.kind === 'draft'
-    ? <div className="responsive-cover responsive-cover--image event-appearance-canvas__local-cover">
+    ? <div className={[
+        'responsive-cover',
+        'responsive-cover--image',
+        'event-appearance-canvas__local-cover',
+        preview.effect === 'film' ? 'responsive-cover--film-grain-v2' : '',
+      ].filter(Boolean).join(' ')}>
         <img
           alt=""
           className="responsive-cover__image"

@@ -1576,7 +1576,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 @media (min-width: 561px) { .cover-style-picker ul { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 .cover-style-picker label { min-height: 44px; display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
 .cover-style-picker label:has(input:checked) { border-color: var(--denim); box-shadow: 0 0 0 2px var(--denim); }
-.cover-style-picker img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 5px; background: #eee4d8; }
+.cover-style-picker__thumbnail { position: relative; overflow: hidden; display: block; width: 100%; aspect-ratio: 1; border-radius: 5px; background: #eee4d8; }
+.cover-style-picker img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .cover-style-picker__placeholder { width: 100%; aspect-ratio: 1; display: block; border-radius: 5px; background: #eee4d8; }
 .cover-style-picker__name { font-weight: 600; font-size: .85rem; }
 .cover-style-picker__note { color: var(--muted); font-size: .75rem; }
@@ -1593,10 +1594,12 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .responsive-cover picture { position: absolute; inset: 0; }
 .responsive-cover__image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .responsive-cover__treatment, .responsive-cover__scrim { position: absolute; inset: 0; pointer-events: none; }
-/* The one versioned tileable grain asset, layered at runtime rather than baked
+/* One immutable tile per grain version, layered at runtime rather than baked
    into any of the 720 rendered outputs — which is why `film` costs the same
    bytes as every other effect and why changing theme never re-renders. */
-.responsive-cover--film-grain .responsive-cover__treatment { background-image: var(--cover-film-grain, url('/assets/event-covers/v1/film-grain-v1.png')); background-repeat: repeat; opacity: .18; }
+.responsive-cover--film-grain-v1 .responsive-cover__treatment, .responsive-cover--film-grain-v2 .responsive-cover__treatment { background-repeat: repeat; }
+.responsive-cover--film-grain-v1 .responsive-cover__treatment { background-image: url('/assets/event-covers/v1/film-grain-v1.png'); opacity: .18; }
+.responsive-cover--film-grain-v2 .responsive-cover__treatment { background-image: url('/assets/event-covers/v2/film-grain-v2.png'); opacity: .10; }
 .responsive-cover__scrim { background: linear-gradient(180deg, var(--event-cover-overlay-top), var(--event-cover-overlay-bottom)); }
 /* Theme-only heroes keep the stronger gradient overlay proved for white copy;
    photographic covers use the separate image overlay immediately above. */

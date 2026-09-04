@@ -1,4 +1,3 @@
-import { applyD1Migrations, reset } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -40,7 +39,12 @@ import {
   type CoverWorkflowAccessor,
   type CoverWorkflowLookup,
 } from '../../worker/workflows/cover-platform';
-import { eventAccess, migrationsUpTo, resetDatabase, testEnv } from './helpers';
+import {
+  eventAccess,
+  resetDatabase,
+  resetDatabaseToPhase2CoverSchema,
+  testEnv,
+} from './helpers';
 
 const now = new Date('2026-08-04T12:00:00.000Z');
 const HEX_64 = 'a'.repeat(64);
@@ -577,9 +581,13 @@ describe('publication acceptance', () => {
     // `publishing` is what makes the draft non-discardable until terminal.
     expect(await draftState(draft.id)).toBe('publishing');
     const set = await testEnv.DB.prepare(
-      'SELECT state, required_slots FROM event_cover_render_sets WHERE id = ?',
+      'SELECT state, required_slots, recipe_json FROM event_cover_render_sets WHERE id = ?',
     ).bind(first.receipt.render_set_id).first();
-    expect(set).toEqual({ state: 'staging', required_slots: 12 });
+    expect(set).toEqual({
+      state: 'staging',
+      required_slots: 12,
+      recipe_json: '{"version":2,"config":{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"},"tonalEffectVersion":2}',
+    });
     // The fence exists before any platform call.
     const fence = await testEnv.DB.prepare(
       'SELECT state FROM event_cover_workflow_fences WHERE workflow_instance_id = ?',
@@ -2633,8 +2641,7 @@ describe('synchronous removal publication', () => {
   beforeEach(async () => {
     // Preserve the deployed phase-2 legacy writer contract on the exact schema
     // where legacy pointers can still exist. 0014 itself proves they are gone.
-    await reset();
-    await applyD1Migrations(testEnv.DB, migrationsUpTo('0014'));
+    await resetDatabaseToPhase2CoverSchema();
     access = await eventAccess();
     await testEnv.DB.prepare('UPDATE events SET cover_object_key = ? WHERE id = ?')
       .bind(legacyKey(access.event.id), access.event.id).run();
@@ -2884,7 +2891,7 @@ describe('strict synchronous semantic publications', () => {
         applied_revision: 1,
         result_cover_json: JSON.stringify({
           version: 1,
-          source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+          source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 2 },
           effect: 'film',
         }),
         draft_id: null,
@@ -2895,7 +2902,7 @@ describe('strict synchronous semantic publications', () => {
       event: {
         coverConfig: JSON.stringify({
           version: 1,
-          source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+          source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 2 },
           effect: 'film',
         }),
         coverObjectKey: null,
@@ -2906,7 +2913,7 @@ describe('strict synchronous semantic publications', () => {
     expect(await reload(access.event.id)).toMatchObject({
       coverConfig: JSON.stringify({
         version: 1,
-        source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 1 },
+        source: { kind: 'preset', presetId: 'warm-linen', assetVersion: 2 },
         effect: 'film',
       }),
       coverObjectKey: null,

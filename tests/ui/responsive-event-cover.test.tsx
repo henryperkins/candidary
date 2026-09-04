@@ -222,18 +222,17 @@ describe('responsive event cover', () => {
     expect(frame().className).toContain('responsive-cover--gradient');
   });
 
-  it('marks the film surface treatment without changing the image', () => {
-    render(<ResponsiveEventCover
+  it.each([1, 2] as const)('marks the film-grain-v%s surface without changing the image', (version) => {
+    const view = render(<ResponsiveEventCover
       cover={{
         revision: 1,
         hasCover: true,
         available2xProfiles: [],
-        surfaceTreatment: 'film-grain-v1',
+        surfaceTreatment: `film-grain-v${version}`,
       }}
       sourceFor={sourceFor}
     />);
-    expect(frame().className).toContain('responsive-cover--film-grain');
-    // The grain is a runtime layer over the image, never baked into the bytes.
-    expect(document.querySelector('.responsive-cover__treatment')).not.toBeNull();
+    expect(frame()).toHaveClass(`responsive-cover--film-grain-v${version}`);
+    expect(view.container.querySelectorAll('.responsive-cover__treatment')).toHaveLength(1);
   });
 });

@@ -9,16 +9,19 @@ import {
   EVENT_COVER_EFFECTS,
   EVENT_COVER_PRESET_IDS,
   EVENT_COVER_PROFILES,
+  CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
   coverByteCeiling,
 } from '../../shared/event-cover';
 import { presetCoverAssetPath } from '../../shared/event-cover-assets';
 import {
   COVER_EFFECT_IDS,
+  COVER_EFFECT_CANVAS_FILTERS,
   COVER_OUTPUT_QUALITIES,
   COVER_PRESET_IDS,
   COVER_PRESET_MASTER,
   COVER_PRESET_PROFILES,
   PRESET_ASSET_VERSION,
+  COVER_WARM_WASH,
   centerCropRegion,
   coverPresetSlots,
   presetGrainTilePath,
@@ -77,6 +80,7 @@ describe('the preset generator and the shared cover registry agree', () => {
       .toBe('/assets/event-covers/v1/warm-linen/natural/short-lookup-1x.webp');
     expect(presetGrainTilePath(1)).toBe('/assets/event-covers/v1/film-grain-v1.png');
     expect(presetManifestPath(1)).toBe('/assets/event-covers/v1/manifest.json');
+    expect(presetGrainTilePath(2)).toBe('/assets/event-covers/v2/film-grain-v2.png');
   });
 });
 
@@ -122,14 +126,30 @@ describe('the authored masters can produce every slot without upscaling', () => 
 });
 
 describe('the checked-in preset matrix', () => {
+  it('pins the calibrated v2 browser recipes and Warm wash', () => {
+    expect(COVER_EFFECT_CANVAS_FILTERS).toEqual({
+      natural: 'none',
+      warm: 'saturate(1.04) contrast(0.99)',
+      film: 'contrast(0.95) saturate(0.8)',
+      soft: 'saturate(0.96) contrast(0.92)',
+      monochrome: 'grayscale(1) contrast(1.02)',
+    });
+    expect(COVER_WARM_WASH).toEqual({ color: '#e7b78d', opacity: 0.05, composite: 'source-over' });
+  });
+
   it('publishes a manifest describing all 720 files and the grain tile', () => {
     const current = manifest();
     expect(current.kind).toBe('candidary-cover-preset-manifest');
-    expect(current.assetVersion).toBe(1);
+    expect(PRESET_ASSET_VERSION).toBe(2);
+    expect(CURRENT_EVENT_COVER_PRESET_ASSET_VERSION).toBe(2);
+    expect(current.assetVersion).toBe(2);
     expect(current.composition).toBe('center');
     expect(current.master).toEqual({ width: 2400, height: 1600 });
     expect(current.files).toHaveLength(720);
-    expect(current.surfaceTreatment.id).toBe('film-grain-v1');
+    expect(current.versions.tonalEffect).toBe(2);
+    expect(current.surfaceTreatment.id).toBe('film-grain-v2');
+    expect(existsSync(fromRoot('public/assets/event-covers/v1/manifest.json'))).toBe(true);
+    expect(existsSync(fromRoot('public/assets/event-covers/v1/film-grain-v1.png'))).toBe(true);
     // The contrast evidence's input: one measured region per preset, effect, and
     // profile. `tests/unit/cover-contrast.test.ts` composites them.
     expect(current.regions).toHaveLength(180);

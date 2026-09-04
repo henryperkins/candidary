@@ -67,7 +67,7 @@ const eventColumnNames = [
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// post-cutover verifier refuses a candidate whose ledger is not exactly twenty-one.
+// post-cutover verifier refuses a candidate whose ledger is not exactly twenty-two.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
@@ -77,6 +77,7 @@ const migrationFileNames = [
   '0015_curated_private_guestbook.sql', '0016_host_private_gallery.sql',
   '0017_event_album.sql', '0018_album_end_to_end.sql', '0019_media_recovery.sql',
   '0020_export_progress.sql', '0021_manager_upload_and_album_era.sql',
+  '0022_event_cover_preset_asset_v2.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -189,6 +190,7 @@ const guestbookColumns: Record<string, string[]> = {
     'publication_status', 'idempotency_key', 'reservation_expires_at', 'created_at', 'published_at',
     'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
     'captured_at', 'timeline_at', 'favorited_at', 'trashed_at', 'restore_until',
+    'album_pick_version',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
@@ -794,8 +796,10 @@ describe('fresh local D1 verification', () => {
     const indexes = statements[29]!;
     expect(indexes).toContain("'event_access_tokens_one_live_manager'");
     expect(indexes).toContain("'event_sessions_manager_upload_actor'");
+    expect(indexes.match(/SELECT i\.name AS name,/gu)).toHaveLength(2);
     expect(indexes).toContain('i.partial AS partial');
     expect(indexes).toContain('x.sql AS sql');
+    expect(indexes).toMatch(/ORDER BY name$/u);
   });
 
   it('keeps the legacy cover-index envelope at exactly four fields', async () => {
@@ -898,7 +902,7 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly twenty-one migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly twenty-two migrations', async () => {
     const candidate = await fixture();
     const twenty = candidate.ledgerNames.slice(0, -1);
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;

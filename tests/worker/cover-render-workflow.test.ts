@@ -86,7 +86,11 @@ function renderEnv(): AppEnv {
   }) }).env;
 }
 
-async function publication(access: Access, master: { width: number; height: number }) {
+async function publication(
+  access: Access,
+  master: { width: number; height: number },
+  effect: 'natural' | 'warm' = 'natural',
+) {
   await insertCoverMaster(testEnv.DB, {
     id: 'master-a',
     eventId: access.event.id,
@@ -110,7 +114,7 @@ async function publication(access: Access, master: { width: number; height: numb
     request: {
       operationId: OPERATION, expectedRevision: event.coverRevision,
       source: { kind: 'upload', draftId: draft.id },
-      focus: { mode: 'auto' }, effect: 'natural',
+      focus: { mode: 'auto' }, effect,
     },
     requestDigest: HEX_64,
     now,
@@ -709,6 +713,52 @@ describe('cover render profile steps', () => {
     expect(objects).toEqual({ count: 4 });
   });
 
+  it('renders a new envelope with tonal recipe v2', async () => {
+    await resetDatabase();
+    access = await eventAccess();
+    await publication(access, { width: 2480, height: 1680 }, 'warm');
+    expect((await coverRenderPreflight(
+      renderEnv(), { eventId: access.event.id, operationId: OPERATION }, now,
+    )).shouldRender).toBe(true);
+    const recording = withRecordingImages({ encode: () => ({
+      bytes: new Uint8Array(20_000).fill(2), width: 0, height: 0, contentType: 'image/webp',
+    }) });
+
+    await coverRenderProfileStep(recording.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, 'wide-expanded', now);
+
+    expect(recording.calls[0]!.transforms.at(-1)).toEqual({
+      saturation: 1.04, contrast: 0.99, sharpen: 1,
+    });
+    expect(recording.calls[0]!.draws[0]!.options).toEqual({
+      opacity: 0.05, repeat: true, composite: 'over',
+    });
+  });
+
+  it('renders a legacy bare recipe with tonal recipe v1', async () => {
+    const set = await row<{ id: string }>(
+      'SELECT id FROM event_cover_render_sets WHERE event_id = ?', access.event.id,
+    );
+    await testEnv.DB.prepare('UPDATE event_cover_render_sets SET recipe_json = ? WHERE id = ?')
+      .bind(
+        '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"warm"}',
+        set.id,
+      ).run();
+    const recording = withRecordingImages({ encode: () => ({
+      bytes: new Uint8Array(20_000).fill(2), width: 0, height: 0, contentType: 'image/webp',
+    }) });
+
+    await coverRenderProfileStep(recording.env, {
+      eventId: access.event.id, operationId: OPERATION,
+    }, 'wide-expanded', now);
+
+    expect(recording.calls[0]!.transforms.at(-1)).toEqual({
+      gamma: 1.05, saturation: 1.08, contrast: 0.96, sharpen: 1,
+    });
+    expect(recording.calls[0]!.draws).toEqual([]);
+  });
+
   it('reports durable progress from inventory, never from elapsed time', async () => {
     const env = renderEnv();
     const seen: number[] = [];
@@ -756,6 +806,9 @@ describe('cover render finalize', () => {
     expect(event.coverObjectKey).toBe(coverMasterKey(access.event.id, 'master-a'));
     expect(event.coverRenderSetId).toBe(
       (await row<{ id: string }>('SELECT id FROM event_cover_render_sets WHERE event_id = ?', access.event.id)).id,
+    );
+    expect(event.coverConfig).toBe(
+      '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"natural"}',
     );
     expect(await row('SELECT state FROM event_cover_render_sets WHERE event_id = ?', access.event.id))
       .toEqual({ state: 'active' });

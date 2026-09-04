@@ -367,7 +367,7 @@ describe('revisioned cover slot delivery', () => {
     ]) {
       expect(response.status).toBe(307);
       expect(response.headers.get('location'))
-        .toBe('/assets/event-covers/v1/warm-linen/film/short-lookup-2x.webp');
+        .toBe('/assets/event-covers/v2/warm-linen/film/short-lookup-2x.webp');
       expect(response.headers.get('cache-control')).toBe('private, no-store');
       expect(response.headers.get('x-content-type-options')).toBe('nosniff');
       expect(response.headers.get('location')).not.toContain(access.event.id);

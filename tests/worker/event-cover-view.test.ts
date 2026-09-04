@@ -51,7 +51,10 @@ async function insertRenderObject(input: {
   ).run();
 }
 
-async function publishUploadedCover(eventId: string) {
+async function publishUploadedCover(
+  eventId: string,
+  recipeJson = '{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"film"}',
+) {
   const masterId = 'master-current';
   const renderSetId = 'set-current';
   const masterKey = coverMasterKey(eventId, masterId);
@@ -65,8 +68,8 @@ async function publishUploadedCover(eventId: string) {
     INSERT INTO event_cover_render_sets (
       id, event_id, master_id, recipe_json, recipe_sha256, state,
       required_slots, created_at
-    ) VALUES (?, ?, ?, '{}', ?, 'staging', 14, ?)
-  `).bind(renderSetId, eventId, masterId, HEX_64, NOW).run();
+    ) VALUES (?, ?, ?, ?, ?, 'staging', 14, ?)
+  `).bind(renderSetId, eventId, masterId, recipeJson, HEX_64, NOW).run();
 
   for (const profile of EVENT_COVER_PROFILES) {
     for (const format of ['webp', 'jpeg'] as const) {
@@ -161,41 +164,46 @@ describe('nested event cover projection', () => {
     expect(JSON.stringify(guest)).not.toContain('objectKey');
   });
 
-  it('projects every preset 2x profile in ASCII-lexical order and derives its treatment', async () => {
+  it('projects every preset 2x profile in ASCII-lexical order and derives its pinned treatment', async () => {
     const access = await eventAccess();
-    await testEnv.DB.prepare(`
-      UPDATE events
-      SET cover_config = ?, cover_revision = 1
-      WHERE id = ?
-    `).bind(JSON.stringify({
-      version: 1,
-      source: { kind: 'preset', presetId: 'candlelit-grain', assetVersion: 1 },
-      effect: 'film',
-    }), access.event.id).run();
-
-    expect(await selectManagerEventCoverView(
-      testEnv.DB,
-      await reload(access.event.id),
-      null,
-    )).toEqual({
-      config: {
+    for (const assetVersion of [1, 2] as const) {
+      const config = {
         version: 1,
-        source: { kind: 'preset', presetId: 'candlelit-grain', assetVersion: 1 },
-        effect: 'film',
-      },
-      revision: 1,
-      hasCover: true,
-      available2xProfiles: [
-        'compact-default',
-        'compact-expanded',
-        'framed-default',
-        'short-lookup',
-        'standard-default',
-        'wide-expanded',
-      ],
-      surfaceTreatment: 'film-grain-v1',
-      preparation: null,
-    });
+        source: { kind: 'preset' as const, presetId: 'candlelit-grain' as const, assetVersion },
+        effect: 'film' as const,
+      } as const;
+      await testEnv.DB.prepare(`
+        UPDATE events SET cover_config = ?, cover_revision = ? WHERE id = ?
+      `).bind(JSON.stringify(config), assetVersion, access.event.id).run();
+      expect(await selectManagerEventCoverView(
+        testEnv.DB, await reload(access.event.id), null,
+      )).toEqual({
+        config,
+        revision: assetVersion,
+        hasCover: true,
+        available2xProfiles: [
+          'compact-default',
+          'compact-expanded',
+          'framed-default',
+          'short-lookup',
+          'standard-default',
+          'wide-expanded',
+        ],
+        surfaceTreatment: `film-grain-v${assetVersion}`,
+        preparation: null,
+      });
+    }
+  });
+
+  it('derives upload Film treatment from the active set recipe version', async () => {
+    const access = await eventAccess();
+    await publishUploadedCover(access.event.id,
+      '{"version":2,"config":{"version":1,"source":{"kind":"upload"},"focus":{"mode":"auto"},"effect":"film"},"tonalEffectVersion":2}');
+
+    const manager = await selectManagerEventCoverView(
+      testEnv.DB, await reload(access.event.id), null,
+    );
+    expect(manager.surfaceTreatment).toBe('film-grain-v2');
   });
 
   it('advertises only paired 2x formats from the current active set', async () => {

@@ -8,10 +8,11 @@ import type {
   HexColor,
   ResolvedEventTheme,
 } from '../../shared/contracts';
-import type {
-  EventCoverEffectId,
-  EventCoverPresetId,
-  EventCoverProfileId,
+import {
+  CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
+  type EventCoverEffectId,
+  type EventCoverPresetId,
+  type EventCoverProfileId,
 } from '../../shared/event-cover';
 import {
   DEFAULT_EVENT_THEME_CONFIG,
@@ -86,7 +87,7 @@ function presetStyleThumbnail(
   return {
     status: 'ready',
     url: presetCoverAssetPath(
-      1,
+      CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
       presetId,
       effect,
       'standard-default',
@@ -475,9 +476,13 @@ export function EventAppearanceEditor({
           kind: 'draft',
           url: coverSession.canvasPreview.url,
           focus: coverSession.selection.focus,
+          effect: coverSession.selection.effect,
         }
       : coverSession.canvasPreview.kind === 'preset'
-        ? { ...coverSession.canvasPreview, assetVersion: 1 }
+        ? {
+            ...coverSession.canvasPreview,
+            assetVersion: CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
+          }
         : coverSession.selection.source?.kind === 'none'
           ? { kind: 'none' }
           : { kind: 'authoritative' }
@@ -669,7 +674,7 @@ export function EventAppearanceEditor({
       error={coverError}
       canRemove={event.cover.hasCover}
       presetThumbnail={(presetId) => presetCoverAssetPath(
-        1,
+        CURRENT_EVENT_COVER_PRESET_ASSET_VERSION,
         presetId,
         'natural',
         'standard-default',

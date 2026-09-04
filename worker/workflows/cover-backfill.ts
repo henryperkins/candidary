@@ -1516,6 +1516,7 @@ export async function coverBackfillProfileStep(
       master: { width: master.width, height: master.height },
       focus: { x: 0.5, y: 0.5, zoom: 1 },
       effect: BACKFILL_COVER_CONFIG.effect,
+      tonalEffectVersion: COVER_PIPELINE_VERSIONS.tonalEffect,
       profile: slot.profile,
       density: slot.density,
       format: slot.format,
