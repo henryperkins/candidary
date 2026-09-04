@@ -100,6 +100,9 @@ function Harness({
   initialEffect = 'natural' as EventCoverEffectId,
   initialSource = null as CoverSourceChoice | { kind: 'none' } | null,
   composeState,
+  uploadReadyForCompose = Boolean(draft)
+    || initialSource?.kind === 'upload'
+    || (composeState !== undefined && composeState.status !== 'idle'),
   focusMode = 'manual' as 'auto' | 'manual',
   styleThumbnail = readyThumbnail,
   onStyleStepVisible = vi.fn(),
@@ -121,6 +124,7 @@ function Harness({
   initialEffect?: EventCoverEffectId;
   initialSource?: CoverSourceChoice | { kind: 'none' } | null;
   composeState?: CoverDraftSessionState;
+  uploadReadyForCompose?: boolean;
   focusMode?: 'auto' | 'manual';
   styleThumbnail?: (effect: EventCoverEffectId) => CoverStyleThumbnail;
   onStyleStepVisible?: () => void;
@@ -159,6 +163,7 @@ function Harness({
     focus={focus}
     focusMode={mode}
     effect={effect}
+    uploadReadyForCompose={uploadReadyForCompose}
     composeState={composeState ?? (draft
       ? { status: 'ready', error: null }
       : { status: 'idle', error: null })}
@@ -307,6 +312,20 @@ describe('cover studio', () => {
     expect(document.activeElement).toBe(composing);
   });
 
+  it('keeps a bare upload choice on Choose until a photo is ready', async () => {
+    const user = userEvent.setup();
+    const onEnterCompose = vi.fn();
+    render(<Harness onEnterCompose={onEnterCompose} />);
+
+    await user.click(screen.getByRole('radio', { name: 'Upload a photo' }));
+    const continueButton = screen.getByRole('button', { name: 'Continue' });
+    expect(continueButton).toBeDisabled();
+
+    await user.click(continueButton);
+    expect(screen.getByRole('heading', { name: 'Choose a cover' })).toBeVisible();
+    expect(onEnterCompose).not.toHaveBeenCalled();
+  });
+
   it('requests an existing-upload draft once and reuses it across Back', async () => {
     const user = userEvent.setup();
     const onEnterCompose = vi.fn();
@@ -386,8 +405,11 @@ describe('cover studio', () => {
 
   it('keeps Done disabled until an uploaded draft is ready', async () => {
     const user = userEvent.setup();
-    const { rerender } = render(<Harness draft={null} />);
-    await user.click(screen.getByRole('radio', { name: /Upload a photo/u }));
+    const { rerender } = render(<Harness
+      initialSource={{ kind: 'upload' }}
+      draft={null}
+      composeState={{ status: 'loading', error: null }}
+    />);
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     // Step state alone cannot skip a missing draft into Style.
     expect(screen.getByRole('heading', { name: 'Position the photo' })).toBeVisible();

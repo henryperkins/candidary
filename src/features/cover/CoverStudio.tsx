@@ -65,6 +65,8 @@ export interface CoverStudioProps {
   focus: CoverFocusValue | null;
   focusMode: 'auto' | 'manual';
   effect: EventCoverEffectId;
+  /** A selected upload or the event's current upload can open Compose. */
+  uploadReadyForCompose?: boolean;
   accessFailure: CoverAccessFailure | null;
   error?: string | null;
   canRemove: boolean;
@@ -130,6 +132,7 @@ export function CoverStudio({
   focus,
   focusMode,
   effect,
+  uploadReadyForCompose = true,
   accessFailure,
   error = null,
   canRemove,
@@ -435,6 +438,7 @@ export function CoverStudio({
     const next = steps[stepIndex + 1];
     if (!next) return;
     if (next === 'compose' && !composeRequestedRef.current) {
+      if (!uploadReadyForCompose) return;
       composeRequestedRef.current = true;
       onEnterCompose();
     }
@@ -762,7 +766,10 @@ export function CoverStudio({
               ref={continueRef}
               type="button"
               className="button button--primary"
-              disabled={editingDisabled || !source || (step === 'compose' && !composeReady)}
+              disabled={editingDisabled
+                || !source
+                || (source.kind === 'upload' && !uploadReadyForCompose)
+                || (step === 'compose' && !composeReady)}
               onClick={advance}
             >
               Continue

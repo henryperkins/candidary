@@ -153,6 +153,67 @@ function installMeasuredCover(width = 620) {
   vi.stubGlobal('ResizeObserver', TestResizeObserver);
 }
 
+class ImmediateCoverUploadXMLHttpRequest extends EventTarget {
+  static instances: ImmediateCoverUploadXMLHttpRequest[] = [];
+  static onSend: ((request: ImmediateCoverUploadXMLHttpRequest) => void) | null = null;
+
+  status = 0;
+  responseText = '';
+  withCredentials = false;
+  readonly upload = new EventTarget();
+  method = '';
+  url = '';
+  body: Document | XMLHttpRequestBodyInit | null = null;
+  readonly headers = new Map<string, string>();
+
+  constructor() {
+    super();
+    ImmediateCoverUploadXMLHttpRequest.instances.push(this);
+  }
+
+  open(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  getResponseHeader() {
+    return null;
+  }
+
+  send(body: Document | XMLHttpRequestBodyInit | null) {
+    this.body = body;
+    if (body instanceof File) {
+      this.upload.dispatchEvent(new ProgressEvent('progress', {
+        lengthComputable: true,
+        loaded: body.size,
+        total: body.size,
+      }));
+    }
+    ImmediateCoverUploadXMLHttpRequest.onSend?.(this);
+  }
+
+  respond(data: unknown, status = 200) {
+    this.status = status;
+    this.responseText = JSON.stringify(data);
+    this.dispatchEvent(new Event('load'));
+  }
+}
+
+function installImmediateCoverUploadXhr(
+  onSend: (request: ImmediateCoverUploadXMLHttpRequest) => void,
+) {
+  ImmediateCoverUploadXMLHttpRequest.instances = [];
+  ImmediateCoverUploadXMLHttpRequest.onSend = onSend;
+  vi.stubGlobal(
+    'XMLHttpRequest',
+    ImmediateCoverUploadXMLHttpRequest as unknown as typeof XMLHttpRequest,
+  );
+}
+
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
@@ -633,6 +694,13 @@ describe('event appearance editor', () => {
       safeFailureCode: null,
       updatedAt: '2026-08-04T00:00:00Z',
     };
+    installImmediateCoverUploadXhr((request) => {
+      calls.push(request.method + ' ' + request.url);
+      request.respond({
+        data: { draft: draft('transferred', 2) },
+        requestId: 'request-a',
+      });
+    });
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
@@ -643,9 +711,6 @@ describe('event appearance editor', () => {
           ingress: { method: 'PUT', path: '/api/manage/events/event-a/cover/drafts/draft-a/raw' },
           replayed: false,
         });
-      }
-      if (path === '/api/manage/events/event-a/cover/drafts/draft-a/raw' && method === 'PUT') {
-        return json({ draft: draft('transferred', 2) });
       }
       if (path === '/api/manage/events/event-a/cover/drafts/draft-a/inspect' && method === 'POST') {
         return json({ draft: draft('inspected', 3, {
@@ -734,6 +799,14 @@ describe('event appearance editor', () => {
     // Reserve, transfer, inspect, compose, publish — once each.
     expect(calls.filter((call) => call.endsWith('/cover/drafts'))).toHaveLength(1);
     expect(calls).toContain('PUT /api/manage/events/event-a/cover/drafts/draft-a/raw');
+    expect(ImmediateCoverUploadXMLHttpRequest.instances).toHaveLength(1);
+    const rawUpload = ImmediateCoverUploadXMLHttpRequest.instances[0]!;
+    expect(rawUpload.body).toBe(file);
+    expect(rawUpload.withCredentials).toBe(true);
+    expect(rawUpload.headers).toEqual(new Map([
+      ['content-type', 'image/heic'],
+      ['if-match', '"0"'],
+    ]));
     expect(calls).toContain('PATCH /api/manage/events/event-a/cover/drafts/draft-a/composition');
     expect(themeMutationCalls(fetchMock)).toHaveLength(0);
 

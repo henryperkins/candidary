@@ -661,6 +661,10 @@ export function EventAppearanceEditor({
       focus={coverSession.selection.focus}
       focusMode={coverSession.selection.focusMode}
       effect={coverSession.selection.effect}
+      uploadReadyForCompose={
+        coverSession.draftState.status !== 'idle'
+        || event.cover.config.source.kind === 'upload'
+      }
       accessFailure={coverSession.accessFailure}
       error={coverError}
       canRemove={event.cover.hasCover}
