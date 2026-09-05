@@ -897,6 +897,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   font-weight: 600;
 }
 .gallery-header { margin: 16px 0; padding: 12px; display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); }
+/* Library's one action is portalled into the docked host at every width, so before a job exists the
+   export section is empty and hidden — and the panel around it was an empty bordered box, 26px of
+   paper and rule between the audience row and the search field from 761. The seam below the audience
+   row is the row's own. */
+.gallery-header:has(> .gallery-export:empty:only-child) { display: none; }
 .gallery-total { margin: 0; color: var(--muted); font-size: .88rem; }
 .gallery-shared__lede { max-width: 72ch; margin: 0 0 16px; color: var(--muted); font-size: .84rem; line-height: 1.55; }
 .gallery-shared__preview-fallback { width: 100%; aspect-ratio: 1.25; display: grid; place-content: center; justify-items: center; gap: 6px; background: #eee4d8; color: var(--muted); text-align: center; }
@@ -971,6 +976,29 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-toolbar { margin: 0 0 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .gallery-toolbar > * { margin-top: 0; margin-bottom: 0; }
 .gallery-toolbar .button, .gallery-toolbar .text-button { min-height: 44px; white-space: nowrap; }
+/* One row, one height. Three controls measured three heights — `.button` 46 from its own text,
+   `.gallery-order` 52 from 3px of shell around a 44px target, the icon-only select toggle 44 — and
+   centred, nothing in the row shared a top or a bottom edge. 48 is the one number both geometries
+   reach with no target under 44: the shell keeps 44px buttons inside 1px of padding, and the worded
+   buttons stop growing with their text. Stated rather than summed, because the shell's hairline
+   border resolves to .67px and 1px of padding around 44 lands the group a pixel off its neighbours. */
+.gallery-toolbar .button { height: 48px; }
+.gallery-toolbar .gallery-order { height: 48px; padding: 1px; align-items: stretch; }
+.gallery-toolbar .gallery-order button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; line-height: 1; white-space: nowrap; }
+/* Heads the row below 761 and folds the search field; from 761 the field is always in flow and the
+   control is not drawn. Scoped through the toolbar so it outranks the `.button` rules. */
+.gallery-toolbar .gallery-search__reveal { min-height: 44px; padding: 0 13px; white-space: nowrap; font-size: .8rem; }
+/* Appears only while a selection runs, under the row rather than in it: `Select all n loaded photos`
+   is a sentence with no short form, and in the row it wrapped the phone's four controls to two lines
+   every time a host started selecting. */
+.gallery-selection-controls { margin: -8px 0 16px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+/* Two seams the frame owns, because they only exist once the three modes share one row of audience
+   facts: below that row the gap was whatever each mode's first child happened to bring — 16px in
+   Library, 4px in Album, 0 in Guest gallery — so the row carries it (see `.gallery-audience`) and
+   Library's search starts flush; and Guest gallery's verb row, which used to sit under an always-on
+   bulk bar that carried this gap, sets its own. */
+.gallery-private > .gallery-search { margin-top: 0; }
+.gallery-shared > .gallery-toolbar { margin-top: 14px; }
 .gallery-timeline { display: grid; gap: 34px; }
 .gallery-moment__heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
 .gallery-moment__heading h3 { margin: 0; font-size: 1.25rem; letter-spacing: -.02em; overflow-wrap: anywhere; }
@@ -1224,6 +1252,13 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
     border: 1px solid var(--chestnut);
   }
   .gallery-search__submit-label { display: inline; }
+  /* The field is always in flow at this width, so the control that reveals it is not. */
+  .gallery-toolbar .gallery-search__reveal { display: none; }
+  /* The brackets are punctuation for a sentence that only exists while the word is visible — beside
+     a bare tick on a phone, `(9)` is a parenthesis with nothing to interrupt. Drawn rather than
+     written, so the number stays one span; the accessible name is `Album picks (9)` at every width. */
+  .gallery-toolbar__count::before { content: "("; }
+  .gallery-toolbar__count::after { content: ")"; }
 
   .manager-shell--intake {
     display: grid;
@@ -1831,6 +1866,34 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .gallery-toolbar { margin: 3px 0 14px; gap: 7px; }
   .gallery-toolbar > * { flex: 0 1 auto; }
   .gallery-order { margin-bottom: 0; }
+  /* The field folds behind the reveal at the head of the row. The row itself does not fold —
+     `Album picks` is a filter, not part of the query, and folding it away would take the Album's
+     own count off the phone with it. */
+  .gallery-private[data-search="collapsed"] .gallery-search { display: none; }
+  /* One row: narrow by picks, order, then select. Worded, these controls measure 442px against a
+     331px content box at 390, and a `nowrap` row would answer that with horizontal page overflow,
+     which this shell does not allow — so the row stays `wrap` as the escape valve, and what this
+     block does is make the words unnecessary: 195px of 331px, every target still 44px. The word
+     lives in `.gallery-toolbar__word`, one neutral name worn by the order pair, the picks filter
+     and the selection verb alike, and stays in every accessible name — the same trade the pick
+     pill already makes. */
+  .gallery-toolbar__word { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .gallery-toolbar .gallery-order button { min-width: 44px; padding-inline: 0; justify-content: center; }
+  .gallery-toolbar .gallery-search__favorites,
+  .gallery-toolbar .gallery-select-toggle { min-width: 44px; padding-inline: 0; justify-content: center; }
+  /* Icon and count inside a 44px square: the `.button` gap of 9 was set for a word. */
+  .gallery-toolbar .gallery-search__favorites { gap: 6px; }
+  /* Filters at the left, the verb that starts work at the thumb's own edge — the row reads as two
+     jobs rather than four loose squares, and the slack sits between them instead of trailing off.
+     Library only: Guest gallery's toolbar holds this control beside the tabs, and alone at the
+     right margin it would read as stranded rather than placed. */
+  .gallery-private > .gallery-toolbar .gallery-select-toggle { margin-left: auto; }
+  .gallery-selection-controls { margin: -6px 0 12px; }
+  /* Product wrote these for 361 and up; 320 kept the 20px heading, which wrapped its count onto a
+     second line, and the 14px gap above the mosaic. */
+  .gallery-moment__heading { gap: 4px 8px; }
+  .gallery-moment__heading h3 { font-size: 1rem; line-height: 1.2; }
+  .gallery-mosaic { margin-top: 0; }
   .gallery-moment__heading h3,
   .gallery-mosaic__open,
   .gallery-mosaic__favorite,
@@ -1841,23 +1904,18 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   }
 }
 
-@media (min-width: 361px) and (max-width: 760px) {
-  /* The rail replaced the block that used to pair the order pair with the selection controls
-     here, so `.gallery-private` stays a plain column and the row does its own packing. */
-  .gallery-order button { padding-inline: 10px; }
-  .gallery-select-toggle { gap: 4px; white-space: nowrap; }
-  .gallery-moment__heading { gap: 4px 8px; }
-  .gallery-moment__heading h3 { font-size: 1rem; line-height: 1.2; }
-  .gallery-mosaic { margin-top: 0; }
+/* 320 only: at 390 the toolbar still lands the reveal's word on its 44px row. */
+@media (max-width: 359px) {
+  .gallery-toolbar .gallery-search__reveal { width: 44px; min-width: 44px; padding: 0; gap: 0; justify-content: center; }
+  .gallery-search__reveal-label { display: none; }
 }
 
 @media (max-width: 360px) {
-  /* The destinations are one scrolling row at every phone width now, so the two-rows-of-three
-     packing — and the 169px of pinned header it cost — is gone. What remains narrow here is the
-     mode switch, which still stacks: three cramped columns would repeat the collision the nav row
-     just fixed. */
+  /* The destinations are one scrolling row at every phone width, and the mode switch stays one row
+     too (below), so the obstruction the scroll margins reserve is the 52px row at every phone
+     width. Stacked, the switch was 138px of pinned chrome — 194 with the nav — on a 568px screen. */
   .manager-shell {
-    --gallery-control-obstruction: 150px;
+    --gallery-control-obstruction: 52px;
   }
   .manager-panel > h2,
   #intake-title { scroll-margin-top: calc(var(--manager-sticky-offset) + 12px); }
@@ -1870,9 +1928,16 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
       var(--manager-sticky-offset) + var(--gallery-control-obstruction) + 12px
     );
   }
-  .gallery-mode-switch--three { grid-template-columns: 1fr; }
-  /* Row B takes three rows at 320 and two from 390. Packing it tighter was tried and measured at a
-     2px gain, so it is left alone: the named controls are simply wider than a 280px row. */
+  /* Three segments stay one row. Stacked, the first photograph landed at 560px at 320 — under the
+     docked action, with no photograph on the first screen in any mode. `minmax(0, 1fr)` columns
+     cannot collide, which was the reason given for stacking; the worst a long label can do is take
+     a second line, and at .72rem none does. */
+  .gallery-mode-switch--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .gallery-mode-switch--three button { padding-inline: 2px; font-size: .72rem; letter-spacing: -.01em; }
+  /* The three facts take three rows at this width — kept, because the deletion date is the one a
+     host cannot look up elsewhere — so the rows give up their slack instead. */
+  .lifecycle { margin: 10px 0 14px; padding: 8px 0; }
+  .gallery-audience { margin-bottom: 14px; }
 }
 
 @media (max-width: 760px) {
@@ -1974,7 +2039,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    people with the Album link, and event guests — and a host must be able to read either without
    opening the mode it belongs to. The paper ground is not decoration: muted ink measures 4.24 on the
    rail tint and 4.87 on paper, and the label is 12px text that has to clear 4.5. */
-.gallery-audience { margin: 10px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.gallery-audience { margin: 10px 0 20px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .gallery-audience__fact { flex: 0 0 auto; display: flex; align-items: baseline; gap: 7px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--paper); }
 .gallery-audience dt { margin: 0; color: var(--muted); font-size: .75rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
 .gallery-audience dd { margin: 0; color: var(--ink); font-size: .8rem; font-weight: 600; white-space: nowrap; }
@@ -2048,8 +2113,69 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 @media (min-width: 761px) {
   .gallery-mode-switch__count { font-size: .8rem; }
-  .gallery-audience { margin: 14px 0 0; gap: 8px; }
+  .gallery-audience { margin: 14px 0 20px; gap: 8px; }
   /* The fields are always on screen at this width, so the control that reveals them is not — a
      button permanently reporting `aria-expanded="true"` advertises state it does not own. */
   .album-metadata__summary { display: none; }
 }
+
+/* ═══ The phone pass ══════════════════════════════════════════════════════════════════════════
+   Everything here re-shapes a shipped element below 761. Each rule names the measurement it
+   answers, taken against the shipped layout in the design system's `scraps/gallery-phone-audit.html`
+   on 4 Sep 2026 and re-measured on this build; the numbers are in `design/fidelity-ledger.md`.
+   ═════════════════════════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 760px) {
+  /* The tray. `flex: 1 1 160px` gave two verbs 328px against a 327px row, so the primary stood
+     alone and `Remove from Album (n)` shared its row with Clear at 182px — two lines inside a
+     button. Both verbs take the row; Clear becomes the tray's corner X, the one glyph this system
+     lets go unlabelled, with its word kept for assistive tech in `.selection-tray__clear-label`.
+     The count row holds the X's height so the note never runs under it. 226px against 231, and
+     nothing wraps. */
+  .selection-tray__inner { position: relative; }
+  .selection-tray__actions .button { flex: 1 1 100%; }
+  .selection-tray__count strong { display: flex; align-items: center; min-height: 36px; padding-right: 44px; }
+  .selection-tray__clear { position: absolute; top: -4px; right: -6px; width: 44px; height: 44px; padding: 0; justify-content: center; gap: 0; }
+  .selection-tray__clear svg { width: 18px; height: 18px; }
+  .selection-tray__clear-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* 44 is this system's floor; the pick pill shipped at 38, six under it on every Library screen. */
+  .gallery-mosaic__favorite { min-height: 44px; }
+  /* Album entries as rows — thumbnail, name, the four controls — instead of one 369px card per
+     photograph in a single column. A nine-photo Album was 3,400px of scrolling; as rows it is
+     about a third of that, and four entries fit the first screen where one did. */
+  .album-review-grid { gap: 8px; }
+  .album-review-grid__photo { grid-template-columns: 96px minmax(0, 1fr); grid-template-areas: "preview meta" "preview controls"; align-items: start; gap: 4px 12px; }
+  .album-review-grid__preview { grid-area: preview; aspect-ratio: 1; }
+  .album-review-grid__meta { grid-area: meta; padding-top: 2px; }
+  .album-review-grid__photo > .album-entry__controls { grid-area: controls; align-self: end; flex-wrap: nowrap; }
+  /* A retained slot also carries its note and the route to Recently deleted; both take a full row
+     under the thumbnail rather than its 96px column. */
+  .album-review-grid__photo > .album-entry__retained-note,
+  .album-review-grid__photo > .album-entry__retained-open { grid-column: 1 / -1; }
+  /* Album details, unfolded: the cover beside its own caption, the fields under both. Shipped, the
+     132px cover stood alone on a row with 170px of paper beside it and its caption wrapped to three
+     lines beneath — 529px for a title and a description; 427 now, the caption on two lines at a
+     readable measure. The cover's retained-slot note and its `Use the first photo instead` route
+     take a full row each. */
+  .album-metadata__body { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 12px 14px; padding: 4px 0 12px; }
+  .album-cover { display: contents; }
+  .album-cover > .album-cover__retained,
+  .album-cover > .text-button,
+  .album-metadata__fields { grid-column: 1 / -1; min-width: 0; }
+  /* Folded, the details are one 50px row; 16px of paper above and below it was 83px of box for a
+     disclosure. The order heading and the section rows give back the same kind of slack — together
+     about 60px between the mode switch and the first entry. */
+  .album-metadata { padding: 4px 12px; }
+  .album-order-heading { margin: 16px 0 10px; }
+  .album-review-grid__section { margin: 4px 0; }
+}
+/* The four controls are 188px; the preview gives way before they do. Bounds are viewport widths,
+   which in a desktop preview include a 15px scrollbar the phone does not have — the narrower case. */
+@media (max-width: 389px) {
+  .album-review-grid__photo { grid-template-columns: 80px minmax(0, 1fr); }
+}
+@media (max-width: 357px) {
+  .album-review-grid__photo { grid-template-areas: "preview meta" "controls controls"; }
+}
+/* Every width: the consequence sentence shipped as an unstyled <small> — ink at the browser's size,
+   where every other helper on the surface is muted at .78rem. */
+#album-reset-consequence { display: block; margin: -4px 0 14px; color: var(--muted); font-size: .78rem; line-height: 1.5; }

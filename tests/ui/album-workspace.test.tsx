@@ -1435,11 +1435,30 @@ describe('gallery modes', () => {
       .not.toBeInTheDocument();
   });
 
-  it('stacks the three-mode switch at the narrowest layout', () => {
+  it('keeps the three-mode switch on one row at the narrowest layout', () => {
     const styles = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
-    // Still the last declaration the narrowest block makes, now that the two-rows-of-three
-    // destination packing it used to sit beside is gone and only its reasoning remains.
-    expect(styles).toMatch(/@media \(max-width: 360px\) \{(?:(?!@media)[\s\S])*?\.gallery-mode-switch--three \{ grid-template-columns: 1fr; \}(?:\s|\/\*(?:(?!\*\/)[\s\S])*?\*\/)*\}/u);
+    const narrowest = styles.match(/@media \(max-width: 360px\) \{(?:(?!@media)[\s\S])*?\.gallery-mode-switch--three[\s\S]*?\n\}/u)?.[0] ?? '';
+    // Stacked, the switch was 138px of pinned chrome on a 568px screen and the first photograph
+    // landed under the docked action at 320. Three `minmax(0, 1fr)` columns cannot collide, and
+    // the obstruction the scroll margins reserve follows the row back down.
+    expect(narrowest).toMatch(/\.gallery-mode-switch--three \{ grid-template-columns: repeat\(3, minmax\(0, 1fr\)\); \}/u);
+    expect(narrowest).not.toMatch(/grid-template-columns: 1fr;/u);
+    expect(narrowest).toMatch(/--gallery-control-obstruction: 52px;/u);
+  });
+
+  it('re-shapes the tray, the pick pill, the Album rows and the reset consequence for a phone', () => {
+    const styles = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
+    const phone = styles.match(/\/\* ═══ The phone pass[\s\S]*?@media \(max-width: 760px\) \{[\s\S]*?\n\}/u)?.[0] ?? '';
+    // Each rule answers a measurement taken against the shipped layout; see the phone pass block.
+    expect(phone).toMatch(/\.selection-tray__actions \.button \{ flex: 1 1 100%; \}/u);
+    expect(phone).toMatch(/\.selection-tray__clear \{ position: absolute;[^}]*width: 44px; height: 44px;/u);
+    expect(phone).toMatch(/\.selection-tray__clear-label \{ position: absolute; width: 1px; height: 1px;/u);
+    expect(phone).toMatch(/\.gallery-mosaic__favorite \{ min-height: 44px; \}/u);
+    expect(phone).toMatch(/\.album-review-grid__photo \{ grid-template-columns: 96px minmax\(0, 1fr\); grid-template-areas: "preview meta" "preview controls";/u);
+    expect(phone).toMatch(/\.album-metadata__body \{ display: grid; grid-template-columns: 96px minmax\(0, 1fr\);/u);
+    // The one rule in the pass that is not bounded to a phone: the consequence sentence was an
+    // unstyled <small>, ink at the browser's size, where every other helper is muted at .78rem.
+    expect(styles).toMatch(/#album-reset-consequence \{ display: block;[^}]*color: var\(--muted\); font-size: \.78rem;/u);
   });
 
   it('clears Guest-gallery selection only after controlled Library adoption', async () => {
@@ -1519,6 +1538,33 @@ describe('gallery modes', () => {
     expect(screen.getByRole('button', { name: `Publish (${count})` })).toBeEnabled();
     expect(screen.getByRole('button', { name: `Hide (${count})` })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Clear selection' })).toBeEnabled();
+  });
+
+  it('keeps the Guest gallery Select all out of the toolbar and spells the toggle the way Library does', () => {
+    render(<ManagerSharedGallery
+      guestGalleryVisible={event.galleryVisible}
+      media={[photo('p1', '2026-08-15T22:42:00.000Z'), photo('p2', '2026-08-15T22:43:00.000Z')]}
+      status="unpublished"
+      selected={[]}
+      selectionAtLimit={false}
+      onStatusChange={vi.fn()}
+      onSelectedChange={vi.fn()}
+      onBulk={noop}
+      onChangePublication={noop}
+      onOpenSettings={vi.fn()}
+      settingsBlocked={false}
+      loadingMore={false}
+      hasMore={false}
+      onLoadMore={noop}
+    />);
+
+    const toggle = screen.getByRole('button', { name: 'Select photos' });
+    // One word span for one control in both modes, so the phone rule reaches it here too.
+    expect(toggle.querySelector('.gallery-toolbar__word')).toHaveTextContent('Select photos');
+    fireEvent.click(toggle);
+    const selectAll = screen.getByRole('button', { name: 'Select all 2 loaded photos' });
+    expect(selectAll.closest('.gallery-selection-controls')).not.toBeNull();
+    expect(selectAll.closest('.gallery-toolbar')).toBeNull();
   });
 
   it('clears a Guest-gallery filter selection through the canonical transition and announces it once', async () => {

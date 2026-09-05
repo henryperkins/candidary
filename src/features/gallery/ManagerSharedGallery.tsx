@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Image as ImageIcon, ImageOff, ListChecks } from 'lucide-react';
+import { Eye, EyeOff, Image as ImageIcon, ImageOff, SquareDashedMousePointer } from 'lucide-react';
 import { forwardRef, useImperativeHandle, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -220,13 +220,20 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
           >{PUBLICATION_FILTER_LABELS[value]}</button>
         ))}
       </div>
+      {/* Spelled the way Library spells it — one word span — so the phone rule that turns the row
+          icon-only reaches this control in both modes. The word stays in the accessible name. */}
       <button
         type="button"
         className="button button--secondary gallery-select-toggle"
         aria-pressed={selecting}
+        aria-label={selecting ? 'Done selecting' : 'Select photos'}
         onClick={toggleSelecting}
-      ><ListChecks aria-hidden="true" /> {selecting ? 'Done selecting' : 'Select photos'}</button>
-      {selecting && media.length > 0 && <button
+      ><SquareDashedMousePointer aria-hidden="true" /><span className="gallery-toolbar__word">{selecting ? 'Done selecting' : 'Select photos'}</span></button>
+    </div>
+    {/* Under the row, not in it: a sentence with no short form wrapped the phone row to two lines
+        every time a host started selecting. */}
+    {selecting && media.length > 0 && <div className="gallery-selection-controls">
+      <button
         type="button"
         className="text-button"
         onClick={() => commitSelection({
@@ -234,8 +241,8 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
           ids: media.map(({ id }) => id),
           label: 'these results',
         })}
-      >Select all {media.length} loaded photo{media.length === 1 ? '' : 's'}</button>}
-    </div>
+      >Select all {media.length} loaded photo{media.length === 1 ? '' : 's'}</button>
+    </div>}
     {!guestGalleryVisible && (actionDock
       ? createPortal(settingsAction, actionDock)
       : <div className="manager-notice">{settingsAction}</div>)}

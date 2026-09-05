@@ -2077,6 +2077,95 @@ describe('host private gallery', () => {
     expect(screen.getByRole('button', { name: 'Select all 48 loaded photos' })).toBeVisible();
   });
 
+  // Two captionless photographs, one of them In Album, so the toolbar's count reads `(1)`.
+  const toolbarRows = [
+    photo('p1', '2026-08-15T22:42:00.000Z'),
+    photo('p2', '2026-08-15T23:18:00.000Z', { isFavorite: true }),
+  ];
+
+  it('keeps Select all out of the toolbar row, in its own selection controls', async () => {
+    renderGallery({ galleryRows: toolbarRows });
+    const user = userEvent.setup();
+    await screen.findByText('p1.jpg');
+
+    await user.click(screen.getByRole('button', { name: 'Select photos' }));
+    const selectAll = screen.getByRole('button', { name: 'Select all 2 loaded photos' });
+    // A sentence with no short form: in the row it wrapped the four phone controls to two lines
+    // every time a host started selecting, so it sits in the container below the row instead.
+    expect(selectAll.closest('.gallery-selection-controls')).not.toBeNull();
+    expect(selectAll.closest('.gallery-toolbar')).toBeNull();
+  });
+
+  it('keeps every toolbar word in the accessible name while the visible word can stand down', async () => {
+    renderGallery({ galleryRows: toolbarRows });
+    await screen.findByText('p1.jpg');
+
+    const toolbar = document.querySelector('.gallery-toolbar');
+    if (!(toolbar instanceof HTMLElement)) throw new Error('The Library toolbar must render.');
+    // Below 761 the row goes icon-only: the words live in `.gallery-toolbar__word`, one neutral
+    // class worn by the order pair, the picks filter and the selection verb alike, so restyling
+    // one control cannot silently restyle the other two. The accessible names never change.
+    const newest = within(toolbar).getByRole('button', { name: 'Newest first' });
+    const earliest = within(toolbar).getByRole('button', { name: 'Earliest first' });
+    const picks = within(toolbar).getByRole('button', { name: 'Album picks (1)' });
+    const select = within(toolbar).getByRole('button', { name: 'Select photos' });
+    for (const [control, word] of [[newest, 'Newest'], [earliest, 'Earliest'], [picks, 'Album picks'], [select, 'Select photos']] as const) {
+      expect(control.querySelector('.gallery-toolbar__word')).toHaveTextContent(word);
+      expect(control.querySelector('svg')).not.toBeNull();
+    }
+    // The count is its own span so the brackets can be drawn only beside a visible word.
+    expect(picks.querySelector('.gallery-toolbar__count')).toHaveTextContent('1');
+    // Narrow by picks, order, then act: the row reads as two jobs, in the order a host works.
+    expect(Array.from(toolbar.querySelectorAll('button'), (button) => button.getAttribute('aria-label') ?? button.textContent))
+      .toEqual(['Search photos', 'Album picks (1)', 'Newest first', 'Earliest first', 'Select photos']);
+  });
+
+  it('folds the search field behind its own control until a host opens it', async () => {
+    renderGallery({ galleryRows: toolbarRows });
+    const user = userEvent.setup();
+    await screen.findByText('p1.jpg');
+
+    const library = document.querySelector('.gallery-private');
+    if (!(library instanceof HTMLElement)) throw new Error('Library must render.');
+    const toolbar = document.querySelector('.gallery-toolbar');
+    if (!(toolbar instanceof HTMLElement)) throw new Error('The Library toolbar must render.');
+    // The reveal heads the phone toolbar; the stylesheet hides it from 761, where the field is
+    // always in flow, so its `aria-expanded` is read only where the fold exists.
+    // Named `Search photos`, not `Search`: the form's own submit already answers to that, and two
+    // controls with one name in one row is the ambiguity the word span exists to avoid.
+    const reveal = within(toolbar).getByRole('button', { name: 'Search photos' });
+    expect(reveal).toHaveClass('gallery-search__reveal');
+    expect(toolbar.firstElementChild).toBe(reveal);
+    expect(reveal).toHaveAttribute('aria-expanded', 'false');
+    expect(reveal).toHaveAttribute('aria-controls', 'gallery-search-input');
+    expect(library).toHaveAttribute('data-search', 'collapsed');
+
+    await user.click(reveal);
+    expect(reveal).toHaveAttribute('aria-expanded', 'true');
+    expect(library).toHaveAttribute('data-search', 'open');
+    // A tap before typing is the whole cost of the fold, so the field takes focus at once.
+    expect(screen.getByLabelText('Find photos')).toHaveFocus();
+
+    await user.click(reveal);
+    expect(reveal).toHaveAttribute('aria-expanded', 'false');
+    expect(library).toHaveAttribute('data-search', 'collapsed');
+  });
+
+  it('keeps the tray Clear control named while its word becomes a corner glyph', async () => {
+    renderGallery({ galleryRows: toolbarRows });
+    const user = userEvent.setup();
+    await screen.findByText('p1.jpg');
+
+    await user.click(screen.getByRole('button', { name: 'Select photos' }));
+    await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
+    const tray = screen.getByRole('region', { name: 'Album' });
+    const clear = within(tray).getByRole('button', { name: 'Clear selection' });
+    // Below 761 Clear is a 44px X at the tray's corner, the one glyph this system permits
+    // unlabelled; the word stays for assistive tech in a span the stylesheet can hide.
+    expect(clear.querySelector('.selection-tray__clear-label')).toHaveTextContent('Clear selection');
+    expect(clear.querySelector('svg')).not.toBeNull();
+  });
+
   it('withdraws the shared settings escape while a guest-list commit holds the destinations', async () => {
     const onOpenSettings = vi.fn();
     vi.stubGlobal('fetch', managerFetch({ guestGalleryVisible: false }));

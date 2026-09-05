@@ -599,6 +599,12 @@ verified independently instead of inventing or editing source behavior.
 | P3 | At 390 px, production keeps the tray's Add and Remove actions beside one another before wrapping Clear selection; the source places Add on its own row. | Retained: all three controls remain readable, contained, and at least 44 px high, with the two reversible album actions grouped together. |
 | P3 | Production adds the current pick count to the Album mode label. | Retained as useful state reinforcement; the accessible name and selected state remain clear. |
 
+Two of those dispositions were superseded on 2026-09-05, when the design system's Gallery workspace
+template (`templates/gallery-workspace`, with the 4 September phone pass in its helmet style) was
+implemented: the three-mode switch now stays one row at every phone width, and below 761 px the
+tray's two verbs each take the row with `Clear selection` as a 44 px corner glyph whose word stays in
+the accessible name. `design/fidelity-ledger.md` carries the measurements.
+
 No open P0 or P1 visual defect remains. The P2 differences are deliberate product-contract choices,
 not unresolved broken layout. Photo crops, paper/denim/moss palette, typography, borders, radii,
 selection tray, album editor, sharing state, and public album remain visually coherent at the pinned

@@ -22,8 +22,14 @@ const SPAN_FRACTION = 0.8;
  * What is reserved is the distance from the docked element's top to the bottom of the viewport,
  * not the element's own height: an inset card also owns the gap it floats above, and content
  * stopping level with its top edge is content the host can still read.
+ *
+ * The top is read from `offsetTop`, not the client rect. The tray arrives on a 180ms translate
+ * from below, and a rect read during that frame put its top at the viewport's bottom edge — a
+ * 12px reservation for a 226px tray, left to the shell's own resize to feed later frames back
+ * one at a time. Offsets ignore transforms, and for a fixed element they are read from the
+ * viewport. The width test keeps the rect, since a translate does not change it.
  */
-function dockedExtent(root: HTMLElement): number {
+export function measureDockedExtent(root: HTMLElement): number {
   const viewportWidth = document.documentElement.clientWidth;
   const viewportHeight = document.documentElement.clientHeight;
   let extent = 0;
@@ -32,7 +38,7 @@ function dockedExtent(root: HTMLElement): number {
     const rect = candidate.getBoundingClientRect();
     if (rect.height === 0) continue;
     if (rect.width < viewportWidth * SPAN_FRACTION) continue;
-    extent = Math.max(extent, viewportHeight - rect.top);
+    extent = Math.max(extent, viewportHeight - candidate.offsetTop);
   }
   return Math.max(0, extent);
 }
@@ -56,7 +62,7 @@ export function useGalleryDock(rootRef: RefObject<HTMLElement | null>): void {
     const root = rootRef.current;
     if (root === null) return;
     const shell = root.closest<HTMLElement>('.manager-shell') ?? root;
-    const value = `${Math.round(dockedExtent(root))}px`;
+    const value = `${Math.round(measureDockedExtent(root))}px`;
     if (written.current === value) return;
     written.current = value;
     shell.style.setProperty('--gallery-dock', value);

@@ -96,12 +96,15 @@ export function SelectionTray({
           disabled={busy || mutationLocked}
           onClick={(event) => secondary.onClick(activationInput(event))}
         >{secondary.icon} {secondary.label}</button>
+        {/* Below 761 Clear is the tray's corner X — the one glyph this system lets go unlabelled —
+            and the word is kept for assistive tech in a span the stylesheet hides there. From 761
+            the word is drawn beside the glyph. */}
         <button
           type="button"
           className="selection-tray__clear"
           disabled={busy}
           onClick={onClear}
-        ><X aria-hidden="true" /> Clear selection</button>
+        ><X aria-hidden="true" /> <span className="selection-tray__clear-label">Clear selection</span></button>
       </div>
     </div>
   </div>;

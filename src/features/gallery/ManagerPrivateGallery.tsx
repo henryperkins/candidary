@@ -1,4 +1,4 @@
-import { Check, ListChecks, Minus, Plus, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, Minus, Plus, Search, SquareDashedMousePointer, X } from 'lucide-react';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 import { flushSync } from 'react-dom';
 
@@ -181,6 +181,11 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
 }, ref) {
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
+  // Below 761 the field folds behind its own control at the head of the toolbar; from 761 the
+  // stylesheet keeps it in flow whatever this says. One state, read by `data-search` on the root.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const focusSearchOnOpen = useRef(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [order, setOrder] = useState<GalleryTimelineOrder>(DEFAULT_GALLERY_TIMELINE_ORDER);
   const [rowState, dispatchRows] = useReducer(galleryRowsReducer, {
@@ -603,6 +608,18 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     if (trimmed === query) setRetryEpoch((current) => current + 1);
   }
 
+  /** A tap before typing is the whole cost of the fold, so the field takes focus as it opens. */
+  function toggleSearch() {
+    focusSearchOnOpen.current = !searchOpen;
+    setSearchOpen(!searchOpen);
+  }
+
+  useLayoutEffect(() => {
+    if (!searchOpen || !focusSearchOnOpen.current) return;
+    focusSearchOnOpen.current = false;
+    searchInputRef.current?.focus();
+  }, [searchOpen]);
+
   function clearSearch() {
     setQueryInput('');
     if (!query) {
@@ -904,12 +921,13 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     ? null
     : rows.findIndex((photo) => photo.id === viewerPhotoId);
 
-  return <div ref={rootRef} className="gallery-private">
+  return <div ref={rootRef} className="gallery-private" data-search={searchOpen ? 'open' : 'collapsed'}>
     <form className="gallery-search" role="search" onSubmit={submitSearch}>
       <label htmlFor="gallery-search-input">Find photos</label>
       <div className="gallery-search__field">
         <input
           id="gallery-search-input"
+          ref={searchInputRef}
           value={queryInput}
           placeholder="Contributor, caption, or filename"
           enterKeyHint="search"
@@ -925,14 +943,39 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
         </button>
       </div>
     </form>
-    {/* Row B. One rail, in the order a host works: narrow the set, then act on what is shown.
-        `Clear` leads because it belongs to the field directly above it. */}
+    {/* Row B. One rail, in the order a host works: narrow the set by picks, order it, then act on
+        what is shown. Below 761 every control here is icon-sized — worded, the row measured 442px
+        against a 331px content box at 390 — so each carries its word in `.gallery-toolbar__word`,
+        which the stylesheet takes off screen there while the accessible name keeps it. `Clear`
+        follows the reveal because both belong to the field. */}
     <div className="gallery-toolbar">
+      {/* Named `Search photos`, not `Search`: the form's own submit already answers to that. From
+          761 the field is always in flow and the stylesheet does not draw this control, so its
+          `aria-expanded` is read only where the fold exists. */}
+      <button
+        type="button"
+        className="button button--secondary gallery-search__reveal"
+        aria-label="Search photos"
+        aria-expanded={searchOpen}
+        aria-controls="gallery-search-input"
+        onClick={toggleSearch}
+      ><Search aria-hidden="true" /><span className="gallery-search__reveal-label">Search</span></button>
       {query && <button type="button" className="text-button" onClick={clearSearch}>Clear</button>}
+      {/* The count lives here rather than in the tray. In the flow it covers nothing, and it is
+          the one place a host can see how big the album has grown without leaving the photographs
+          they are picking from. It is its own span so the brackets can be drawn only beside a
+          visible word; the accessible name is `Album picks (n)` at every width regardless. */}
+      <button
+        type="button"
+        className="button button--secondary gallery-search__favorites"
+        aria-pressed={favoritesOnly}
+        aria-label={pickCount > 0 ? `Album picks (${pickCount})` : 'Album picks'}
+        onClick={toggleFavorites}
+      ><Check aria-hidden="true" /><span className="gallery-toolbar__word">Album picks</span>{pickCount > 0 && <span className="gallery-toolbar__count">{pickCount}</span>}</button>
       {/* Named for the photograph the host lands on, not for the sort key: "Newest first" opens on
-          the last dance, "Earliest first" on the empty room. The word that carries that meaning is
-          too wide to sit in one row beside the picks filter and the selection verb, so it moves to
-          the accessible name — which still contains the visible word, so the two never disagree. */}
+          the last dance, "Earliest first" on the empty room. Below 761 the two words become the
+          arrow that means them — down for newest, up for earliest — and the words stay in the
+          accessible name, which still contains the visible word, so the two never disagree. */}
       <div className="gallery-order" role="group" aria-label="Photo order">
         <button
           type="button"
@@ -940,37 +983,35 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
           aria-label="Newest first"
           className={order === 'newest' ? 'active' : ''}
           onClick={() => chooseOrder('newest')}
-        >Newest</button>
+        ><ArrowDown aria-hidden="true" /><span className="gallery-toolbar__word">Newest</span></button>
         <button
           type="button"
           aria-pressed={order === 'earliest'}
           aria-label="Earliest first"
           className={order === 'earliest' ? 'active' : ''}
           onClick={() => chooseOrder('earliest')}
-        >Earliest</button>
+        ><ArrowUp aria-hidden="true" /><span className="gallery-toolbar__word">Earliest</span></button>
       </div>
-      {/* The count lives here rather than in the tray. In the flow it covers nothing, and
-          it is the one place a host can see how big the album has grown without leaving
-          the photographs they are picking from. */}
-      <button
-        type="button"
-        className="button button--secondary gallery-search__favorites"
-        aria-pressed={favoritesOnly}
-        onClick={toggleFavorites}
-      ><Check aria-hidden="true" /> Album picks{pickCount > 0 ? ` (${pickCount})` : ''}</button>
       <button
         type="button"
         ref={selectToggleRef}
         className="button button--secondary gallery-select-toggle"
         aria-pressed={selecting}
+        aria-label={selecting ? 'Done selecting' : 'Select photos'}
         onClick={toggleSelecting}
-      ><ListChecks aria-hidden="true" /> {selecting ? 'Done selecting' : 'Select photos'}</button>
-      {selecting && rows.length > 0 && <button
+      ><SquareDashedMousePointer aria-hidden="true" /><span className="gallery-toolbar__word">{selecting ? 'Done selecting' : 'Select photos'}</span></button>
+    </div>
+    {/* Under the row, not in it. `Select all n loaded photos` appears only while a selection runs
+        and it is a sentence with no short form: in the row it took the phone's four controls from
+        195px to 371px against a 265px box at 320, wrapping the row to two lines every time a host
+        started selecting. */}
+    {selecting && rows.length > 0 && <div className="gallery-selection-controls">
+      <button
         type="button"
         className="text-button"
         onClick={() => selectMany(rows, 'these results')}
-      >Select all {rows.length} loaded photo{rows.length === 1 ? '' : 's'}</button>}
-    </div>
+      >Select all {rows.length} loaded photo{rows.length === 1 ? '' : 's'}</button>
+    </div>}
     {loading && hasConfirmedPage.current && <p className="sr-only" role={live ? 'status' : undefined}>Updating photos…</p>}
     <p
       className="sr-only"

@@ -294,14 +294,13 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
   expect(navScrolls.overflowX, 'the destination row scrolls sideways').toBe('auto');
   expect(navScrolls.reachable, 'the off-screen destinations are reachable by swiping').toBe(true);
   expect(managerHeadingMargin, 'narrow Manager heading scroll margin').toBe(stickyOffset + 12);
-  // 150, not 190: the audience facts left the pinned row for normal flow, so the Gallery
-  // obstruction is the stacked mode switch alone — which still stacks at 320, because three
-  // cramped columns would repeat the collision the destination row just fixed. Read from the
-  // custom property rather than repeating the literal, so the budget and the scroll margins
-  // cannot drift apart again.
+  // 52, not 150: the audience facts left the pinned row for normal flow, and the mode switch
+  // stays one row at 320 — stacked it was 138px of pinned chrome on a 568px screen, and the first
+  // photograph landed under the docked action. Read from the custom property rather than
+  // repeating the literal, so the budget and the scroll margins cannot drift apart again.
   const narrowObstruction = await page.locator('.manager-shell').evaluate((element) =>
     Number.parseFloat(getComputedStyle(element).getPropertyValue('--gallery-control-obstruction')));
-  expect(narrowObstruction, 'narrow Gallery obstruction budget').toBe(150);
+  expect(narrowObstruction, 'narrow Gallery obstruction budget').toBe(52);
   expect(galleryHeadingMargin, 'narrow Gallery heading scroll margin').toBe(stickyOffset + narrowObstruction + 12);
   expect(mosaicMargin, 'narrow Gallery mosaic-control scroll margin').toBe(stickyOffset + narrowObstruction + 12);
   await expectContained(page, 320);
@@ -374,6 +373,14 @@ test('Library search integrates its submit icon on mobile and keeps its desktop 
   const input = searchForm.getByRole('textbox', { name: 'Find photos' });
   const submit = searchForm.getByRole('button', { name: 'Search' });
   const label = submit.locator('.gallery-search__submit-label');
+  // Below 761 the field folds behind its own control at the head of the toolbar; opening it is
+  // the one tap the fold costs, so the field takes focus at once.
+  const reveal = page.getByRole('button', { name: 'Search photos' });
+  await expect(reveal).toHaveAttribute('aria-expanded', 'false');
+  await expect(input).toBeHidden();
+  await reveal.click();
+  await expect(reveal).toHaveAttribute('aria-expanded', 'true');
+  await expect(input).toBeFocused();
   const [mobileInput, mobileSubmit] = await Promise.all([input.boundingBox(), submit.boundingBox()]);
   if (!mobileInput || !mobileSubmit) throw new Error('Mobile search requires input and submit bounds.');
   expect(mobileSubmit.x, 'mobile Search begins inside the field').toBeGreaterThanOrEqual(mobileInput.x);
@@ -388,6 +395,8 @@ test('Library search integrates its submit icon on mobile and keeps its desktop 
   await expect(label).toBeHidden();
 
   await page.setViewportSize({ width: 761, height: 900 });
+  // The field is always in flow from 761, so the control that reveals it is not drawn.
+  await expect(reveal).toBeHidden();
   const [desktopInput, desktopSubmit] = await Promise.all([input.boundingBox(), submit.boundingBox()]);
   if (!desktopInput || !desktopSubmit) throw new Error('Desktop search requires input and submit bounds.');
   expect(desktopSubmit.x, 'desktop Search follows the field')
@@ -719,13 +728,23 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expectTouchTargets(page, '.gallery-shared .selection-tray .button', `bulk control at ${width}`);
     await expectTouchTargets(page, '.gallery-shared .selection-tray__clear', `clear selection at ${width}`);
 
-    // Both verbs share a row and `Clear selection` takes its own, at every width the tray is drawn
-    // at — the disposition already recorded for Library's tray, now one pattern rather than two.
+    // Below 761 each verb takes the row and `Clear selection` is the tray's corner X — two verbs
+    // on a 327px row put the secondary on two lines beside Clear — and from 761 the corner card
+    // gives both verbs one row with Clear on its own. The same disposition Library's tray records,
+    // one pattern rather than two.
     const bulkTops = await sharedTray.locator('.selection-tray__actions .button').evaluateAll(
       (nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().top)),
     );
+    const clearTop = await sharedTray.locator('.selection-tray__clear')
+      .evaluate((node) => Math.round(node.getBoundingClientRect().top));
     expect(bulkTops.length, `two bulk controls at ${width}`).toBe(2);
-    expect(new Set(bulkTops).size, `bulk controls share one row at ${width}`).toBe(1);
+    if (width < 761) {
+      expect(new Set(bulkTops).size, `bulk controls stack at ${width}`).toBe(2);
+      expect(clearTop, `Clear sits in the tray's corner at ${width}`).toBeLessThan(Math.min(...bulkTops));
+    } else {
+      expect(new Set(bulkTops).size, `bulk controls share one row at ${width}`).toBe(1);
+      expect(clearTop, `Clear takes its own row at ${width}`).toBeGreaterThan(Math.max(...bulkTops));
+    }
     await sharedTray.locator('.selection-tray__clear').click();
     await expect(sharedTray, `clearing retires the tray at ${width}`).toHaveCount(0);
 
@@ -1200,7 +1219,7 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
     const libraryMode = modeSwitch.getByRole('button', { name: 'Library' });
     if (width === 320) {
       const modeTracks = await measureGridTracks(page.locator('.gallery-mode-switch--three'));
-      expect(modeTracks, 'Gallery modes stack at 320').toHaveLength(1);
+      expect(modeTracks, 'Gallery modes stay one row at 320').toHaveLength(3);
       await expectTouchTargets(page, '.gallery-mode-switch--three button', 'Gallery mode control at 320');
       for (const name of ['Library', 'Album', 'Guest gallery'] as const) {
         const modeControl = modeSwitch.getByRole('button', { name });
