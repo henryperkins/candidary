@@ -37,7 +37,6 @@ export function guestbookItemKey(item: ManagerGuestbookItem): string {
 export function guestbookItemBelongsToView(
   item: ManagerGuestbookItem,
   view: GuestbookManagerView,
-  galleryVisible: boolean,
 ): boolean {
   if (item.source === 'guest_note') {
     if (item.state === 'deleted') return view === 'deleted';
@@ -46,7 +45,7 @@ export function guestbookItemBelongsToView(
     return view === 'hidden';
   }
   if (item.state === 'unpublished') return view === 'needs-review';
-  if (item.state === 'published') return view === (galleryVisible ? 'shared' : 'hidden');
+  if (item.state === 'published') return view === (item.visibility === 'shared' ? 'shared' : 'hidden');
   return view === 'hidden';
 }
 
@@ -57,8 +56,8 @@ export function guestbookItemMatchesSource(
   return source === 'all' || item.source === source;
 }
 
-export function guestbookStateLabel(item: ManagerGuestbookItem, galleryVisible: boolean): string {
-  if (item.source === 'photo_caption' && item.state === 'published' && !galleryVisible) {
+export function guestbookStateLabel(item: ManagerGuestbookItem): string {
+  if (item.source === 'photo_caption' && item.state === 'published' && item.visibility !== 'shared') {
     return 'Not currently visible to event guests';
   }
   return item.state.charAt(0).toUpperCase() + item.state.slice(1);

@@ -97,6 +97,7 @@ export function Guestbook({
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const noteInputRef = useRef<HTMLTextAreaElement>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
   const loadTicket = useRef(0);
   const lifetimeTicket = useRef(0);
   const readControllers = useRef(new Set<AbortController>());
@@ -149,6 +150,10 @@ export function Guestbook({
     if (!opened) return;
     void loadFirstPage();
   }, [loadFirstPage, opened]);
+
+  useEffect(() => {
+    if (confirmationOpen) confirmButtonRef.current?.focus();
+  }, [confirmationOpen]);
 
   useEffect(() => {
     if (openRequest === lastOpenRequest.current) return;
@@ -403,10 +408,13 @@ export function Guestbook({
           </div>
         </form>
         {confirmationOpen && <div className="guestbook-confirmation" role="group" aria-label="Confirm guestbook note">
-          <p>{signedName ? <>Send this note signed as <bdi>{signedName}</bdi>?</> : 'Send this note unsigned?'}</p>
+          <p id="guestbook-confirmation-prompt">{signedName ? <>Send this note signed as <bdi>{signedName}</bdi>?</> : 'Send this note unsigned?'}</p>
           <div>
-            <button type="button" className="button button--primary" onClick={() => void sendNote()}>Confirm and send</button>
-            <button type="button" className="button button--secondary" onClick={() => setConfirmationOpen(false)}>Keep editing</button>
+            <button ref={confirmButtonRef} type="button" className="button button--primary" aria-describedby="guestbook-confirmation-prompt" onClick={() => void sendNote()}>Confirm and send</button>
+            <button type="button" className="button button--secondary" onClick={() => {
+              setConfirmationOpen(false);
+              noteInputRef.current?.focus();
+            }}>Keep editing</button>
           </div>
         </div>}
         <div id="guestbook-submit-feedback" className="note-submit-feedback" aria-live="polite" aria-atomic="true">

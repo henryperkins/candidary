@@ -315,6 +315,30 @@ describe('guest-facing Guestbook', () => {
     expect(screen.queryByRole('heading', { name: 'Your private entries' })).not.toBeInTheDocument();
   });
 
+  it('focuses confirmation with its signature context and returns to the draft when cancelled', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => success({
+      items: [], nextCursor: null, ownUnshared: [], ownUnsharedCount: 0, ownUnsharedNextCursor: null,
+    })));
+    render(<Guestbook event={EVENT} contributionEnabled guestName="Taylor" onGuestNameChange={vi.fn()} openRequest={0} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
+    const note = screen.getByRole('textbox', { name: 'Your note for Maya & Theo' });
+    await user.type(note, 'A private memory.');
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Send note' })).toHaveFocus();
+    await user.keyboard('{Enter}');
+
+    const confirm = screen.getByRole('button', { name: 'Confirm and send' });
+    expect(confirm).toHaveFocus();
+    expect(confirm).toHaveAccessibleDescription('Send this note signed as Taylor?');
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Keep editing' })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(note).toHaveFocus();
+    expect(note).toHaveValue('A private memory.');
+    expect(screen.queryByRole('group', { name: 'Confirm guestbook note' })).not.toBeInTheDocument();
+  });
+
   it('requires confirmation, preserves an ambiguous draft and key for Retry, then dedupes the replay', async () => {
     localStorage.setItem('candidary_guest_name', 'Taylor');
     const attempts: Array<{ body: string; guestName: string | null; idempotencyKey: string }> = [];

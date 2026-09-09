@@ -99,8 +99,10 @@ export function ManagerGuestbookPanel({
   const [announcement, setAnnouncement] = useState('');
   const [focusRestore, setFocusRestore] = useState<FocusRestoreRequest | null>(null);
   const requestGeneration = useRef(0);
+  const pendingList = useRef<number | null>(null);
   const rowElements = useRef(new Map<string, HTMLLIElement>());
   const mounted = useRef(true);
+  const galleryVisible = summary?.galleryVisible ?? true;
 
   useEffect(() => {
     mounted.current = true;
@@ -131,6 +133,7 @@ export function ManagerGuestbookPanel({
     const requestedCursor = mode === 'append' ? nextCursor : null;
     if (mode === 'append' && !requestedCursor) return false;
     const generation = ++requestGeneration.current;
+    pendingList.current = generation;
     if (mode === 'append') setLoadingEarlier(true);
     else setLoading(true);
     setLoadFailure(null);
@@ -147,6 +150,7 @@ export function ManagerGuestbookPanel({
       setLoadFailure(error instanceof ClientApiError ? error.message : 'Guestbook entries could not be loaded.');
       return false;
     } finally {
+      if (pendingList.current === generation) pendingList.current = null;
       if (mounted.current && generation === requestGeneration.current) {
         setLoading(false);
         setLoadingEarlier(false);
@@ -154,12 +158,17 @@ export function ManagerGuestbookPanel({
     }
   }, [listPath, nextCursor, onSummaryObserved]);
 
+  const latestList = useRef({ eventId, loadEntries });
+  useLayoutEffect(() => {
+    latestList.current = { eventId, loadEntries };
+  });
+
   useEffect(() => {
     setRows([]);
     setNextCursor(null);
     setLoadFailure(null);
     void loadEntries('replace');
-  }, [eventId, source, view]); // loadEntries intentionally changes with nextCursor.
+  }, [eventId, source, view, galleryVisible]); // loadEntries intentionally changes with nextCursor.
 
   const chooseView = (next: GuestbookManagerView) => {
     if (next === view) return;
@@ -187,6 +196,7 @@ export function ManagerGuestbookPanel({
     if (action === 'purge' && !window.confirm(
       'Permanently delete this note? This cannot be undone and releases one retained-note capacity slot.',
     )) return;
+    const actionGeneration = requestGeneration.current;
     const rowIndex = rows.findIndex((candidate) => guestbookItemKey(candidate) === key);
     const nextKey = rowIndex >= 0 && rowIndex + 1 < rows.length ? guestbookItemKey(rows[rowIndex + 1]!) : null;
     setBusyRows((current) => ({ ...current, [key]: action }));
@@ -214,21 +224,28 @@ export function ManagerGuestbookPanel({
         );
         confirmed = response.item;
       }
-      if (!mounted.current) return;
+      if (!mounted.current || latestList.current.eventId !== eventId) return;
       const confirmedScrollY = window.scrollY;
-      setRows((current) => {
-        const without = current.filter((candidate) => guestbookItemKey(candidate) !== key);
-        if (
-          !purged
-          && confirmed
-          && guestbookItemBelongsToView(confirmed, view, summary?.galleryVisible ?? true)
-          && guestbookItemMatchesSource(confirmed, source)
-        ) {
-          const insertion = rowIndex < 0 ? without.length : Math.min(rowIndex, without.length);
-          return [...without.slice(0, insertion), confirmed, ...without.slice(insertion)];
-        }
-        return without;
-      });
+      const reloadActiveList = actionGeneration !== requestGeneration.current || pendingList.current !== null;
+      if (reloadActiveList) {
+        // A different view owns the rows now, or a read may still contain the pre-action state.
+        // Reload the current query and invalidate older reads before they can replace its result.
+        void latestList.current.loadEntries('replace');
+      } else {
+        setRows((current) => {
+          const without = current.filter((candidate) => guestbookItemKey(candidate) !== key);
+          if (
+            !purged
+            && confirmed
+            && guestbookItemBelongsToView(confirmed, view)
+            && guestbookItemMatchesSource(confirmed, source)
+          ) {
+            const insertion = rowIndex < 0 ? without.length : Math.min(rowIndex, without.length);
+            return [...without.slice(0, insertion), confirmed, ...without.slice(insertion)];
+          }
+          return without;
+        });
+      }
       if (action === 'delete' && confirmed?.source === 'guest_note' && confirmed.state === 'deleted') {
         setUndoItem(confirmed);
         setAnnouncement('Note deleted. Undo is available.');
@@ -237,21 +254,22 @@ export function ManagerGuestbookPanel({
         setAnnouncement(purged ? 'Note permanently deleted.' : 'Guestbook entry updated.');
       }
       void onSummaryRefresh({ silent: true });
-      restoreFocus(confirmed ? guestbookItemKey(confirmed) : key, nextKey, confirmedScrollY);
+      if (!reloadActiveList) restoreFocus(confirmed ? guestbookItemKey(confirmed) : key, nextKey, confirmedScrollY);
     } catch (error) {
-      if (!mounted.current) return;
+      if (!mounted.current || latestList.current.eventId !== eventId) return;
       const conflict = error instanceof ClientApiError
         && (error.code === 'MESSAGE_STATE_CONFLICT' || error.code === 'MEDIA_STATE_CONFLICT');
       const retry = conflict
-        ? () => { void loadEntries('replace'); }
+        ? () => { void latestList.current.loadEntries('replace'); }
         : () => { void runAction(item, action); };
-      const failureScrollY = window.scrollY;
-      setRowFailures((current) => ({ ...current, [key]: {
-        message: conflict ? 'This entry changed. Reload it before choosing another action.' : actionFailureMessage(error),
-        retry,
-      } }));
+      if (actionGeneration === requestGeneration.current) {
+        setRowFailures((current) => ({ ...current, [key]: {
+          message: conflict ? 'This entry changed. Reload it before choosing another action.' : actionFailureMessage(error),
+          retry,
+        } }));
+        restoreFocus(key, null, window.scrollY);
+      }
       setAnnouncement(conflict ? 'This entry changed. Reload is available.' : 'Guestbook entry update failed.');
-      restoreFocus(key, null, failureScrollY);
     } finally {
       if (mounted.current) {
         setBusyRows((current) => {
@@ -267,7 +285,6 @@ export function ManagerGuestbookPanel({
     await loadEntries('replace');
   };
 
-  const galleryVisible = summary?.galleryVisible ?? true;
   return <section className="manager-panel manager-guestbook" aria-labelledby="manager-guestbook-title">
     <div className="manager-guestbook__heading">
       <div>
@@ -349,7 +366,7 @@ export function ManagerGuestbookPanel({
               <h3 dir="auto"><bdi>{item.guestName || 'Unsigned'}</bdi></h3>
               <p dir="auto">{item.body}</p>
               <div className="manager-guestbook__states">
-                <span>{guestbookStateLabel(item, galleryVisible)}</span>
+                <span>{guestbookStateLabel(item)}</span>
                 <span>{guestbookVisibilityLabel(item)}</span>
               </div>
               <div className="button-row">

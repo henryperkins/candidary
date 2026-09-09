@@ -8,7 +8,7 @@ vi.mock('qrcode', () => ({
   default: { toDataURL: vi.fn(() => Promise.resolve('data:image/png;base64,x')) },
 }));
 
-import type { EventView } from '../../shared/contracts';
+import type { EventView, ManagerGuestbookItem } from '../../shared/contracts';
 import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { createAppRouter } from '../../src/app/router';
@@ -27,6 +27,12 @@ function failure(code = 'INTERNAL_ERROR', message = 'Guestbook unavailable.', st
     status,
     headers: { 'content-type': 'application/json' },
   }));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
 }
 
 const emptySummary: GuestbookSummary = {
@@ -383,6 +389,134 @@ describe('Manager Guestbook', () => {
     expect(captionPatch.url.pathname).toBe('/api/manage/events/event-a/media/media-a');
     expect(JSON.parse(String(captionPatch.init?.body))).toEqual({ action: 'publish', expectedStatus: 'unpublished' });
     expect(requests.some(({ url, init }) => init?.method === 'PATCH' && url.pathname.includes('/messages/media-a'))).toBe(false);
+  });
+
+  it.each(['before', 'after'] as const)(
+    'keeps a shared note in the selected view when its stale list arrives %s the action',
+    async (listOrder) => {
+      const action = deferred<Response>();
+      const staleList = deferred<Response>();
+      const pending: ManagerGuestbookItem = {
+        id: 'note-a', source: 'guest_note', guestName: 'Avery', body: 'A perfect evening.',
+        createdAt: '2026-09-19T22:00:00Z', state: 'pending', visibility: 'author_only',
+      };
+      const shared: ManagerGuestbookItem = { ...pending, state: 'approved', visibility: 'shared' };
+      let sharedReads = 0;
+      vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'PATCH') return action.promise;
+        const url = new URL(String(input), 'https://candidary.test');
+        if (url.searchParams.get('view') === 'shared') {
+          sharedReads += 1;
+          if (sharedReads === 1) return staleList.promise;
+          return success({ items: [shared], nextCursor: null, summary: { ...emptySummary, sharedCount: 1 } });
+        }
+        return success({ items: [pending], nextCursor: null, summary: { ...emptySummary, needsReviewCount: 1 } });
+      }));
+      const user = userEvent.setup();
+      render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={emptySummary} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
+      await user.click(within(await screen.findByRole('listitem', { name: /Avery guest note/i })).getByRole('button', { name: 'Share' }));
+      const sharedFilter = screen.getByRole('button', { name: /^Shared/ });
+      await user.click(sharedFilter);
+      await waitFor(() => expect(sharedReads).toBe(1));
+      const resolveStaleList = async () => {
+        await act(async () => staleList.resolve(await success({ items: [], nextCursor: null, summary: emptySummary })));
+      };
+      if (listOrder === 'before') await resolveStaleList();
+      await act(async () => action.resolve(await success({ item: shared })));
+      if (listOrder === 'after') await resolveStaleList();
+
+      const row = await screen.findByRole('listitem', { name: /Avery guest note/i });
+      expect(within(row).getByText('Shared with guests')).toBeVisible();
+      expect(screen.queryByText('No entries in this view.')).not.toBeInTheDocument();
+      expect(sharedFilter).toHaveFocus();
+    },
+  );
+
+  it.each(['success', 'failure'])('keeps a late caption action %s from changing the selected Notes source or focus', async (outcome) => {
+    const action = deferred<Response>();
+    const summary = { ...emptySummary, galleryVisible: false, hiddenCount: 2 };
+    const caption: ManagerGuestbookItem = {
+      id: 'caption', source: 'photo_caption', mediaId: 'caption', guestName: 'Morgan', body: 'The speech.',
+      createdAt: '2026-09-19T22:00:00Z', state: 'hidden', visibility: 'author_only', previewAvailable: true,
+    };
+    const note: ManagerGuestbookItem = {
+      id: 'note', source: 'guest_note', guestName: 'Avery', body: 'A private note.',
+      createdAt: '2026-09-19T21:00:00Z', state: 'rejected', visibility: 'author_only',
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') return action.promise;
+      const url = new URL(String(input), 'https://candidary.test');
+      const items = url.searchParams.get('view') === 'hidden'
+        ? url.searchParams.get('source') === 'guest_note' ? [note] : [caption, note]
+        : [];
+      return success({ items, nextCursor: null, summary });
+    }));
+    const user = userEvent.setup();
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={summary} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
+    await user.click(screen.getByRole('button', { name: /^Hidden/ }));
+    await user.click(await screen.findByRole('button', { name: 'Publish photo & caption' }));
+    const notesFilter = screen.getByRole('button', { name: 'Notes' });
+    await user.click(notesFilter);
+    await screen.findByText('A private note.');
+    await act(async () => action.resolve(await (outcome === 'success'
+      ? success({ item: { ...caption, state: 'published' } })
+      : failure())));
+
+    expect(screen.queryByText('The speech.')).not.toBeInTheDocument();
+    expect(screen.getByText('A private note.')).toBeVisible();
+    expect(notesFilter).toHaveFocus();
+  });
+
+  it('uses confirmed caption visibility before a concurrent gallery summary refresh arrives', async () => {
+    const caption: ManagerGuestbookItem = {
+      id: 'caption', source: 'photo_caption', mediaId: 'caption', guestName: 'Morgan', body: 'The speech.',
+      createdAt: '2026-09-19T22:00:00Z', state: 'hidden', visibility: 'author_only', previewAvailable: true,
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') return success({ item: { ...caption, state: 'published', visibility: 'shared' } });
+      const url = new URL(String(input), 'https://candidary.test');
+      return success({ items: url.searchParams.get('view') === 'hidden' ? [caption] : [], nextCursor: null, summary: { ...emptySummary, galleryVisible: false, hiddenCount: 1 } });
+    }));
+    const user = userEvent.setup();
+    render(<ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={{ ...emptySummary, galleryVisible: false, hiddenCount: 1 }} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />);
+    await user.click(screen.getByRole('button', { name: /^Hidden/ }));
+    await user.click(await screen.findByRole('button', { name: 'Publish photo & caption' }));
+
+    await waitFor(() => expect(screen.queryByText('The speech.')).not.toBeInTheDocument());
+    expect(screen.getByText('No entries in this view.')).toBeVisible();
+  });
+
+  it.each([false, true])('refreshes the selected caption view when gallery visibility changes from %s', async (initialVisibility) => {
+    let galleryVisible = initialVisibility;
+    const caption: ManagerGuestbookItem = {
+      id: 'caption', source: 'photo_caption', mediaId: 'caption', guestName: 'Morgan', body: 'Published caption.',
+      createdAt: '2026-09-19T22:00:00Z', state: 'published', visibility: initialVisibility ? 'shared' : 'author_only', previewAvailable: true,
+    };
+    const summary = () => ({ ...emptySummary, galleryVisible, sharedCount: galleryVisible ? 1 : 0, hiddenCount: galleryVisible ? 0 : 1 });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'https://candidary.test');
+      const matchingView = galleryVisible ? 'shared' : 'hidden';
+      return success({
+        items: url.searchParams.get('view') === matchingView ? [{ ...caption, visibility: galleryVisible ? 'shared' : 'author_only' }] : [],
+        nextCursor: null, summary: summary(),
+      });
+    }));
+    const props = () => <ManagerGuestbookPanel eventId="event-a" eventTimezone="America/Chicago" summary={summary()} onSummaryRefresh={vi.fn(async () => undefined)} onOpenSettings={vi.fn()} settingsBlocked={false} />;
+    const rendered = render(props());
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: initialVisibility ? /^Shared/ : /^Hidden/ }));
+    await screen.findByText('Published caption.');
+
+    galleryVisible = !initialVisibility;
+    rendered.rerender(props());
+    await waitFor(() => expect(screen.queryByText('Published caption.')).not.toBeInTheDocument());
+    expect(await screen.findByText('No entries in this view.')).toBeVisible();
+    expect(screen.getByRole('button', { name: initialVisibility ? /^Shared/ : /^Hidden/ })).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(screen.getByRole('button', { name: galleryVisible ? /^Shared/ : /^Hidden/ }));
+    const row = await screen.findByRole('listitem', { name: /Morgan photo caption/i });
+    expect(within(row).getByText(galleryVisible ? 'Shared with guests' : 'Private to contributor')).toBeVisible();
+    expect(within(row).getByText(galleryVisible ? 'Published' : 'Not currently visible to event guests')).toBeVisible();
   });
 
   it('refetches only the summary after a Manager row action and never starts a whole-page refresh', async () => {
