@@ -5,6 +5,7 @@ import {
   type ExportRunOwner,
   type ReadyExportPart,
 } from '../db/exports';
+import { EventsRepository } from '../db/events';
 import type { ExportRecord } from '../db/types';
 import { GuestbookRepository } from '../db/guestbook';
 import { MediaObjectWriteTombstoneRepository } from '../db/media-write-tombstones';
@@ -13,7 +14,12 @@ import { resolveFrozenAlbumOrder } from '../export/album-order';
 import { buildGuestbookPrivateCsv, type GuestbookPhotoArchiveLocation } from '../export/guestbook-csv';
 import { buildGuestbookHtml } from '../export/guestbook-html';
 import { partitionExportSnapshot } from '../export/partition';
-import { exportPartName, exportPath } from '../export/paths';
+import {
+  exportPartDeliveryName,
+  exportPartName,
+  exportPath,
+  exportPathWidth,
+} from '../export/paths';
 import { buildExportZipStream } from '../export/zip-stream';
 import { multipartPut } from '../storage/multipart';
 
@@ -150,10 +156,17 @@ export async function processExport(
       : await immutableMediaEntries(exports, job.id);
     if (snapshot.length !== job.mediaCount) throw new Error('EXPORT_SNAPSHOT_CHANGED');
     const partitions = partitionExportSnapshot(snapshot, maxPartBytes);
+    // Archive numbers run across the whole snapshot, not per part, so a host
+    // who unzips every part into one folder never sees two files collide.
+    const pathWidth = exportPathWidth(job.mediaCount);
+    // One read for the whole run: the delivered archive name carries the event's
+    // date and slug so a folder of downloads is identifiable without opening it.
+    const exportEvent = await new EventsRepository(env.DB).getById(job.eventId);
     const storedParts: ReadyExportPart[] = [];
     const photoArchiveByMediaId = new Map<string, GuestbookPhotoArchiveLocation>();
     let processedMediaCount = 0;
     let processedBytes = 0;
+    let globalIndex = 0;
 
     for (const part of partitions) {
       const entries = [];
@@ -167,19 +180,26 @@ export async function processExport(
         await assertActive();
         entries.push({ media, body: object.body });
       }
+      const partStartIndex = globalIndex;
       part.media.forEach((media, index) => photoArchiveByMediaId.set(media.id, {
         partNumber: part.partNumber,
-        path: exportPath(media, index),
+        path: exportPath(media, partStartIndex + index, pathWidth),
       }));
       const name = exportPartName(part.partNumber);
       const objectKey = `${baseKey}/${name}`;
+      const deliveryName = exportEvent
+        ? exportPartDeliveryName(exportEvent.eventDate, exportEvent.slug, part.partNumber, partitions.length)
+        : exportPartName(part.partNumber);
       await assertActive();
       await inventoryExportWrite(objectKey);
       await assertActive();
-      await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries), {
+      await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries, {
+        startIndex: partStartIndex,
+        width: pathWidth,
+      }), {
         httpMetadata: {
           contentType: 'application/zip',
-          contentDisposition: `attachment; filename="candidary-${job.eventId}-${name}"`,
+          contentDisposition: `attachment; filename="${deliveryName}"`,
         },
       });
       uploadedKeys.push(objectKey);
@@ -191,6 +211,7 @@ export async function processExport(
       });
       processedMediaCount += part.media.length;
       processedBytes += part.sourceBytes;
+      globalIndex += part.media.length;
       if (!await exports.recordProgress(owner, {
         processedMediaCount,
         processedBytes,
@@ -204,7 +225,7 @@ export async function processExport(
       await assertActive();
       await inventoryExportWrite(manifestObjectKey);
       await assertActive();
-      await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions), {
+      await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions, pathWidth), {
         httpMetadata: {
           contentType: 'text/csv; charset=utf-8',
           contentDisposition: 'attachment; filename="candidary-export-manifest.csv"',

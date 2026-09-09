@@ -32,6 +32,12 @@ export const MEDIA_RECOVERY_CLEANUP_BATCH = 100;
 // Host private Gallery: the one non-sentinel timeline instant per stored photo
 // and the bounded chronological page size shared by server and production client.
 export const MEDIA_TIMELINE_SENTINEL = '1970-01-01T00:00:00.000Z';
+/**
+ * One scheduled pass repairs at most this many stored rows still carrying the
+ * timeline sentinel — the bounded post-deploy repair migration 0016 promised,
+ * draining any mixed-window backlog across hourly passes.
+ */
+export const MEDIA_TIMELINE_SENTINEL_REPAIR_BATCH = 500;
 export const PRIVATE_GALLERY_PAGE_SIZE = 48;
 /**
  * Which end of the day the host starts from. `newest` is the default because a host

@@ -95,6 +95,13 @@ export interface ExportView {
   guestbookGalleryVisible: boolean | null;
   /** A closed, client-safe recovery reason; raw Worker diagnostics stay in D1. */
   errorCode: ManagerExportErrorCode | null;
+  /**
+   * Read-time truth, projected by the server: a `ready` job whose download
+   * window has already lapsed even though the daily cron has not yet flipped
+   * the stored state. Optional so a stale cached response degrades to the
+   * old behavior instead of breaking the shape.
+   */
+  expired?: boolean;
 }
 
 export interface ExportDownloadDescriptor {

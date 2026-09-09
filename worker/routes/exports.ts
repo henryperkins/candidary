@@ -7,6 +7,7 @@ import { requireManager } from '../auth/manager';
 import { ExportsRepository } from '../db/exports';
 import type { ExportRecord } from '../db/types';
 import type { AppBindings, AppEnv } from '../env';
+import { exportPartDeliveryName } from '../export/paths';
 
 function manager(context: Context<AppBindings>, write = false) {
   return requireManager(context, { write });
@@ -45,6 +46,13 @@ function managerExport(job: ExportRecord) {
     guestbookPrompt: job.guestbookPrompt,
     guestbookGalleryVisible: job.guestbookGalleryVisible,
     errorCode: normalizeManagerExportErrorCode(job.errorCode),
+    // Read-time truth: expiry is only materialized in D1 by the daily cron, but
+    // the artifact route already refuses a lapsed window on every request. The
+    // derived flag makes the panel and the button agree with that route now,
+    // without touching the row, the Ready→Expired CAS, or object deletion.
+    expired: job.state === 'ready'
+      && job.expiresAt !== null
+      && Date.parse(job.expiresAt) <= Date.now(),
   };
 }
 
@@ -245,7 +253,7 @@ async function ownedReadyArtifact(
   kind: ExportArtifactKind,
   partNumber?: number,
 ) {
-  await manager(context);
+  const auth = await manager(context);
   const job = await ownedJob(context);
   if (job.kind === 'album'
     && (kind === 'printable-guestbook' || kind === 'private-guestbook')) {
@@ -280,7 +288,7 @@ async function ownedReadyArtifact(
       .find((candidate) => candidate.partNumber === partNumber);
     if (part) return {
       key: part.objectKey,
-      filename: `photos-${String(part.partNumber).padStart(3, '0')}.zip`,
+      filename: exportPartDeliveryName(auth.event.eventDate, auth.event.slug, part.partNumber, job.partCount),
       contentType: 'application/zip',
     };
   }
@@ -467,7 +475,7 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context
 });
 
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (context) => {
-  await manager(context, true);
+  const auth = await manager(context, true);
   const job = await ownedJob(context);
   if (job.state !== 'ready' || !job.expiresAt || Date.parse(job.expiresAt) <= Date.now()) {
     throw new ApiError('EXPORT_FAILED', 'This export is not ready to download.', 409);
@@ -514,7 +522,7 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (cont
         sourceBytes: part.sourceBytes,
         url: artifactUrl(job.eventId, job.id, 'part', part.partNumber),
         expiresAt: job.expiresAt,
-        filename: `photos-${String(part.partNumber).padStart(3, '0')}.zip`,
+        filename: exportPartDeliveryName(auth.event.eventDate, auth.event.slug, part.partNumber, job.partCount),
       })),
       printableGuestbook: job.guestbookHtmlObjectKey
         ? { url: artifactUrl(job.eventId, job.id, 'printable-guestbook'), expiresAt: job.expiresAt, filename: 'guestbook.html' }

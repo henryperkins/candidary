@@ -9,6 +9,7 @@ import {
   exportAnnouncementMessage,
   exportWaitMessage,
   hasTrustedEmptySource,
+  isEffectivelyExpired,
   isTerminalExport,
   useExportAnnouncement,
   type ExportCurrentSource,
@@ -21,6 +22,8 @@ interface AlbumExportControlProps {
   job?: ExportView;
   activeJob?: ExportView;
   download?: ExportDownloadView;
+  /** The event's management/export expiry, surfaced in terminal export states. */
+  managementExpiresAt?: string | null;
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
   onRetry(job: ExportView): Promise<void>;
@@ -41,6 +44,7 @@ export function AlbumExportControl({
   job,
   activeJob,
   download,
+  managementExpiresAt,
   onPrepare,
   onDownload,
   onRetry,
@@ -49,6 +53,7 @@ export function AlbumExportControl({
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
   const waitMessage = exportWaitMessage(activeJob, job?.id);
   const currentSourceEmpty = hasTrustedEmptySource(currentSource);
+  const effectivelyExpired = job !== undefined && isEffectivelyExpired(job);
   const run = (action: typeof pendingAction, request: () => Promise<void>) => {
     if (pendingAction !== null) return;
     setPendingAction(action);
@@ -56,7 +61,7 @@ export function AlbumExportControl({
   };
   const liveMessage = job === undefined
     ? pendingAction === 'prepare' ? 'Preparing the current Album…' : ''
-    : exportAnnouncementMessage(job, 'Album', now);
+    : exportAnnouncementMessage(job, 'Album', now, eventTimezone);
   useExportAnnouncement(liveMessage, onAnnouncement);
   const prepareDisabled = pendingAction !== null || waitMessage !== null || currentSourceEmpty;
   const prepareReason = waitMessage
@@ -92,8 +97,9 @@ export function AlbumExportControl({
             currentSource={currentSource}
             currentLabel="Album"
             now={now}
+            managementExpiresAt={managementExpiresAt}
           />
-          {job.state === 'ready' && download === undefined
+          {job.state === 'ready' && !effectivelyExpired && download === undefined
             ? <button
                 type="button"
                 className="button button--secondary"
@@ -123,7 +129,7 @@ export function AlbumExportControl({
                 ))}
               </div>
             : null}
-          {(job.state === 'failed' || job.state === 'expired')
+          {(job.state === 'failed' || job.state === 'expired' || effectivelyExpired)
             && job.errorCode !== 'EXPORT_SOURCE_REMOVED'
             ? <button
                 type="button"

@@ -16,6 +16,7 @@ import {
   exportAnnouncementMessage,
   exportWaitMessage,
   hasTrustedEmptySource,
+  isEffectivelyExpired,
   isTerminalExport,
   useExportAnnouncement,
   type ExportCurrentSource,
@@ -38,6 +39,8 @@ interface GalleryExportControlProps {
   activeJob?: ExportView;
   download?: ExportDownloadView;
   resourceStatus: 'idle' | 'loading' | 'ready' | 'failed';
+  /** Event's management/export expiry, surfaced in terminal export states. */
+  managementExpiresAt?: string | null;
   onPrepare(): Promise<void>;
   onDownload(job: ExportView): Promise<void>;
   onRetry(job: ExportView): Promise<void>;
@@ -80,6 +83,7 @@ export const GalleryExportControl = forwardRef<
   activeJob,
   download,
   resourceStatus,
+  managementExpiresAt,
   onPrepare,
   onDownload,
   onRetry,
@@ -101,9 +105,10 @@ export const GalleryExportControl = forwardRef<
   const normalizedJob = job ? normalizeCompleteExport(job) : undefined;
   const waitMessage = exportWaitMessage(activeJob, normalizedJob?.id);
   const currentSourceEmpty = hasTrustedEmptySource(currentSource);
+  const effectivelyExpired = normalizedJob !== undefined && isEffectivelyExpired(normalizedJob);
   const liveMessage = normalizedJob === undefined
     ? pendingAction === 'prepare' ? 'Preparing the current collection…' : ''
-    : exportAnnouncementMessage(normalizedJob, 'collection', now);
+    : exportAnnouncementMessage(normalizedJob, 'collection', now, eventTimezone);
   useExportAnnouncement(liveMessage, onAnnouncement);
   const run = (action: Exclude<typeof pendingAction, null>, request: () => Promise<void>) => {
     if (pendingAction !== null) return;
@@ -151,10 +156,10 @@ export const GalleryExportControl = forwardRef<
             ?? printableDownload.current
             ?? privateDownload.current;
         }
-        if (!enabledAction && normalizedJob.state === 'ready') {
+        if (!enabledAction && normalizedJob.state === 'ready' && !effectivelyExpired) {
           enabledAction = getDownloadLinks.current?.disabled ? null : getDownloadLinks.current;
         }
-        if (!enabledAction && (normalizedJob.state === 'failed' || normalizedJob.state === 'expired')) {
+        if (!enabledAction && (normalizedJob.state === 'failed' || normalizedJob.state === 'expired' || effectivelyExpired)) {
           enabledAction = retryPrepared.current?.disabled ? null : retryPrepared.current;
         }
         if (!enabledAction && isTerminalExport(normalizedJob)) {
@@ -205,8 +210,9 @@ export const GalleryExportControl = forwardRef<
             currentSource={currentSource}
             currentLabel="collection"
             now={now}
+            managementExpiresAt={managementExpiresAt}
           />
-          {normalizedJob.state === 'ready' && !download && (
+          {normalizedJob.state === 'ready' && !effectivelyExpired && !download && (
             <button
               ref={getDownloadLinks}
               type="button"
@@ -237,7 +243,7 @@ export const GalleryExportControl = forwardRef<
             {download.printableGuestbook && <a ref={printableDownload} href={download.printableGuestbook.url}>Printable guestbook</a>}
             {download.privateGuestbook && <a ref={privateDownload} href={download.privateGuestbook.url}>Private entry archive <small>Contains entries guests cannot see</small></a>}
           </div>}
-          {(normalizedJob.state === 'failed' || normalizedJob.state === 'expired')
+          {(normalizedJob.state === 'failed' || normalizedJob.state === 'expired' || effectivelyExpired)
             && normalizedJob.errorCode !== 'EXPORT_SOURCE_REMOVED'
             ? <button
                 ref={retryPrepared}

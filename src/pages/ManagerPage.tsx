@@ -3066,6 +3066,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const heldBytes = (event.storedBytes ?? 0) + (event.recoverableBytes ?? 0);
   const managerEventDate = formatEventDate(event.eventDate) ?? DATE_UNAVAILABLE;
   const purgeAfterDisplay = formatRetentionDate(event.purgeAfter, event.eventTimezone);
+  // The date that actually costs the host something if missed: management and
+  // export access end here, thirty days before the files themselves go. Shown
+  // beside the purge date so the on-screen deadline is the binding one.
+  const manageUntilDisplay = formatRetentionDate(event.managementAccessExpiresAt, event.eventTimezone);
   const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
   const entryActionDetails = entryAction === null ? null : ENTRY_ACTION_DETAILS[entryAction];
 
@@ -3139,7 +3143,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         recoveryHint={eventResource.state.failure.recoveryHint}
         onRetry={() => void eventResource.reload()}
       />}
-      <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{purgeAfterDisplay === null
+      <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Manage and export until <strong>{manageUntilDisplay === null
+        ? TIME_UNAVAILABLE
+        : <time dateTime={event.managementAccessExpiresAt}>{manageUntilDisplay}</time>}</strong></p><p>Files delete <strong>{purgeAfterDisplay === null
         ? TIME_UNAVAILABLE
         : <time dateTime={event.purgeAfter}>{purgeAfterDisplay}</time>}</strong></p></div>
 
