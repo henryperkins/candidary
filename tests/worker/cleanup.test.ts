@@ -11,6 +11,7 @@ import {
   COVER_WORKFLOW_FENCE_HOLD_EXPIRES_AT,
   MAX_COVER_PURGE_FENCES_PER_PASS,
   MAX_COVER_PURGE_PLATFORM_MUTATIONS_PER_PASS,
+  MEDIA_TIMELINE_SENTINEL,
 } from '../../shared/constants';
 import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
 import {
@@ -2978,6 +2979,32 @@ describe('lifecycle cleanup', () => {
     expect(await testEnv.DB.prepare('SELECT id FROM events WHERE id = ?')
       .bind(access.event.id).first()).toBeNull();
     expect(await foreignKeyCheck()).toEqual([]);
+  });
+
+  it('repairs stored timeline-sentinel rows on the hourly pass so the private gallery reopens', async () => {
+    const access = await eventAccess();
+    await uploadPending(access, 'sentinel-repair', null);
+    // Exactly the mixed-window condition migration 0016 names: a stored row an
+    // older Worker finalized still carries the timeline sentinel, which closes
+    // every private gallery page with MEDIA_STATE_CONFLICT.
+    await testEnv.DB.prepare('UPDATE media SET timeline_at = ? WHERE event_id = ?')
+      .bind(MEDIA_TIMELINE_SENTINEL, access.event.id).run();
+    const repository = new MediaRepository(testEnv.DB);
+    expect(await repository.countStoredTimelineSentinels(access.event.id)).toBe(1);
+
+    const scheduled: Promise<unknown>[] = [];
+    worker.scheduled!(
+      { cron: '47 * * * *', scheduledTime: Date.parse('2026-08-13T10:47:00.000Z') } as ScheduledController,
+      testEnv,
+      { waitUntil: (promise: Promise<unknown>) => scheduled.push(promise), passThroughOnException() {} } as unknown as ExecutionContext,
+    );
+    await Promise.all(scheduled);
+
+    expect(await repository.countStoredTimelineSentinels(access.event.id)).toBe(0);
+    const repaired = await testEnv.DB.prepare(`
+      SELECT timeline_at, stored_at, created_at FROM media WHERE event_id = ?
+    `).bind(access.event.id).first<{ timeline_at: string; stored_at: string | null; created_at: string }>();
+    expect(repaired?.timeline_at).toBe(repaired?.stored_at ?? repaired?.created_at);
   });
   // Every cover table's `event_id` is ON DELETE RESTRICT, inverting the fifteen
   // CASCADE relationships this schema had before 0012. Without the explicit

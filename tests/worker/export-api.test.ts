@@ -15,6 +15,7 @@ const managerExportKeys = [
   'completedAt',
   'createdAt',
   'errorCode',
+  'expired',
   'expiresAt',
   'guestbookEntryCount',
   'guestbookEventDate',
@@ -1888,8 +1889,8 @@ describe('manager exports', () => {
     }
     expect(archivedNames).toEqual([
       'photos/001-album-ordered-third.png',
-      'photos/001-album-ordered-first.png',
-      'photos/001-album-ordered-second.png',
+      'photos/002-album-ordered-first.png',
+      'photos/003-album-ordered-second.png',
     ]);
     const firstManifest = await (await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!))!.text();
     expect([...firstManifest.matchAll(/,(album-ordered-(?:third|first|second)\.png),/gu)]

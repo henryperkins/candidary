@@ -873,6 +873,7 @@ ManagerGalleryWorkspaceProps
           download={exports.download}
           resourceStatus={exports.status}
           eventTimezone={event.eventTimezone}
+          managementExpiresAt={event.managementAccessExpiresAt}
           currentSource={exports.currentSource}
           onPrepare={exports.onPrepare}
           onDownload={exports.onDownload}
@@ -908,6 +909,7 @@ ManagerGalleryWorkspaceProps
         eventName={event.name}
         active={mode === 'album'}
         eventTimezone={event.eventTimezone}
+        managementExpiresAt={event.managementAccessExpiresAt}
         onGoToLibrary={() => onModeChange('library')}
         onOpenRecentlyDeleted={shared.onOpenRecentlyDeleted}
         invalidateGalleryAfterMutation={invalidateGalleryAfterMutation}

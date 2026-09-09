@@ -1,7 +1,7 @@
 import { useEffect, type ReactElement } from 'react';
 
 import type { ManagerExportErrorCode } from '../../../shared/contracts';
-import { eventDateTimeDisplay } from '../../app/event-date-time';
+import { eventDateTimeDisplay, formatEventDateTime } from '../../app/event-date-time';
 import { formatBytes } from '../../app/format';
 import type { ExportView } from '../../app/types';
 
@@ -25,6 +25,20 @@ export type ExportCurrentSourceLabel = 'collection' | 'Album';
 
 export function isTerminalExport(job: ExportView): boolean {
   return job.state === 'ready' || job.state === 'failed' || job.state === 'expired';
+}
+
+/**
+ * Read-time truth: the stored state only flips Ready→Expired in the daily cron,
+ * but the artifact route already refuses every link the moment the window lapses.
+ * The server projects the derived flag so the panel agrees with the route now.
+ */
+export function isEffectivelyExpired(job: ExportView): boolean {
+  return job.state === 'ready' && job.expired === true;
+}
+
+/** The state as a host experiences it, whatever the stored row still says. */
+export function exportDisplayState(job: ExportView): ExportView['state'] {
+  return isEffectivelyExpired(job) ? 'expired' : job.state;
 }
 
 export function hasTrustedEmptySource(source: ExportCurrentSource): boolean {
@@ -108,10 +122,24 @@ export function exportProgressMessage(job: ExportView): string | null {
   return parts.length === 0 ? null : `Progress: ${parts.join(' · ')}.`;
 }
 
+function expiredMessage(
+  job: ExportView,
+  currentLabel: ExportCurrentSourceLabel,
+  eventTimezone?: string,
+): string {
+  // The absolute expiry instant is already on the wire; naming it turns "expired"
+  // from a verdict into a fact the host can check against their own clock.
+  const when = job.expiresAt && eventTimezone
+    ? formatEventDateTime(job.expiresAt, eventTimezone)
+    : null;
+  return `The download links expired${when ? ` ${when}` : ''}. Retry this prepared export, or prepare the current ${currentLabel}.`;
+}
+
 function exportStateMessage(
   job: ExportView,
   currentLabel: ExportCurrentSourceLabel,
   now: number,
+  eventTimezone?: string,
 ): string {
   switch (job.state) {
     case 'queued':
@@ -119,11 +147,12 @@ function exportStateMessage(
     case 'running':
       return coarseExportElapsed(job.startedAt, now) ?? 'Preparation is running.';
     case 'ready':
+      if (isEffectivelyExpired(job)) return expiredMessage(job, currentLabel, eventTimezone);
       return 'Ready to download. Download links last 24 hours.';
     case 'failed':
       return exportFailureMessage(job.errorCode ?? 'EXPORT_FAILED', currentLabel);
     case 'expired':
-      return `The download links expired. Retry this prepared export, or prepare the current ${currentLabel}.`;
+      return expiredMessage(job, currentLabel, eventTimezone);
   }
 }
 
@@ -144,11 +173,12 @@ export function exportAnnouncementMessage(
   job: ExportView,
   currentLabel: ExportCurrentSourceLabel,
   now: number,
+  eventTimezone?: string,
 ): string {
   const progress = exportProgressMessage(job);
   return [
-    EXPORT_STATE_LABELS[job.state],
-    exportStateMessage(job, currentLabel, now),
+    EXPORT_STATE_LABELS[exportDisplayState(job)],
+    exportStateMessage(job, currentLabel, now, eventTimezone),
     progress,
   ].filter((part): part is string => part !== null).join(' ');
 }
@@ -170,34 +200,50 @@ export function ExportJobStatus({
   currentSource,
   currentLabel,
   now,
+  managementExpiresAt,
 }: {
   job: ExportView;
   eventTimezone: string;
   currentSource: ExportCurrentSource;
   currentLabel: ExportCurrentSourceLabel;
   now: number;
+  /**
+   * The event's management-and-export expiry, repeated in every terminal export
+   * state so "prepare a fresh export" is never advised past the instant where
+   * it is no longer possible.
+   */
+  managementExpiresAt?: string | null;
 }): ReactElement {
+  const displayState = exportDisplayState(job);
   const prepared = eventDateTimeDisplay(job.snapshotAt, eventTimezone);
   const progress = exportProgressMessage(job);
-  const stateMessage = exportStateMessage(job, currentLabel, now);
+  const stateMessage = exportStateMessage(job, currentLabel, now, eventTimezone);
   const guestbookCount = job.guestbookEntryCount ?? 0;
   const guestbook = job.kind === 'complete'
     ? ` · ${guestbookCount.toLocaleString()} guestbook ${guestbookCount === 1 ? 'entry' : 'entries'}`
     : '';
+  const deadline = managementExpiresAt
+    ? eventDateTimeDisplay(managementExpiresAt, eventTimezone)
+    : null;
 
   return <>
-    <strong>{EXPORT_STATE_LABELS[job.state]}</strong>
+    <strong>{EXPORT_STATE_LABELS[displayState]}</strong>
     <span className="export-state__prepared">
       Prepared {prepared.dateTime === null
         ? prepared.value
         : <time dateTime={prepared.dateTime}>{prepared.value}</time>}
-      {' · '}{photoCount(job.mediaCount)}{' · '}{EXPORT_STATE_LABELS[job.state]}
+      {' · '}{photoCount(job.mediaCount)}{' · '}{EXPORT_STATE_LABELS[displayState]}
     </span>
     <span>Frozen size: {formatBytes(job.totalBytes)}{guestbook}.</span>
     <span>{stateMessage}</span>
     {progress === null ? null : <span>{progress}</span>}
     {isTerminalExport(job)
       ? <span>{describeCurrentSource(currentSource, job.mediaCount, currentLabel)}</span>
+      : null}
+    {isTerminalExport(job) && deadline !== null
+      ? <span>Manage and export until {deadline.dateTime === null
+          ? deadline.value
+          : <time dateTime={deadline.dateTime}>{deadline.value}</time>}.</span>
       : null}
   </>;
 }

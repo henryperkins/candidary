@@ -5,6 +5,7 @@ import { buildExportManifest, buildMediaCsv } from '../../worker/export/csv';
 import { resolveFrozenAlbumOrder } from '../../worker/export/album-order';
 import { partitionExportSnapshot } from '../../worker/export/partition';
 import { buildExportZip, buildExportZipStream, exportPath } from '../../worker/export/zip-stream';
+import { exportPartDeliveryName, exportPartName, exportPathWidth } from '../../worker/export/paths';
 
 const media = {
   id: 'media-a', eventId: 'event-a', uploaderSessionId: 'session-a',
@@ -58,6 +59,22 @@ describe('export metadata', () => {
     expect(exportPath({ ...media, id: 'media-b' }, 1)).toBe('photos/002-maya-laughing.png');
   });
 
+  it('numbers archives across the whole run and widens only when needed', () => {
+    expect(exportPathWidth(3)).toBe(3);
+    expect(exportPathWidth(999)).toBe(3);
+    expect(exportPathWidth(10_000)).toBe(5);
+    expect(exportPath(media, 9_999, exportPathWidth(10_000))).toBe('photos/10000-maya-laughing.png');
+  });
+
+  it('keeps the R2 object key stable while the delivered name is self-descriptive', () => {
+    expect(exportPartName(3)).toBe('photos-003.zip');
+    expect(exportPartDeliveryName('2026-09-19', 'Maya & Theo', 3, 51))
+      .toBe('candidary-2026-09-19-maya-theo-photos-003-of-051.zip');
+    // Part counts beyond three digits widen both sides of the -of- pair together.
+    expect(exportPartDeliveryName('2026-09-19', 'event', 12, 1024))
+      .toBe('candidary-2026-09-19-event-photos-0012-of-1024.zip');
+  });
+
   it('creates a readable archive with originals and media.csv', () => {
     const archive = unzipSync(buildExportZip([
       { media, bytes: new Uint8Array([1, 2, 3]) },
@@ -81,6 +98,14 @@ describe('export metadata', () => {
     expect(strFromU8(archive['media.csv']!)).toContain('media-a');
   });
 
+  it('numbers streamed archives from a run-wide starting offset', async () => {
+    const stream = buildExportZipStream([
+      { media: { ...media, id: 'media-c' }, body: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([4])); controller.close(); } }) },
+    ], { startIndex: 2, width: 3 });
+    const archive = unzipSync(new Uint8Array(await new Response(stream).arrayBuffer()));
+    expect(Object.keys(archive)).toEqual(['photos/003-maya-laughing.png', 'media.csv']);
+  });
+
   it('partitions source payload deterministically and describes every original in one manifest', () => {
     const items = [
       { ...media, id: 'media-a', byteSize: 60, publicationStatus: 'unpublished' as const },
@@ -97,9 +122,11 @@ describe('export metadata', () => {
       { number: 1, ids: ['media-a', 'media-b'], bytes: 100 },
       { number: 2, ids: ['media-c'], bytes: 70 },
     ]);
-    const manifest = buildExportManifest(parts);
-    expect(manifest).toContain('part_number,archive_name,archive_path,media_id');
-    expect(manifest).toContain('1,photos-001.zip,photos/001-maya-laughing.png,media-a');
+    const manifest = buildExportManifest(parts, 3);
+    expect(manifest).toContain('part_number,archive_name,archive_index,archive_path,media_id');
+    expect(manifest).toContain('1,photos-001.zip,1,photos/001-maya-laughing.png,media-a');
+    // The second part continues the run-wide numbering instead of restarting at 1.
+    expect(manifest).toContain('2,photos-002.zip,3,photos/003-maya-laughing.png,media-c');
     expect(manifest).toContain('unpublished');
     expect(manifest).toContain('hidden');
   });
