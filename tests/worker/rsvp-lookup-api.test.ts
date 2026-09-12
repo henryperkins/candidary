@@ -53,7 +53,12 @@ function household(access: Access, cookie: string) {
 }
 
 async function ready(name = 'Maya & Theo') {
-  const access = await eventAccess(name);
+  const fixtureNow = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const access = await eventAccess(name, true, {
+    eventDate: new Date(fixtureNow + 28 * dayMs).toISOString().slice(0, 10),
+    rsvpDeadlineDate: new Date(fixtureNow + 14 * dayMs).toISOString().slice(0, 10),
+  });
   await importRoster(access, ROSTER);
   await openRsvp(access);
   return access;

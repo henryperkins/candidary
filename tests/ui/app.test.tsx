@@ -2318,12 +2318,16 @@ describe('canonical Manager location ownership', () => {
 
     await router.navigate(-1);
     await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(galleryMode('Library'))
+      .toHaveAttribute('aria-pressed', 'true'));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     const staleRestoration = frames.shift();
     expect(staleRestoration).toBeTypeOf('function');
     await router.navigate(1);
     await waitFor(() => expect(router.state.location.search)
       .toBe('?section=gallery&mode=guest-gallery'));
+    await waitFor(() => expect(galleryMode('Guest gallery'))
+      .toHaveAttribute('aria-pressed', 'true'));
     act(() => { staleRestoration?.(0); });
     expect(scrollTo).not.toHaveBeenCalled();
   });
@@ -6296,7 +6300,7 @@ describe('manager experience', () => {
     const trashed = {
       ...row,
       deletedAt: '2026-08-28T01:00:00.000Z',
-      restoreUntil: '2026-09-01T01:00:00.000Z',
+      restoreUntil: '2099-10-19T00:00:00.000Z',
     };
     let releaseRestore!: (response: Response) => void;
     const restore = new Promise<Response>((resolve) => { releaseRestore = resolve; });
@@ -8726,6 +8730,7 @@ describe('host account attachment and recovery', () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/host/register'));
     expect(new URLSearchParams(router.state.location.search).get('pending')).toBe('1');
+    await screen.findByRole('heading', { level: 1, name: 'Save this event to your email' });
     const resend = screen.getByRole('button', { name: 'Send another code' });
     await waitFor(() => expect(resend).toBeEnabled());
     await user.click(resend);
@@ -8748,6 +8753,7 @@ describe('host account attachment and recovery', () => {
 
     await registerFromCreate(user);
     await waitFor(() => expect(router.state.location.pathname).toBe('/host/register'));
+    await screen.findByRole('heading', { level: 1, name: 'Save this event to your email' });
     const started = JSON.parse(localStorage.getItem('candidary.pending-registration.v1')!) as {
       emailDigest: string;
       expiresAt: string;

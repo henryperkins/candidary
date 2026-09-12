@@ -586,12 +586,17 @@ export async function applySettings(
 // all assume intake is running, so this opens it early the way a host would
 // rather than by writing to the database behind the route that owns the
 // decision.
-export async function eventAccess(name = 'Maya & Theo', openPhotosEarly = true) {
+export async function eventAccess(
+  name = 'Maya & Theo',
+  openPhotosEarly = true,
+  schedule: { eventDate?: string; rsvpDeadlineDate?: string } = {},
+) {
   const created = await createApp().request('/api/events', {
     method: 'POST', headers: { 'content-type': 'application/json', origin },
     body: JSON.stringify({
-      name, eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
-      eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+      name, eventDate: schedule.eventDate ?? '2026-09-19', welcomeMessage: 'Welcome.',
+      eventTimezone: 'America/Chicago',
+      rsvpDeadlineDate: schedule.rsvpDeadlineDate ?? '2026-09-05',
     }),
   }, testEnv);
   const body = await created.json<any>();

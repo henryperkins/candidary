@@ -221,6 +221,19 @@ async function lookupHousehold(access: Access, firstName: string) {
 
 beforeEach(resetDatabase);
 
+function dateAfter(days: number): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function dateStableEventAccess() {
+  return eventAccess('Maya & Theo', true, {
+    eventDate: dateAfter(28),
+    rsvpDeadlineDate: dateAfter(14),
+  });
+}
+
 describe('manager household roster operations', () => {
   it('creates, reads, renames, and extends an unresponded household with stable wire shapes', async () => {
     const access = await eventAccess();
@@ -578,7 +591,7 @@ describe('manager response correction and conflicts', () => {
   });
 
   it('never silently overwrites when a household and host correct the same version', async () => {
-    const access = await eventAccess();
+    const access = await dateStableEventAccess();
     await importRoster(access, [
       'household_key,household_label,invitee_name,plus_one_slots',
       'race,Race household,Race Guest,1',
@@ -621,7 +634,7 @@ describe('manager response correction and conflicts', () => {
   });
 
   it('replays a successful household key after a later host correction without reapplying it', async () => {
-    const access = await eventAccess();
+    const access = await dateStableEventAccess();
     await importRoster(access, [
       'household_key,household_label,invitee_name,plus_one_slots',
       'host-replay,Host replay household,Replay Guest,0',
@@ -678,7 +691,7 @@ describe('manager response correction and conflicts', () => {
   });
 
   it('replays a canonical attending plus-one name after supported roster edits without overwriting them', async () => {
-    const access = await eventAccess();
+    const access = await dateStableEventAccess();
     await importRoster(access, [
       'household_key,household_label,invitee_name,plus_one_slots',
       'roster-replay,Roster replay household,Original Guest,2',
@@ -928,7 +941,7 @@ describe('manager summary, filters, and pagination', () => {
 
 describe('manager archive and CSV export', () => {
   it('archives without deleting, advances versions, and revokes household sessions', async () => {
-    const access = await eventAccess();
+    const access = await dateStableEventAccess();
     await importRoster(access, [
       'household_key,household_label,invitee_name,plus_one_slots',
       'archive,Archive household,Archive Guest,0',

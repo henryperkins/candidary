@@ -6,11 +6,12 @@ bundle, detached release worktree, staging-conformance ceremony, or second deplo
 
 ## Routine change
 
-1. Open a pull request.
-2. GitHub runs the six required checks in `.github/workflows/ci.yml`:
-   `Quality`, `Unit and UI`, `Worker`, `Build`, `Smoke`, and `Migration safety`.
-   `Build` creates the artifact once; `Smoke` downloads that artifact and serves it without rebuilding.
-3. Merge after the required checks pass.
+1. Install the pinned dependencies with `npm ci`. Install Chromium with
+   `npx playwright install chromium` when it is not already available locally.
+2. From a clean, committed feature branch, fetch a fresh `origin/main`, then run
+   `npm run ci:local -- --base origin/main --head <full-feature-HEAD-SHA>`.
+3. Record the exact base/head SHAs and all six terminal results on the pull request: `Quality`,
+   `Unit and UI`, `Worker`, `Build`, `Smoke`, and `Migration safety`. Merge only the head that passed.
 4. Cloudflare Workers Builds runs the production build command once and deploys the generated
    `dist/candidary/wrangler.json` artifact.
 5. Confirm the deployed version tag equals the merged commit and perform a lightweight live check.
@@ -22,8 +23,11 @@ preview first, then proves the frozen production Worker, drains the old daily Cr
 exports, atomically closes legacy admission, deploys one new exact-SHA Worker version and all three
 Workflow implementations together, and only then opens v2 admission once.
 
-The GitHub workflow is pull-request-only. Merging does not rerun its six jobs or create a duplicate
-post-merge build; the Cloudflare `main` trigger owns the one production build and deployment.
+These six local lanes are the documented release gate. GitHub currently has no required-status rules,
+and permanent Actions billing lock means Actions are not part of routine release evidence. The
+manual-only `.github/workflows/ci.yml` remains an optional equivalent if Actions becomes available.
+Merging does not create a duplicate CI build; the Cloudflare `main` trigger owns the one production
+build and deployment.
 
 The local equivalent is:
 
@@ -118,26 +122,28 @@ node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('b
 The preview config deliberately has no `EMAIL` binding and an empty Cron list. `EmailService` returns
 `E_DISABLED` in that environment rather than attempting delivery.
 
-## Required CI and non-blocking coverage
+## Required local CI and non-blocking coverage
 
-The pull-request checks are deliberately bounded:
+`npm run ci:local` reports these six deliberately bounded lanes and exits nonzero if any required
+command fails:
 
 - `Quality`: production dependency audit, binding drift, E2E TypeScript, and lint.
 - `Unit and UI`: the jsdom unit/UI suite.
 - `Worker`: the workerd integration suite.
 - `Build`: TypeScript plus one Vite build, PWA artifact verification, and a Wrangler dry run.
-- `Smoke`: one browser check against the downloaded build artifact.
-- `Migration safety`: exits after change detection for ordinary changes. It installs dependencies and
-  creates a fresh local D1 only when migrations, `wrangler.jsonc`, or the migration verifier changes.
+- `Smoke`: one browser check against that same build artifact; it runs only after `Build` passes.
+- `Migration safety`: exits after change detection for ordinary changes. It creates a fresh local D1
+  only when migrations, `wrangler.jsonc`, or the migration verifier changes.
 
-The full Playwright matrix runs nightly and on manual dispatch through
-`.github/workflows/full-e2e.yml`. It remains available locally as `npm run test:e2e`, but it does not
-block a simple source or CSS change.
+The runner does not install dependencies, deploy, retry failures, or manufacture evidence. It rejects
+tracked edits and a mismatched head, and invalidates results if tracked files or HEAD change while it
+runs. The full Playwright matrix remains available locally as `npm run test:e2e` and by optional
+manual dispatch through `.github/workflows/full-e2e.yml`; it is local/manual, non-blocking coverage.
 
 ## Database migrations
 
 An ordinary release with no schema change never runs a D1 migration command. When a pull request
-changes `migrations/`, the required migration-safety job applies the complete checked-in sequence to a
+changes `migrations/`, the local Migration safety lane applies the complete checked-in sequence to a
 disposable local D1 and checks its terminal invariants. Cloudflare Workers Builds does **not** apply
 remote D1 migrations; a successful automatic build is not schema provisioning.
 
@@ -151,7 +157,7 @@ schema:
 5. Capture the current production Worker version, inspect the production pending ledger, provision
    the independently generated production album-share pair, apply the additive production migrations,
    and verify the ledger is empty. The old Worker must remain compatible with these additions.
-6. Recheck the immutable PR head and hosted gates, then merge so the connected `main` build performs
+6. Recheck the immutable PR head and recorded local lanes, then merge so the connected `main` build performs
    the one production code deployment.
 
 For the first 0020-aware release, replace step 4 with the preview cutover below. Step 6 does not
@@ -516,5 +522,6 @@ open and Cron restoration. If the row is already open, preserve it: deploy only
 applicable version, Workflow, and daily-Cron evidence.
 
 Do not manufacture local evidence to justify a rollback or a deployment. The authoritative facts are
-the merged Git commit, required GitHub checks, Cloudflare build result, deployed version/tag, remote
+the merged Git commit, recorded six-lane local results for that exact head, Cloudflare build result,
+deployed version/tag, remote
 migration ledger when relevant, and the observed live response.
