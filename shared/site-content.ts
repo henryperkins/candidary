@@ -19,7 +19,7 @@ export interface SiteFaqEntry {
   readonly answer: string;
 }
 
-export interface SiteCapability {
+export interface SiteJourneyStep {
   readonly title: string;
   readonly body: string;
 }
@@ -33,44 +33,76 @@ export interface SiteLegalPage {
 export const SITE_NAME = 'Candidary';
 export const SITE_ORIGIN = 'https://candidary.app';
 export const SITE_BLURB =
-  'A private photo drop for weddings and large events. Guests need no account, no app, and no sign-up.';
+  'One private QR for guest RSVP and original photo delivery at weddings and large events—no app or guest account.';
 
 export const LANDING_HERO = {
-  label: 'Private event albums',
+  label: 'For weddings & private events',
   // Two halves rather than one sentence: the page breaks the line between them,
   // and a markdown heading joins them back with a space.
   headline: ['Gather the moments', 'you didn’t see.'],
-  lede: 'Create one private place for your guests to add photos, then choose what appears in the shared gallery.',
+  lede: 'One private QR takes guests from RSVP to photo delivery—no app or guest account. Every original reaches you privately; you choose what gets shared.',
 } as const;
 
 export const LANDING_WORKFLOW = {
-  label: 'A shared point of view',
-  title: 'One place. Every perspective.',
+  label: 'How Candidary works',
+  title: 'One QR. Three moments.',
 } as const;
 
-/**
- * Three capabilities rather than three chronological steps: what the product
- * refuses to ask of a guest, what it refuses to do to a photograph, and who
- * decides what becomes public.
- */
-export const LANDING_CAPABILITIES = [
-  {
-    title: 'No app, no account',
-    body: 'Guests scan the QR code, type one name, and send. Nothing to install, nothing to sign up for.',
+/** An illustrative event, kept separate from real guest or host state. */
+export const LANDING_DEMO = {
+  label: 'Interactive example',
+  controlsLabel: 'Explore an example event',
+  stages: [
+    { id: 'before', label: 'Before', title: 'The invitation.', caption: 'Guests scan the invitation and reply for their household.' },
+    { id: 'during', label: 'During', title: 'The celebration.', caption: 'The same QR opens photo delivery when your event begins.' },
+    { id: 'after', label: 'After', title: 'Yours to keep.', caption: 'Originals arrive privately. You choose what gets shared.' },
+  ],
+  invitation: {
+    label: 'You’re invited',
+    names: 'Maya & Theo',
+    occasion: 'A day with our favourite people.',
+    qrAlt: 'Example QR linking to this public demonstration',
+    qrCaption: 'One printed QR for your guests.',
   },
-  {
-    title: 'Untouched originals',
-    body: 'Photos arrive at full resolution, up to 20 MB each. Prepare a download whenever you want them all.',
+  before: {
+    role: 'Guest view · RSVP',
+    heading: 'Your household RSVP',
+    household: 'The Morgan household',
+    names: ['Alex Morgan', 'Sam Morgan'],
+    status: 'Attending',
+    receipt: 'RSVP saved',
   },
-  {
-    title: 'You choose what is shared',
-    body: 'Every photo is delivered privately to you first. Publish the ones you want in the shared gallery.',
+  during: {
+    role: 'Guest view · Photo delivery',
+    heading: 'The moments you caught.',
+    status: 'Delivered privately',
+    receipt: 'Your originals are with Maya & Theo.',
   },
-  // A tuple, not an array: the landing page pairs each capability with an icon by
-  // position, and a bare array would make every one of those reads possibly undefined.
-] as const satisfies readonly SiteCapability[];
+  after: {
+    role: 'Host view · Private originals',
+    heading: 'Every perspective, together.',
+    status: 'Only you can see these originals',
+    receipt: 'Sharing is your choice.',
+  },
+  footnote: 'Illustrative event. No responses or photos are sent.',
+} as const;
 
-export const LANDING_PRIVACY_NOTE = 'Private by design. No guest accounts required.';
+export const LANDING_JOURNEY = [
+  {
+    title: 'Invite and RSVP',
+    body: 'Add one private QR to the invitation. Guests find their household by the name on the invitation and reply without an account.',
+  },
+  {
+    title: 'Scan again and send',
+    body: 'At the event, the same QR opens photo delivery. Guests choose their original photos and send.',
+  },
+  {
+    title: 'Keep every perspective',
+    body: 'Everything arrives privately. Download the complete set, then publish only the photos you want guests to see.',
+  },
+  // A tuple, not an array: the landing page pairs each journey moment with an icon by
+  // position, and a bare array would make every one of those reads possibly undefined.
+] as const satisfies readonly SiteJourneyStep[];
 
 export const LANDING_RETENTION_NOTE =
   'Guest access ends 30 days after your event. Files delete at 120.';

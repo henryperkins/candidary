@@ -249,6 +249,29 @@ text over an image.
 - Status: textual state plus icon; never color alone. Upload states are selected, preparing, queued, sending, confirming, delivered, and needs attention. Publication states are unpublished, published, and hidden.
 - Motion: 160–220ms for disclosure/selection; disable nonessential transforms under `prefers-reduced-motion`.
 
+### Landing journey example
+
+The workflow carries one interactive editorial demonstration below the unchanged
+hero: `Before`, `During`, and `After` turn a paper scene beside a persistent printed
+invitation. Before and During are guest views using the same QR; After is explicitly
+the host's private originals, not a destination accessible through that guest QR.
+The example uses fictional names, no real forms or submissions, and a sample QR that
+links only to the public homepage demonstration. Its illustrative status stays visible.
+
+The paper turn and denim selection marker are the single signature motion on this
+surface. Selection is immediate application state, never gated by animation, and all
+nonessential transforms and transitions are disabled for reduced motion. Controls are
+native buttons with a pressed state, visible keyboard focus, and at least 44px targets.
+The scene reserves its height across stages; the existing three workflow steps remain
+readable below it without interacting. Paper shadows belong to the physical invitation
+and photo print metaphor only. Photographs reuse the bundled event assets, load lazily,
+and reserve intrinsic dimensions; no new animation or media dependency is introduced.
+
+The two supporting homepage photographs are 768px square WebP assets, shared between
+the hero prints and the example. Their combined download budget is 300 KB. Keep the
+approved square compositions and CSS crops intact when regenerating them; full-size
+source PNGs do not belong in the public asset payload.
+
 ### RSVP states
 
 RSVP is a themed guest surface and installs the same 45-property registry on
@@ -305,11 +328,11 @@ Use Lucide outline icons at 1.75px: `Upload`, `Image`, `Expand`, `X`, `MessageCi
 
 ### Allowed above-the-fold copy
 
-Public: `Candidary`, the eyebrow `Private event albums`, `Gather the moments you didn’t see.`, the approved supporting sentence, `Create your event`, `See how it works`, and the three capability labels (`No app, no account`, `Untouched originals`, `You choose what is shared`). The eyebrow is permitted because the headline states a feeling and nothing above it states the category; it is a `.section-label`, not a sentence, and it is the only line allowed to precede the headline.
+Public: `Candidary`, the audience line `For weddings & private events`, `Gather the moments you didn’t see.`, the approved one-QR supporting sentence, `Create your event`, `See how it works`, and the three journey labels (`Invite and RSVP`, `Scan again and send`, `Keep every perspective`). The audience line is permitted because the headline states a feeling and nothing above it names who the product serves; it is a `.section-label`, not a second sentence, and it is the only line allowed to precede the headline.
 
 The landing header carries three exits beside the brand: `How it works`, `Sign in`, and `Create an event` (shortened to `Create` below 761px, with the full name kept as the accessible name). `How it works` is wayfinding to an anchor that exists on the page, and it is the one exit that drops below 761px. `Sign in` holds its place at every width because a host returning on a phone reaches their events no other way.
 
-The returning-host entry point is also allowed, worded exactly `Already have an account?` and `Sign in to your events`, followed by `New here?` and `Create one`. It is permitted because a host who already has an account otherwise reaches their events only from a manager card or a typed URL; it sits below the primary actions as one sentence, and it clears the fold at 320 x 568 but not at 360 x 640 or 390 x 844.
+Optional account setup stays out of the first-impression hero. Returning hosts use `Sign in` in the header; account creation and its recovery purpose remain in the FAQ and footer.
 
 Guest: event name/date/welcome message, `Your name`, `Take a photo`, `Choose recent photos`, review/send state, and the terminal delivered receipt with its sole follow-on action `Leave a guestbook note`. Where a host’s welcome message runs past the hero clamp, the control that reveals the rest of it is also allowed, worded exactly `Read full welcome` and `Show less`. That single affordance is permitted because it belongs to the welcome message itself; no other disclosure control follows from it.
 

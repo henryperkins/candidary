@@ -120,6 +120,26 @@ test('the landing copy precedes the decorative hero image on phones', async ({ p
   }
 });
 
+test('the landing onboarding anchor clears the sticky header', async ({ page }) => {
+  for (const { width, height } of [
+    { width: 390, height: 844 },
+    { width: 1440, height: 1000 },
+  ]) {
+    await page.setViewportSize({ width, height });
+    await page.goto('/');
+    await page.addStyleTag({ content: 'html { scroll-behavior: auto !important; }' });
+    await page.getByRole('link', { name: 'See how it works', exact: true }).click();
+    await expect(page).toHaveURL(/#how-it-works$/u);
+
+    const header = await page.locator('.page-header').boundingBox();
+    const heading = await page.getByRole('heading', { name: 'One QR. Three moments.' }).boundingBox();
+    if (!header || !heading) throw new Error(`the header and onboarding heading must render at ${width}`);
+
+    expect(heading.y, `onboarding heading clears the sticky header at ${width}`)
+      .toBeGreaterThanOrEqual(header.y + header.height);
+  }
+});
+
 test('workflow steps keep a readable text column across the tablet band', async ({ page }) => {
   for (const width of TABLET_WIDTHS) {
     await page.setViewportSize({ width, height: 900 });
