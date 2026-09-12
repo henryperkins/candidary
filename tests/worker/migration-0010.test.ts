@@ -100,7 +100,12 @@ describe('migration 0010', () => {
 
   it('keeps a sentinel row on the pre-0010 lifecycle with its guest RSVP intact', async () => {
     await applyD1Migrations(env.DB, orderedMigrations);
-    const access = await eventAccess('Deploy gap', false);
+    const fixtureNow = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const access = await eventAccess('Deploy gap', false, {
+      eventDate: new Date(fixtureNow + 28 * dayMs).toISOString().slice(0, 10),
+      rsvpDeadlineDate: new Date(fixtureNow + 14 * dayMs).toISOString().slice(0, 10),
+    });
     await importRoster(
       access,
       'household_key,household_label,invitee_name,plus_one_slots\nperkins,Perkins household,Henry Perkins,0',

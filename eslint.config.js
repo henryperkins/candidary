@@ -2,7 +2,20 @@ import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'node_modules/**', '.wrangler/**', 'output/**', 'worker-configuration.d.ts'] },
+  {
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      '.wrangler/**',
+      'output/**',
+      'worker-configuration.d.ts',
+      '.worktrees/**',
+      '.superpowers/**',
+      '.grok/**',
+      '.impeccable/**',
+      '.playwright-mcp/**',
+    ],
+  },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {

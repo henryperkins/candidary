@@ -26,11 +26,16 @@ describe('routine release path', () => {
     expect(packageJson.scripts).not.toHaveProperty('release:migrate');
   });
 
-  it('passes the real source branch into hosted CI builds', () => {
-    expect(ciWorkflow).toContain('WORKERS_CI_BRANCH: ${{ github.head_ref }}');
+  it('keeps optional manual CI on the selected branch with full history and exact revisions', () => {
+    expect(ciWorkflow).toContain('workflow_dispatch:');
+    expect(ciWorkflow).toContain('WORKERS_CI_BRANCH: ${{ github.ref_name }}');
+    expect(ciWorkflow).toContain('fetch-depth: 0');
+    expect(ciWorkflow).toContain('CI_LOCAL_BASE: ${{ inputs.base }}');
+    expect(ciWorkflow).toContain('npm run ci:local -- --base "$CI_LOCAL_BASE" --head "$CI_LOCAL_HEAD"');
   });
 
-  it('does not rerun the pull-request suite after merge', () => {
+  it('does not run automatically for pull requests or pushes', () => {
+    expect(ciWorkflow).not.toMatch(/^\s*pull_request:/mu);
     expect(ciWorkflow).not.toMatch(/^\s*push:/mu);
   });
 

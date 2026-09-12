@@ -1,0 +1,111 @@
+.journey-demo {
+  --journey-ease: cubic-bezier(.16, 1, .3, 1);
+  --journey-ground: #f2eadf;
+  --journey-lift: 0 14px 34px rgb(74 36 21 / 13%);
+  margin: 0 0 32px;
+  min-width: 0;
+}
+
+.journey-demo ::selection { background: var(--denim-soft); color: var(--ink); }
+.journey-demo p { margin: 0; }
+.journey-demo__toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px 24px; }
+.journey-demo__example { display: flex; align-items: center; gap: 8px; color: var(--chestnut); font-size: .875rem; }
+.journey-demo__example svg { width: 18px; height: 18px; }
+.journey-demo__controls { position: relative; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; max-width: 360px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; isolation: isolate; }
+.journey-demo__selection { position: absolute; inset: 4px auto 4px 4px; width: calc((100% - 8px) / 3); background: var(--denim-soft); border-radius: 5px; z-index: -1; transform: translateX(0); transition: transform 480ms var(--journey-ease); }
+.journey-demo[data-moment='during'] .journey-demo__selection { transform: translateX(100%); }
+.journey-demo[data-moment='after'] .journey-demo__selection { transform: translateX(200%); }
+.journey-demo__controls button { min-width: 44px; min-height: 44px; padding: 10px 14px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: .9375rem; font-weight: 600; cursor: pointer; }
+.journey-demo__controls button[aria-pressed='true'], .journey-demo__controls button:hover { color: var(--chestnut); }
+.journey-demo__controls button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.journey-demo__caption { min-height: 150px; padding: 28px 0 24px; }
+.journey-demo__caption h3 { margin: 0 0 10px; font-size: clamp(1.6rem, 2.7vw, 2.25rem); line-height: 1.15; text-wrap: balance; }
+.journey-demo__caption p { max-width: 65ch; color: var(--muted); font-size: 1rem; }
+
+/* A single tabletop holds two pieces of paper. The invitation never changes identity;
+   only the adjacent guest/host example turns over. All three sheets reserve their full
+   intrinsic height, so choosing a moment cannot move the surrounding page. */
+.journey-demo__table { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; padding: 28px 14px 32px; background: var(--journey-ground); perspective: 1200px; }
+.journey-demo__invitation-wrap { min-width: 0; width: 100%; max-width: 350px; justify-self: center; }
+.journey-demo__invitation { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 88px; align-items: center; gap: 12px; padding: 22px 16px; background: var(--paper); border-radius: 2px; box-shadow: var(--journey-lift); transform: rotate(-3deg); transform-origin: 50% 70%; transition: transform 640ms var(--journey-ease), box-shadow 640ms var(--journey-ease); }
+.journey-demo__invitation-copy { min-width: 0; }
+.journey-demo__invite-label { color: var(--chestnut); font-size: .8125rem; }
+.journey-demo .journey-demo__names { margin: 8px 0; color: var(--chestnut); font-family: 'Manrope', sans-serif; font-size: clamp(1.6rem, 4.4vw, 2.5rem); line-height: 1.08; font-weight: 700; letter-spacing: -.035em; text-wrap: balance; }
+.journey-demo__occasion { max-width: 24ch; color: var(--muted); font-size: .8125rem; line-height: 1.45; }
+.journey-demo__qr { width: 88px; height: 88px; }
+.journey-demo .journey-demo__qr-caption { margin: 22px 0 0; color: var(--chestnut); font-size: .8125rem; line-height: 1.45; text-align: center; }
+.journey-demo[data-moment='during'] .journey-demo__invitation { transform: rotate(-1deg) translateY(-4px); }
+.journey-demo[data-moment='after'] .journey-demo__invitation { transform: rotate(-4deg) translateY(2px); }
+.journey-demo__bridge { display: grid; align-items: center; justify-items: center; min-width: 0; height: 56px; color: var(--denim); }
+.journey-demo__bridge svg { grid-area: 1 / 1; width: 26px; height: 26px; transition: opacity 320ms var(--journey-ease), transform 480ms var(--journey-ease); }
+.journey-demo__guest-connection { transform: rotate(90deg); }
+.journey-demo__host-boundary { opacity: 0; transform: scale(.7); }
+.journey-demo[data-moment='after'] .journey-demo__guest-connection { opacity: 0; transform: rotate(90deg) translateX(8px); }
+.journey-demo[data-moment='after'] .journey-demo__host-boundary { opacity: 1; transform: scale(1); color: var(--chestnut); }
+.journey-demo__scenes { display: grid; min-width: 0; width: 100%; max-width: 440px; justify-self: center; perspective: 1000px; }
+.journey-demo__sheet { grid-area: 1 / 1; display: flex; flex-direction: column; align-self: stretch; min-width: 0; padding: 22px 18px 20px; border-radius: 2px; background: var(--paper); box-shadow: var(--journey-lift); transform-origin: 5% 50%; transition: opacity 300ms var(--journey-ease), transform 640ms var(--journey-ease), visibility 640ms; }
+.journey-demo__sheet[aria-hidden='true'] { opacity: 0; visibility: hidden; pointer-events: none; transform: translateX(12px) rotateY(-12deg) rotate(2deg); }
+.journey-demo__sheet[aria-hidden='false'] { opacity: 1; visibility: visible; transform: translateX(0) rotateY(0deg) rotate(1deg); z-index: 1; }
+.journey-demo__sheet--during[aria-hidden='false'] { transform: rotate(-1.5deg); }
+.journey-demo__sheet--after[aria-hidden='false'] { transform: rotate(.75deg); }
+.journey-demo__role { display: flex; align-items: center; gap: 7px; color: var(--chestnut); font-size: .75rem; line-height: 1.4; }
+.journey-demo__role svg { width: 15px; height: 15px; flex: 0 0 15px; }
+.journey-demo__sheet h4 { margin: 18px 0 22px; color: var(--ink); font-family: 'Manrope', sans-serif; font-size: clamp(1.35rem, 2.3vw, 1.75rem); font-weight: 700; line-height: 1.14; letter-spacing: -.035em; text-wrap: balance; }
+.journey-demo__household { flex: 1; }
+.journey-demo__household > p { margin-bottom: 8px; color: var(--muted); font-size: .8125rem; }
+.journey-demo__person { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 7px 12px; padding: 18px 0; border-top: 1px solid var(--border); color: var(--ink); font-size: .9375rem; }
+.journey-demo__person > span:last-child { display: flex; align-items: center; gap: 4px; color: var(--completion-ink); font-size: .75rem; }
+.journey-demo .journey-demo__receipt { display: flex; align-items: center; gap: 7px; margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--chestnut); font-size: .8125rem; line-height: 1.45; }
+.journey-demo__receipt svg { flex: 0 0 18px; width: 18px; height: 18px; color: var(--completion-ink); }
+.journey-demo__sheet--before .journey-demo__receipt { color: var(--completion-ink); }
+.journey-demo__delivered-prints { display: flex; align-items: center; justify-content: center; flex: 1; min-width: 0; padding: 4px 8px 14px; }
+.journey-demo__delivered-prints span { display: block; width: 57%; padding: 5px 5px 16px; background: var(--paper); box-shadow: 0 8px 20px rgb(74 36 21 / 16%); transform: translateY(6px) rotate(-7deg); transition: transform 760ms var(--journey-ease); }
+.journey-demo__delivered-prints span + span { margin-left: -14%; transform: translateY(-3px) rotate(7deg); }
+.journey-demo__delivered-prints img { width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; }
+.journey-demo__sheet--during[aria-hidden='true'] .journey-demo__delivered-prints span { transform: translateY(18px) rotate(-2deg); }
+.journey-demo__sheet--during[aria-hidden='true'] .journey-demo__delivered-prints span + span { transform: translateY(12px) rotate(2deg); }
+.journey-demo__delivery-status, .journey-demo__private-status { display: flex; align-items: center; gap: 7px; color: var(--completion-ink); font-size: .8125rem; line-height: 1.45; }
+.journey-demo__delivery-status svg, .journey-demo__private-status svg { width: 17px; height: 17px; flex: 0 0 17px; }
+.journey-demo__contact-sheet { display: grid; grid-template-columns: 1.15fr 1fr; grid-template-rows: repeat(2, minmax(0, 1fr)); min-width: 0; gap: 7px; margin: 0 0 20px; aspect-ratio: 1.5; }
+.journey-demo__contact-sheet img { min-width: 0; width: 100%; height: 100%; object-fit: cover; }
+.journey-demo__contact-sheet img:first-child { grid-row: 1 / 3; }
+.journey-demo__private-status { color: var(--chestnut); }
+.journey-demo__sheet--after .journey-demo__receipt { margin-top: auto; }
+.journey-demo .journey-demo__footnote { margin-top: 14px; color: var(--muted); font-size: .8125rem; line-height: 1.5; }
+
+/* The stacked illustration extends beyond a phone viewport. Keep its controls reachable
+   within the demo, below the 70px public header (which becomes 88px at 761px). */
+@media (width < 760px) {
+  .journey-demo__toolbar { position: sticky; top: 70px; z-index: 2; padding: 8px 0 12px; background: #f7f1e7; }
+}
+
+@media (min-width: 520px) {
+  .journey-demo__controls { width: 300px; }
+  .journey-demo__caption { min-height: 132px; }
+  .journey-demo__table { padding: 36px 28px 42px; }
+  .journey-demo__invitation { grid-template-columns: minmax(0, 1fr) 106px; padding: 26px 22px; }
+  .journey-demo__qr { width: 106px; height: 106px; }
+  .journey-demo__sheet { padding: 28px; }
+  .journey-demo__role { font-size: .8125rem; }
+}
+
+@media (min-width: 760px) {
+  .journey-demo__table { grid-template-columns: minmax(0, .85fr) 58px minmax(0, 1.15fr); padding: 44px 36px; }
+  .journey-demo__invitation { grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 26px; padding: 36px 24px 30px; text-align: center; }
+  .journey-demo__occasion { margin-inline: auto; }
+  .journey-demo__qr { width: 128px; height: 128px; }
+  .journey-demo__bridge { align-self: center; margin-top: -40px; }
+  .journey-demo__guest-connection { transform: rotate(0); }
+  .journey-demo[data-moment='after'] .journey-demo__guest-connection { transform: translateX(8px); }
+  .journey-demo__sheet { min-height: 395px; }
+}
+
+@media (min-width: 1100px) {
+  .journey-demo__table { grid-template-columns: minmax(0, .85fr) 90px minmax(0, 1.15fr); padding: 50px 8%; }
+  .journey-demo__invitation { padding: 36px 28px 30px; }
+  .journey-demo__sheet { min-height: 425px; padding: 32px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .journey-demo *, .journey-demo *::before, .journey-demo *::after { transition: none !important; animation: none !important; }
+}

@@ -239,14 +239,34 @@ describe('recover event manager page', () => {
 });
 
 describe('public Candidary experience', () => {
-  it('presents the approved value proposition and workflow', () => {
+  it('introduces hosts to the one-QR journey from RSVP through private photo retrieval', () => {
     render(<RouterProvider router={createAppRouter(['/'])} />);
+    expect(screen.getByText('For weddings & private events')).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Gather the moments you didn’t see.' })).toBeVisible();
+    expect(screen.getByText(/One private QR takes guests from RSVP to photo delivery/)).toBeVisible();
     expect(screen.getByRole('link', { name: 'Create your event' })).toHaveAttribute('href', '/create');
     // Scoped to the workflow list: the footer's own link groups are list items too.
-    const workflow = screen.getByRole('heading', { name: 'One place. Every perspective.' }).closest('section');
+    const workflow = screen.getByRole('heading', { name: 'One QR. Three moments.' }).closest('section');
     expect(within(workflow as HTMLElement).getAllByRole('listitem')).toHaveLength(3);
-    expect(within(workflow as HTMLElement).getByText('No app, no account')).toBeVisible();
+    expect(within(workflow as HTMLElement).getByText('Invite and RSVP')).toBeVisible();
+    expect(within(workflow as HTMLElement).getByText('Scan again and send')).toBeVisible();
+    expect(within(workflow as HTMLElement).getByText('Keep every perspective')).toBeVisible();
+  });
+
+  it('keeps optional account setup out of the first-impression hero', () => {
+    render(<RouterProvider router={createAppRouter(['/'])} />);
+    const hero = screen.getByRole('heading', { name: 'Gather the moments you didn’t see.' }).closest('section');
+
+    expect(within(hero as HTMLElement).queryByText(/Already have an account/)).not.toBeInTheDocument();
+    expect(within(hero as HTMLElement).queryByRole('link', { name: 'Create one' })).not.toBeInTheDocument();
+  });
+
+  it('does not repeat account reassurance after the journey already explains it', () => {
+    render(<RouterProvider router={createAppRouter(['/'])} />);
+    const workflow = screen.getByRole('heading', { name: 'One QR. Three moments.' }).closest('section');
+
+    expect(within(workflow as HTMLElement).queryByText('Private by design. No guest accounts required.'))
+      .not.toBeInTheDocument();
   });
 
   // Six disclosures, closed on arrival, each answering with a limit the product actually enforces.
@@ -2298,12 +2318,16 @@ describe('canonical Manager location ownership', () => {
 
     await router.navigate(-1);
     await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(galleryMode('Library'))
+      .toHaveAttribute('aria-pressed', 'true'));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     const staleRestoration = frames.shift();
     expect(staleRestoration).toBeTypeOf('function');
     await router.navigate(1);
     await waitFor(() => expect(router.state.location.search)
       .toBe('?section=gallery&mode=guest-gallery'));
+    await waitFor(() => expect(galleryMode('Guest gallery'))
+      .toHaveAttribute('aria-pressed', 'true'));
     act(() => { staleRestoration?.(0); });
     expect(scrollTo).not.toHaveBeenCalled();
   });
@@ -6276,7 +6300,7 @@ describe('manager experience', () => {
     const trashed = {
       ...row,
       deletedAt: '2026-08-28T01:00:00.000Z',
-      restoreUntil: '2026-09-01T01:00:00.000Z',
+      restoreUntil: '2099-10-19T00:00:00.000Z',
     };
     let releaseRestore!: (response: Response) => void;
     const restore = new Promise<Response>((resolve) => { releaseRestore = resolve; });
@@ -8706,6 +8730,7 @@ describe('host account attachment and recovery', () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/host/register'));
     expect(new URLSearchParams(router.state.location.search).get('pending')).toBe('1');
+    await screen.findByRole('heading', { level: 1, name: 'Save this event to your email' });
     const resend = screen.getByRole('button', { name: 'Send another code' });
     await waitFor(() => expect(resend).toBeEnabled());
     await user.click(resend);
@@ -8728,6 +8753,7 @@ describe('host account attachment and recovery', () => {
 
     await registerFromCreate(user);
     await waitFor(() => expect(router.state.location.pathname).toBe('/host/register'));
+    await screen.findByRole('heading', { level: 1, name: 'Save this event to your email' });
     const started = JSON.parse(localStorage.getItem('candidary.pending-registration.v1')!) as {
       emailDigest: string;
       expiresAt: string;

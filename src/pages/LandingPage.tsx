@@ -1,27 +1,27 @@
-import { ArrowRight, Check, ChevronDown, Eye, Image as ImageIcon, QrCode } from 'lucide-react';
+import { ArrowRight, ChevronDown, Download, Image as ImageIcon, QrCode } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 import {
-  LANDING_CAPABILITIES,
   LANDING_FAQ,
   LANDING_HERO,
-  LANDING_PRIVACY_NOTE,
+  LANDING_JOURNEY,
   LANDING_QUESTIONS,
   LANDING_RETENTION_NOTE,
   LANDING_WORKFLOW,
   SITE_BLURB,
 } from '../../shared/site-content';
-import type { SiteCapability } from '../../shared/site-content';
+import type { SiteJourneyStep } from '../../shared/site-content';
 import { Brand, PageHeader } from '../components/Brand';
+import { LandingJourneyDemo } from '../components/LandingJourneyDemo';
 
 // The icons stay on this side of the wall: `shared/site-content.ts` is imported by the
-// Worker, which renders the same three capabilities as markdown and has no React. The
-// pairing is positional and written out, so the row an icon belongs to is readable here.
-const CAPABILITIES: readonly (readonly [LucideIcon, SiteCapability])[] = [
-  [QrCode, LANDING_CAPABILITIES[0]],
-  [ImageIcon, LANDING_CAPABILITIES[1]],
-  [Eye, LANDING_CAPABILITIES[2]],
+// Worker, which renders the same three journey moments as markdown and has no React. The
+// pairing is positional and written out, so the moment an icon belongs to is readable here.
+const JOURNEY: readonly (readonly [LucideIcon, SiteJourneyStep])[] = [
+  [QrCode, LANDING_JOURNEY[0]],
+  [ImageIcon, LANDING_JOURNEY[1]],
+  [Download, LANDING_JOURNEY[2]],
 ];
 
 export function LandingPage() {
@@ -58,20 +58,6 @@ export function LandingPage() {
             <Link className="button button--primary" to="/create">Create your event <ArrowRight aria-hidden="true" /></Link>
             <a className="button button--quiet" href="#how-it-works">See how it works</a>
           </div>
-          {/* Both account doors, under a hairline, as one answering sentence rather than a
-              two-paragraph slab competing with the CTA for the same eye. The same three facts:
-              a returning host signs in, a new one can register, and creating an event needs
-              neither. The 44px floor survives as vertical padding on the inline links, which grows
-              the hit box without breaking the line. The design system lists account copy as banned
-              *above the fold* in the header chrome — this sits below the CTA, sized as answering
-              copy, not navigation surface. */}
-          <div className="hero__account">
-            <p>
-              Already have an account? <Link className="text-link" to="/host/login">Sign in to your events</Link>.
-              {' '}New here? <Link className="text-link" to="/host/register">Create one</Link> to find them
-              again — creating an event never needs one.
-            </p>
-          </div>
         </div>
         {/* The right column is a pile, not a picture. What the product actually returns to a host is
             the photographs other people took, so the arch — the brand's own shape, kept as the
@@ -79,21 +65,21 @@ export function LandingPage() {
         <figure className="hero__image">
           <img src="/assets/candidary-hero.png" alt="Friends celebrating together at a candlelit outdoor table" />
           <span className="hero__print hero__print--a">
-            <img src="/assets/photos/sq-03.png" alt="A guest tossing petals, photographed by someone else at the same moment" />
+            <img src="/assets/photos/sq-03.webp" alt="Guests raising glasses around a candlelit outdoor dinner table" width="768" height="768" />
           </span>
           <span className="hero__print hero__print--b">
-            <img src="/assets/photos/sq-06.png" alt="A second guest’s photograph of the same celebration" />
+            <img src="/assets/photos/sq-06.webp" alt="Two guests laughing together on the dance floor" width="768" height="768" />
           </span>
         </figure>
       </section>
-      {/* Three capabilities rather than three chronological steps: what the product refuses to ask
-          of a guest, what it refuses to do to a photograph, and who decides what becomes public. */}
+      {/* The landing page onboards by chronology: the printed QR before the event, the same QR on
+          the day, and the private originals that remain with the host afterward. */}
       <section className="workflow" id="how-it-works" aria-labelledby="workflow-title">
         <div><p className="section-label">{LANDING_WORKFLOW.label}</p><h2 id="workflow-title">{LANDING_WORKFLOW.title}</h2></div>
+        <LandingJourneyDemo />
         <ol>
-          {CAPABILITIES.map(([Icon, { title, body }]) => <li key={title}><span><Icon aria-hidden="true" /></span><div><strong>{title}</strong><p>{body}</p></div></li>)}
+          {JOURNEY.map(([Icon, { title, body }]) => <li key={title}><span><Icon aria-hidden="true" /></span><div><strong>{title}</strong><p>{body}</p></div></li>)}
         </ol>
-        <p className="privacy-note"><Check aria-hidden="true" /> {LANDING_PRIVACY_NOTE}</p>
       </section>
       {/* One column at every width: an accordion in two columns makes the reader track which panel
           moved. Native `<details>`, so the disclosures work before any script does. */}

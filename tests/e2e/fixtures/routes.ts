@@ -1055,6 +1055,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     ? albumOptions.entries.map((entry) => ({ ...entry }))
     : [...pickedMediaIds].map((mediaId) => ({ kind: 'photo', mediaId }));
   let albumRevision = 1;
+  let albumPickGeneration = 0;
   let albumSaved = albumOptions.saved ?? true;
   let albumTitle = albumOptions.title ?? 'Album';
   let albumDescription = albumOptions.description ?? '';
@@ -1109,6 +1110,8 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     return {
       revision: albumRevision,
       saved: albumSaved,
+      pickGeneration: albumPickGeneration,
+      reconciliation: albumSaved ? null : { kind: 'initialize' },
       title: albumTitle,
       description: albumDescription,
       coverMediaId: coverIsPicked ? albumCoverMediaId : null,
@@ -1481,7 +1484,9 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       });
     }
 
-    const nextStatus = payload.action === 'publish' ? 'published' : 'hidden';
+    const nextStatus: ManagerGalleryMediaView['publicationStatus'] = payload.action === 'publish'
+      ? 'published'
+      : 'hidden';
     const media = { ...current, publicationStatus: nextStatus };
     galleryMedia = galleryMedia.map((item) => item.id === mediaId ? media : item);
     for (const pageFixture of Object.values(options.mediaPages)) {
@@ -1907,6 +1912,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       }
       if (changed.length > 0) {
         albumRevision += 1;
+        albumPickGeneration += 1;
         if (!payload.picked) {
           const changedIds = new Set(changed.map(({ id }) => id));
           albumEntries = albumEntries.filter((entry) => (
@@ -1925,6 +1931,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       const payload = route.request().postDataJSON() as { start: 'from-picks' | 'empty' };
       const cleared = payload.start === 'empty' ? [...pickedMediaIds] : [];
       if (payload.start === 'empty') {
+        if (pickedMediaIds.size > 0) albumPickGeneration += 1;
         pickedMediaIds.clear();
         galleryMedia = galleryMedia.map((photo) => ({ ...photo, isFavorite: false }));
         albumEntries = [];
@@ -2040,7 +2047,9 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       action: 'publish' | 'hide';
       expectedStatus?: ManagerGalleryMediaView['publicationStatus'];
     };
-    const nextStatus = payload.action === 'publish' ? 'published' : 'hidden';
+    const nextStatus: ManagerGalleryMediaView['publicationStatus'] = payload.action === 'publish'
+      ? 'published'
+      : 'hidden';
     const changed: string[] = [];
     for (const id of payload.ids) {
       const current = galleryMedia.find((item) => item.id === id);
@@ -2105,6 +2114,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
         if (albumCoverMediaId === mediaId) albumCoverMediaId = null;
       }
       albumRevision += 1;
+      albumPickGeneration += 1;
     }
     const media = { ...current, isFavorite: favorite };
     galleryMedia = galleryMedia.map((item) => item.id === mediaId ? media : item);

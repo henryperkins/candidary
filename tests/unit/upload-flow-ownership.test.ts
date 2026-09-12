@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 function source(path: string): string {
@@ -11,13 +12,38 @@ function callCount(contents: string, callee: string): number {
   return [...contents.matchAll(new RegExp(`\\b${callee}\\s*\\(`, 'gu'))].length;
 }
 
+function hasRuntimeImport(contents: string, moduleSuffix: string): boolean {
+  const parsed = ts.createSourceFile('ownership-check.tsx', contents, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  return parsed.statements.some((statement) => {
+    if (!ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)
+      || !statement.moduleSpecifier.text.endsWith(moduleSuffix)) return false;
+    const clause = statement.importClause;
+    if (clause === undefined) return true;
+    if (clause.isTypeOnly) return false;
+    if (clause.name !== undefined) return true;
+    const bindings = clause.namedBindings;
+    if (bindings === undefined) return false;
+    if (ts.isNamespaceImport(bindings)) return true;
+    return bindings.elements.some((specifier) => !specifier.isTypeOnly);
+  });
+}
+
 describe('upload flow ownership', () => {
   it('keeps queue, transport, controller, and queue state out of the controlled renderer', () => {
     // Mutation caught: moving queue ownership back into the shared visual component.
     const renderer = source('src/features/uploads/GuestUploadFlow.tsx');
 
     expect(renderer).not.toMatch(/from ['"].*browser-upload-transport['"]/u);
-    expect(renderer).not.toMatch(/from ['"].*upload-queue['"]/u);
+    expect(hasRuntimeImport(renderer, 'upload-queue')).toBe(false);
+    expect(hasRuntimeImport(`import {
+      UploadQueueItem,
+      UploadQueueState,
+    } from './upload-queue';`, 'upload-queue')).toBe(true);
+    expect(hasRuntimeImport(`import type {
+      UploadQueueItem,
+      UploadQueueState,
+    } from './upload-queue';`, 'upload-queue')).toBe(false);
     expect(renderer).not.toContain('AbortController');
     expect(renderer).not.toMatch(/useState\s*<\s*UploadQueueItem/u);
     expect(renderer).not.toContain('runUploadQueue');
@@ -28,12 +54,14 @@ describe('upload flow ownership', () => {
     expect(renderer).toContain('session.cancel');
   });
 
-  it('mounts the guest session owner only inside the photos-primary branch', () => {
+  it('mounts the guest session owner only inside the upload or terminal-receipt branch', () => {
     // Mutation caught: keeping a live queue/controller above the lifecycle phase boundary.
     const page = source('src/pages/EventPage.tsx');
 
     expect(page).toMatch(/function GuestPhotoUpload[\s\S]*useGuestUploadSession/u);
-    expect(page).toMatch(/event\.phase === 'photos-primary' && <GuestPhotoUpload/u);
+    expect(page).toMatch(
+      /\(event\.phase === 'photos-primary' \|\| \(terminal && event\.phase === 'waiting'\)\) && <GuestPhotoUpload/u,
+    );
     expect(page).not.toContain('session={uploadSession}');
   });
 

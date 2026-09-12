@@ -5768,8 +5768,10 @@ describe('album review regressions', () => {
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
 
     start.resolve();
-    expect(await screen.findByRole('button', { name: 'Undo' })).toBeVisible();
-    expect(screen.getByText('The Album starts empty. The Album picks were cleared.')).toBeVisible();
+    const undo = await screen.findByRole('button', { name: 'Undo' });
+    expect(undo).toBeVisible();
+    expect(within(undo.closest('.album-undo__bar')!)
+      .getByText('The Album starts empty. The Album picks were cleared.')).toBeVisible();
   });
 
   it('locks every visible offer-producing Album action while Undo is running', async () => {

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { MAX_EVENT_MEDIA } from '../../shared/constants';
 import {
   CREATE_INTRO,
+  LANDING_DEMO,
   LANDING_HERO,
   LANDING_QUESTIONS,
   LEGAL_PENDING_NOTE,
@@ -68,6 +69,15 @@ describe('markdown content negotiation', () => {
     expect(body).toContain(SITE_BLURB);
     expect(body).toContain(`## ${LANDING_HERO.headline.join(' ')}`);
     expect(body).toContain(LANDING_HERO.lede);
+    expect(body).toContain('## One QR. Three moments.');
+    for (const { label, caption } of LANDING_DEMO.stages) {
+      expect(body).toContain(`- **${label}** — ${caption}`);
+    }
+    expect(body).toContain(LANDING_DEMO.footnote);
+    expect(body).toContain('- **Invite and RSVP**');
+    expect(body).toContain('- **Scan again and send**');
+    expect(body).toContain('- **Keep every perspective**');
+    expect(body).not.toContain('Private by design. No guest accounts required.');
     for (const { question, answer } of LANDING_QUESTIONS) {
       expect(body).toContain(`### ${question}`);
       expect(body).toContain(answer);

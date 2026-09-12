@@ -80,7 +80,12 @@ async function householdSession(access: Access, firstName: string) {
 }
 
 async function rsvpReady(openPhotosEarly = true) {
-  const access = await eventAccess('Maya & Theo', openPhotosEarly);
+  const fixtureNow = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const access = await eventAccess('Maya & Theo', openPhotosEarly, {
+    eventDate: new Date(fixtureNow + 28 * dayMs).toISOString().slice(0, 10),
+    rsvpDeadlineDate: new Date(fixtureNow + 14 * dayMs).toISOString().slice(0, 10),
+  });
   await importRoster(access, ROSTER);
   await openRsvp(access);
   return access;

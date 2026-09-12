@@ -42,14 +42,15 @@
     "cf-typegen": "wrangler types",
     "verify:bindings": "wrangler types --check",
     "verify:fresh-d1": "node --experimental-strip-types scripts/verify-fresh-d1.ts",
-    "ci:migrations": "node --experimental-strip-types scripts/ci-migration-check.ts"
+    "ci:migrations": "node --experimental-strip-types scripts/ci-migration-check.ts",
+    "ci:local": "node --experimental-strip-types scripts/ci-local.ts"
   },
   "dependencies": {
     "@fontsource/dm-sans": "5.3.0",
     "@fontsource/manrope": "5.3.0",
     "aws4fetch": "1.0.20",
     "fflate": "0.8.3",
-    "hono": "4.13.2",
+    "hono": "4.13.5",
     "lucide-react": "1.25.0",
     "qrcode": "1.5.4",
     "react": "19.2.8",
