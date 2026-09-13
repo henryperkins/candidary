@@ -365,7 +365,7 @@ async function clickExposedCenter(locator: Locator, state: string) {
 }
 
 async function exposeChooserDestinations(page: Page, chooser: Locator, state: string) {
-  const heading = chooser.getByRole('heading', { name: 'Save / Share photos' });
+  const heading = chooser.getByRole('heading', { name: /^(Save \/ Share photos|Save Album photos)$/u });
   const first = chooser.getByRole('button', { name: 'Prepare for this device' });
   const last = chooser.getByRole('button', { name: 'Prepare photo ZIP' });
   await exposeActionBetweenChrome(page, heading, `${state} heading`);
@@ -584,9 +584,10 @@ test('disabled selection capability preserves complete and Album legacy archives
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Album, 3$/u }).click();
   const albumCard = page.locator('.album-export');
-  await expect(albumCard.getByRole('button', { name: 'Save / Share photos' })).toBeDisabled();
-  await expect(albumCard).toContainText('This is the Album only');
-  const albumLegacy = albumCard.getByRole('button', { name: 'Download album photos' });
+  await expect(albumCard.getByRole('button', { name: 'Save / Share photos' })).toHaveCount(0);
+  await expect(albumCard).not.toContainText('New photo exports are paused.');
+  await expect(albumCard).toContainText('Current Album: 3 photos.');
+  const albumLegacy = albumCard.getByRole('button', { name: 'Prepare Album ZIP' });
   await expect(albumLegacy).toBeDisabled();
 
   await page.evaluate(async (endpoint) => {
@@ -599,7 +600,7 @@ test('disabled selection capability preserves complete and Album legacy archives
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Album, 3$/u }).click();
   const readyAlbumLegacy = page.locator('.album-export')
-    .getByRole('button', { name: 'Download album photos' });
+    .getByRole('button', { name: 'Prepare Album ZIP' });
   await expect(readyAlbumLegacy).toBeEnabled();
   await readyAlbumLegacy.click();
   await expect.poll(() => legacyCreates().length).toBe(2);

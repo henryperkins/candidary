@@ -447,12 +447,19 @@ describe('Manager Guestbook export downloads', () => {
     }));
 
     expect(view.container.querySelector('.export-state__prepared'))
-      .toHaveTextContent(`Prepared November 1, 2026 at 1:30 AM CST · 2 photos · ${EXPORT_STATE_LABELS[state]}`);
+      .toHaveTextContent('Prepared November 1, 2026 at 1:30 AM CST');
     expect(view.container.querySelector('.export-state__prepared time'))
       .toHaveAttribute('dateTime', '2026-11-01T07:30:00.000Z');
-    expect(screen.getByRole('button', { name: 'Prepare current Album' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Prepare Album ZIP' })).toBeEnabled();
+    const current = screen.getByRole('group', { name: 'Current Album download' });
+    const prepared = screen.getByRole('group', { name: 'Prepared Album download' });
+    expect(current).toHaveTextContent('Current Album: 2 photos.');
+    expect(current.compareDocumentPosition(prepared) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Retry this prepared export' }) !== null).toBe(retry);
-    if (state === 'ready') expect(screen.getByRole('button', { name: 'Get download links' })).toBeEnabled();
+    if (state === 'ready') {
+      expect(screen.getByRole('button', { name: 'Show ZIP download' })).toBeEnabled();
+      expect(prepared).not.toHaveTextContent('Progress:');
+    }
   });
 
   it.each(['complete', 'album'] as const)('omits Retry for source-removed %s exports', (kind) => {
@@ -469,7 +476,7 @@ describe('Manager Guestbook export downloads', () => {
 
     expect(screen.queryByRole('button', { name: 'Retry this prepared export' })).toBeNull();
     expect(screen.getByRole('button', {
-      name: kind === 'complete' ? 'Prepare current collection' : 'Prepare current Album',
+      name: kind === 'complete' ? 'Prepare current collection' : 'Prepare Album ZIP',
     })).toBeEnabled();
   });
 
@@ -550,7 +557,7 @@ describe('Manager Guestbook export downloads', () => {
     expect(screen.getByText('Complete collection export is Queued. Prepare and retry actions will be available when it finishes.'))
       .toBeVisible();
     expect(screen.getByRole('button', { name: 'Retry this prepared export' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Prepare current Album' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Prepare Album ZIP' })).toBeDisabled();
   });
 
   it.each([
@@ -579,7 +586,7 @@ describe('Manager Guestbook export downloads', () => {
 
   it.each([
     ['complete', 'Prepare current collection', 'Deliver a photo before preparing the current collection.'],
-    ['album', 'Prepare current Album', 'Add a photo to the Album before preparing it.'],
+    ['album', 'Prepare Album ZIP', 'Add a photo to the Album before preparing it.'],
   ] as const)('locally disables a current export only for a trusted zero count', (kind, label, reason) => {
     const props = {
       ...CONTROL_CONTEXT,
@@ -598,7 +605,7 @@ describe('Manager Guestbook export downloads', () => {
 
   it.each([
     ['complete', 'Download all'],
-    ['album', 'Download album photos'],
+    ['album', 'Prepare Album ZIP'],
   ] as const)('uses the authoritative current source for the initial %s action', (kind, label) => {
     const callbacks = {
       onPrepare: async () => undefined,

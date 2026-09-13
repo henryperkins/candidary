@@ -348,7 +348,7 @@ test('manager album reflows at 200 and 400 percent zoom proxies', async ({ page 
       page.getByRole('button', { name: 'Stop Album link' }),
       page.getByRole('button', { name: 'Reveal Album link' }),
       page.getByRole('button', { name: 'Copy Album link' }),
-      page.getByRole('button', { name: 'Download album photos' }),
+      page.getByRole('button', { name: 'Prepare Album ZIP' }),
     ];
     for (const control of operableControls) {
       await control.scrollIntoViewIfNeeded();

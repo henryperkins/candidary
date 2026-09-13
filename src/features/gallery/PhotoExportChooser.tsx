@@ -28,22 +28,28 @@ export function usePhotoExportCapabilities(eventId: string) {
   return { capabilities, error, refresh };
 }
 
-export function PhotoExportEntryActions({ capabilities, error, onOpen, onResume, onCancel, onRetry, actionDock, recentJob }: {
+export function PhotoExportEntryActions({ capabilities, error, onOpen, onResume, onCancel, onRetry, actionDock, recentJob, scope = 'library', chooserOpen = false }: {
   capabilities: PhotoExportCapabilities | null; error: string | null;
   onOpen(origin: HTMLElement): void; onResume(origin: HTMLElement): void; onCancel(): void;
   onRetry(): void;
   actionDock?: HTMLElement | null;
   recentJob?: PhotoExportView | null;
+  scope?: 'library' | 'album';
+  chooserOpen?: boolean;
 }) {
   const active = capabilities?.activeJob;
-  const primary = <button type="button" className="button button--primary" data-photo-export-origin disabled={!capabilities?.enabled || !!active} onClick={event => onOpen(event.currentTarget)}>Save / Share photos</button>;
+  const album = scope === 'album';
+  const showPrimary = !album || (capabilities?.enabled === true && !active);
+  const showActive = active && (!album || active.kind === 'selection');
+  if (album && (chooserOpen || (!showPrimary && !showActive && !recentJob && !error))) return null;
+  const primary = showPrimary ? <button type="button" className={`button button--${album ? 'secondary' : 'primary'}`} data-photo-export-origin="save" disabled={!capabilities?.enabled || !!active} onClick={event => onOpen(event.currentTarget)}>Save / Share photos</button> : null;
   return <div className="photo-export-entry">
     {actionDock ? createPortal(primary, actionDock) : primary}
-    {active && (active.ownedByCurrentPrincipal && active.kind === 'selection'
-      ? <div className="photo-export-actions"><button type="button" className="button button--secondary" data-photo-export-origin onClick={event => onResume(event.currentTarget)}>Resume photo export</button><button type="button" className="button button--secondary" onClick={onCancel}>Cancel photo export</button></div>
+    {showActive && (active.ownedByCurrentPrincipal && active.kind === 'selection'
+      ? <div className="photo-export-actions"><button type="button" className="button button--secondary" data-photo-export-origin="receipt" onClick={event => onResume(event.currentTarget)}>Resume photo export</button><button type="button" className="button button--secondary" onClick={onCancel}>Cancel photo export</button></div>
       : <p>{active.kind === 'selection' ? `${active.destination} photo export` : `${active.kind} archive`}: {active.state}. This operation must finish or expire before another export can start.</p>)}
-    {!active && recentJob && <div><p>{recentJob.destination === 'archive' ? 'Photo ZIP' : 'Device photo export'}: {recentJob.state}. {recentJob.mediaCount.toLocaleString()} photos.{recentJob.destination === 'device' && ` Handed to your device: ${recentJob.handedOffCount}.`}</p><button type="button" className="text-button" data-photo-export-origin onClick={event => onResume(event.currentTarget)}>View photo export</button></div>}
-    {capabilities && !capabilities.enabled && <p>New photo exports are paused. Your existing export can still be resumed or cancelled.</p>}
+    {!active && recentJob && <div><p>{recentJob.destination === 'archive' ? 'Photo ZIP' : 'Device photo export'}: {recentJob.state}. {recentJob.mediaCount.toLocaleString()} photos.{recentJob.destination === 'device' && ` Handed to your device: ${recentJob.handedOffCount}.`}</p><button type="button" className="text-button" data-photo-export-origin="receipt" onClick={event => onResume(event.currentTarget)}>View photo export</button></div>}
+    {!album && capabilities && !capabilities.enabled && <p>New photo exports are paused. Your existing export can still be resumed or cancelled.</p>}
     {error && <p role="alert">{error} <button type="button" className="text-button" onClick={onRetry}>Check again</button></p>}
   </div>;
 }
@@ -190,10 +196,19 @@ export function PhotoExportChooser({ eventId, source, onClose, onJobChanged, onP
   const unavailable = Math.max(job?.unavailableCount ?? 0, failed.size);
   const remaining = Math.max(0, (job?.mediaCount ?? 0) - (job?.handedOffCount ?? 0) - unavailable);
   const terminal = job && ['ready', 'failed', 'expired', 'cancelled', 'handed-off', 'delivered'].includes(job.state);
+  const albumSource = source.scope === 'album';
+  const wholeAlbum = albumSource && source.mode === 'all' && source.excludedMediaIds.length === 0;
   let content: ReactNode;
   if (!job) content = <>
-    <p>Prepare a private snapshot of your selected originals, then confirm the count before transfer.</p>
-    {source.mode === 'all' && <p>All matching photos{source.excludedMediaIds.length ? ` except ${source.excludedMediaIds.length}` : ''}. Up to 10,000 photos; the exact frozen count appears next.</p>}
+    {albumSource ? <p>
+      {source.mode === 'ids'
+        ? `Choose how to save your ${source.mediaIds.length.toLocaleString()} selected ${source.mediaIds.length === 1 ? 'photo' : 'photos'}.`
+        : wholeAlbum ? 'Choose how to save the photos in your current Album.' : `Choose how to save all Album photos except ${source.excludedMediaIds.length.toLocaleString()}.`}
+      {' '}You’ll confirm the photo count before transfer.
+    </p> : <>
+      <p>Prepare a private snapshot of your selected originals, then confirm the count before transfer.</p>
+      {source.mode === 'all' && <p>All matching photos{source.excludedMediaIds.length ? ` except ${source.excludedMediaIds.length}` : ''}. Up to 10,000 photos; the exact frozen count appears next.</p>}
+    </>}
     {active ? (active.ownedByCurrentPrincipal && active.kind === 'selection'
       ? <div className="photo-export-actions"><button type="button" className="button button--primary" disabled={busy} onClick={() => void run(signal => getJob(active.id, signal))}>Resume photo export</button><button type="button" className="button button--secondary" disabled={busy} onClick={() => void run(async signal => { await mutation(active.id, 'cancel', signal); })}>Cancel photo export</button></div>
       : <p>{active.kind} {active.destination} export: {active.state}. It must finish or expire before a new export can start.</p>)
@@ -232,10 +247,10 @@ export function PhotoExportChooser({ eventId, source, onClose, onJobChanged, onP
     <div className="photo-export-actions"><button type="button" className="text-button" disabled={busy} onClick={() => void run(signal => getJob(job.id, signal))}>Refresh export status</button>{!terminal && <button type="button" className="text-button" disabled={busy} onClick={() => void run(async signal => { await mutation(job.id, 'cancel', signal); setBatch(null); })}>Cancel photo export</button>}</div>
   </>;
   return <section className="photo-export-chooser" role="region" aria-label="Save or share photos" aria-busy={busy || undefined}>
-    <div className="photo-export-heading"><h3 tabIndex={-1} ref={heading}>Save / Share photos</h3><button type="button" className="button button--secondary" onClick={onClose}>Close photo export</button></div>
+    <div className="photo-export-heading">{albumSource ? <h4 tabIndex={-1} ref={heading}>Save Album photos</h4> : <h3 tabIndex={-1} ref={heading}>Save / Share photos</h3>}<button type="button" className="button button--secondary" onClick={onClose}>Close photo export</button></div>
     {content}
     {busy && <p role="status">Preparing or updating your export…</p>}
     {(error || capabilityError) && <p role="alert">{error ?? `Photo export availability could not be checked. ${capabilityError}`} <button type="button" className="text-button" onClick={refresh}>Check availability again</button></p>}
-    {onPrepareFullArchive && <button type="button" className="text-button" disabled={busy} onClick={() => void run(async () => { await onPrepareFullArchive(); })}>Prepare full archive</button>}
+    {onPrepareFullArchive && !wholeAlbum && (!albumSource || !job) && <button type="button" className="text-button" disabled={busy || (albumSource && !!active)} onClick={() => void run(async () => { await onPrepareFullArchive(); })}>{albumSource ? 'Prepare entire Album ZIP' : 'Prepare full archive'}</button>}
   </section>;
 }

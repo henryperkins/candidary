@@ -64,7 +64,7 @@ test('Library adds and removes Album picks, then its export stays visible from q
   await modes.getByRole('button', { name: /^Album, 2$/u }).click();
   await expect(page.getByRole('heading', { name: 'Album', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Add a section' })).toBeVisible();
-  await page.getByRole('button', { name: 'Download album photos' }).click();
+  await page.getByRole('button', { name: 'Prepare Album ZIP' }).click();
   const exportState = page.locator('.album-export .export-state');
   await expect(exportState.getByText('Queued', { exact: true })).toBeVisible();
   await expect(exportState).toContainText('Waiting to start.');
@@ -101,9 +101,9 @@ test('Library adds and removes Album picks, then its export stays visible from q
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Album, 2$/u }).click();
   await expect(exportState.getByText('Ready', { exact: true })).toBeVisible();
-  await exportState.getByRole('button', { name: 'Get download links' }).click();
+  await exportState.getByRole('button', { name: 'Show ZIP download' }).click();
   await expect(exportState.getByRole('link', { name: 'Photo manifest' })).toBeVisible();
-  await expect(exportState.getByRole('link', { name: 'Photo part 1 of 1' })).toBeVisible();
+  await expect(exportState.getByRole('link', { name: /Download Album ZIP/u })).toBeVisible();
   await expect(exportState.getByRole('link', { name: /guestbook/i })).toHaveCount(0);
 });
 

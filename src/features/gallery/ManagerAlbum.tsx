@@ -132,7 +132,7 @@ interface ManagerAlbumProps {
   onPhotoExport?(source: PhotoExportSource, origin: HTMLElement): void;
   onPhotoExportSourceChange?(): void;
   photoExportActionArea?: ReactNode;
-  photoExportActionAreaOwnsInitialAction?: boolean;
+  photoExportWaitMessage?: string;
   photoExportChooser?: ReactNode;
 }
 
@@ -891,7 +891,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   onPhotoExport,
   onPhotoExportSourceChange,
   photoExportActionArea,
-  photoExportActionAreaOwnsInitialAction = false,
+  photoExportWaitMessage,
   photoExportChooser,
 }, ref) {
   const [selectingPhotos, setSelectingPhotos] = useState(false);
@@ -968,7 +968,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const stopShareErrorRef = useRef<HTMLParagraphElement>(null);
   const shareActionRef = useRef<HTMLButtonElement>(null);
   const shareCopyRef = useRef<HTMLButtonElement>(null);
-  const shareHeadingRef = useRef<HTMLParagraphElement>(null);
+  const shareHeadingRef = useRef<HTMLHeadingElement>(null);
   const shareRequestGeneration = useRef(0);
   const shareOperationPending = useRef(false);
   const currentShare = useRef<AlbumShareStatus>(null);
@@ -2880,7 +2880,21 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
               </div>}
 
           <section className="album-exits" aria-labelledby="album-exits-title">
-            <p className="section-label" id="album-exits-title" ref={shareHeadingRef} tabIndex={-1}>When the Album is right</p>
+            <h3 id="album-exits-title" ref={shareHeadingRef} tabIndex={-1}>Download Album</h3>
+            <AlbumExportControl
+              actionArea={photoExportActionArea}
+              chooser={photoExportChooser}
+              job={exportJob}
+              activeJob={activeExport}
+              prepareBlockedReason={photoExportWaitMessage}
+              download={exportDownload}
+              eventTimezone={eventTimezone ?? 'UTC'}
+              currentSource={exportSource}
+              onPrepare={prepareAlbumExport}
+              onDownload={onDownloadExport}
+              onRetry={onRetryExport}
+              live={false}
+            />
             <div className="album-exits__controls">
               <button
                 type="button"
@@ -2889,20 +2903,6 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                 onClick={() => { void togglePreview(); }}
               ><Eye aria-hidden="true" /> {previewOpen ? 'Back to editing' : 'Preview album'}</button>
               {actionDock === null && shareAction}
-              <AlbumExportControl
-                actionArea={photoExportActionArea}
-                actionAreaOwnsInitialAction={photoExportActionAreaOwnsInitialAction}
-                chooser={photoExportChooser}
-                job={exportJob}
-                activeJob={activeExport}
-                download={exportDownload}
-                eventTimezone={eventTimezone ?? 'UTC'}
-                currentSource={exportSource}
-                onPrepare={prepareAlbumExport}
-                onDownload={onDownloadExport}
-                onRetry={onRetryExport}
-                live={false}
-              />
             </div>
 
             {actionDock !== null && createPortal(shareAction, actionDock)}

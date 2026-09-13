@@ -1069,6 +1069,10 @@ describe('gallery modes', () => {
     await act(async () => saved.resolve());
     await screen.findByRole('region', { name: 'Save or share photos' });
     expect(controlled.state.metadataWrites[0]?.title).toBe('Our saved Album');
+    expect(screen.getByRole('heading', { name: 'Save Album photos' })).toHaveFocus();
+    expect(screen.queryByRole('button', { name: 'Prepare full archive' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close photo export' }));
+    expect(screen.getByRole('button', { name: 'Save / Share photos' })).toHaveFocus();
   });
 
   it('waits for the controlled Gallery mode to be adopted', async () => {
@@ -2558,7 +2562,7 @@ describe('the album', () => {
     expect(screen.getByRole('button', { name: 'Start empty' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: 'Preview album' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Create Album link' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Download album photos' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Prepare Album ZIP' })).not.toBeInTheDocument();
   });
 
   it('reconciliation auto-starts one StrictMode observation once and adopts the advanced revision', async () => {
@@ -4320,7 +4324,7 @@ describe('the album', () => {
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
-    await user.click(await screen.findByRole('button', { name: 'Download album photos' }));
+    await user.click(await screen.findByRole('button', { name: 'Prepare Album ZIP' }));
     expect(onPrepare).toHaveBeenCalledOnce();
     expect(onPrepare).toHaveBeenCalledWith('album');
 
@@ -4330,7 +4334,7 @@ describe('the album', () => {
     await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
-    expect(await screen.findByRole('button', { name: 'Download album photos' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Prepare Album ZIP' })).toBeDisabled();
   });
 
   it('uses the audience summary rather than loaded Album rows to guard an empty export', async () => {
@@ -4349,7 +4353,7 @@ describe('the album', () => {
     const user = await openAlbum();
 
     expect(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' })).toBeVisible();
-    const prepare = screen.getByRole('button', { name: 'Download album photos' });
+    const prepare = screen.getByRole('button', { name: 'Prepare Album ZIP' });
     expect(prepare.closest('.album-export')).toHaveTextContent('Current Album: 0 photos.');
     expect(prepare).toBeDisabled();
     expect(screen.getByText('Add a photo to the Album before preparing it.')).toBeVisible();
@@ -4378,7 +4382,7 @@ describe('the album', () => {
     await user.click(await screen.findByRole('button', { name: /^Move First dance later/ }));
     await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(1));
     await user.click(screen.getByRole('button', { name: /^Move First dance later/ }));
-    await user.click(screen.getByRole('button', { name: 'Download album photos' }));
+    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
     expect(onPrepare).not.toHaveBeenCalled();
 
     await act(async () => { firstSave.resolve(); });
@@ -4413,11 +4417,11 @@ describe('the album', () => {
     const recoveryRead = controlled.state.albumReads;
     controlled.state.albumReadGates[recoveryRead] = reload.promise;
     await user.click(screen.getByRole('button', { name: /^Move First dance later/ }));
-    await user.click(screen.getByRole('button', { name: 'Download album photos' }));
+    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
     await act(async () => { save.resolve(); });
     await waitFor(() => expect(controlled.state.albumReads).toBe(recoveryRead + 1));
 
-    const prepare = screen.getByRole('button', { name: 'Preparing album download…' });
+    const prepare = screen.getByRole('button', { name: 'Preparing Album ZIP…' });
     expect(prepare).toBeDisabled();
     await user.click(prepare);
     expect(onPrepare).not.toHaveBeenCalled();
@@ -4455,10 +4459,10 @@ describe('the album', () => {
     controlled.state.albumReadErrors[recoveryRead] = 'The canonical album could not be reloaded.';
     controlled.state.albumReadGates[recoveryRead + 1] = retryReload.promise;
     await user.click(screen.getByRole('button', { name: /^Move First dance later/ }));
-    await user.click(screen.getByRole('button', { name: 'Download album photos' }));
+    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
     await act(async () => { save.resolve(); });
     await waitFor(() => expect(controlled.state.albumReads).toBe(recoveryRead + 1));
-    expect(screen.getByRole('button', { name: 'Preparing album download…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Preparing Album ZIP…' })).toBeDisabled();
     expect(onPrepare).not.toHaveBeenCalled();
     await act(async () => { failedReload.resolve(); });
 
@@ -4469,8 +4473,8 @@ describe('the album', () => {
     expect(onPrepare).not.toHaveBeenCalled();
 
     await act(async () => { retryReload.resolve(); });
-    await screen.findByRole('button', { name: 'Download album photos' });
-    await user.click(screen.getByRole('button', { name: 'Download album photos' }));
+    await screen.findByRole('button', { name: 'Prepare Album ZIP' });
+    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
     expect(onPrepare).toHaveBeenCalledOnce();
   });
 
@@ -4543,8 +4547,8 @@ describe('the album', () => {
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
-    expect(await screen.findByRole('link', { name: /Photo part 1 of 2/ })).toHaveAttribute('href', '/part-1');
-    expect(screen.getByRole('link', { name: /Photo part 2 of 2/ })).toHaveAttribute('href', '/part-2');
+    expect(await screen.findByRole('link', { name: /Download ZIP part 1 of 2/ })).toHaveAttribute('href', '/part-1');
+    expect(screen.getByRole('link', { name: /Download ZIP part 2 of 2/ })).toHaveAttribute('href', '/part-2');
     expect(screen.getByRole('link', { name: 'Photo manifest' })).toHaveAttribute('href', '/manifest');
     expect(screen.queryByRole('link', { name: /guestbook/i })).not.toBeInTheDocument();
   });
@@ -4650,7 +4654,7 @@ describe('the album', () => {
     await screen.findByRole('heading', { name: 'Private Gallery' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
-    const exportControl = (await screen.findByRole('button', { name: 'Download album photos' }))
+    const exportControl = (await screen.findByRole('button', { name: 'Prepare Album ZIP' }))
       .closest('.album-export');
     expect(exportControl).toHaveTextContent('Current Album: 2 photos.');
 
@@ -4705,7 +4709,7 @@ describe('the album', () => {
     await act(async () => { refresh.resolve(); });
 
     expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Download album photos' }).closest('.album-export'))
+    expect(screen.getByRole('button', { name: 'Prepare Album ZIP' }).closest('.album-export'))
       .toHaveTextContent('Current Album: 1 photo.');
   });
 
@@ -4754,7 +4758,7 @@ describe('the album', () => {
     await act(async () => { refresh.resolve(); });
 
     expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Download album photos' }).closest('.album-export'))
+    expect(screen.getByRole('button', { name: 'Prepare Album ZIP' }).closest('.album-export'))
       .toHaveTextContent('Current Album: 2 photos.');
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
     expect(rendered.invalidateGalleryAfterMutation).toHaveBeenCalled();
@@ -5334,7 +5338,7 @@ describe('album review regressions', () => {
       selector: 'span',
     })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Retry this prepared export' })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Prepare current Album' }));
+    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
     expect(onPrepare).toHaveBeenCalledWith('album');
   });
 
@@ -6751,7 +6755,7 @@ describe('stopping the album link', () => {
 
     await waitFor(() => expect(state.shareWrites).toEqual(['stop']));
     expect(screen.getByRole('button', { name: 'Create Album link' })).toBeDisabled();
-    expect(screen.getByText('When the Album is right')).toHaveFocus();
+    expect(screen.getByRole('heading', { name: 'Download Album' })).toHaveFocus();
   });
 
   it('uses the Album link fallback and keeps the host in the dialog when revocation fails', async () => {

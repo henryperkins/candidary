@@ -1821,14 +1821,41 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-preview__placeholder svg { width: 20px; height: 20px; }
 .album-preview__placeholder span { max-width: 18ch; font-size: .66rem; line-height: 1.25; }
 
-.album-exits { margin-top: 28px; padding-top: 22px; display: grid; gap: 14px; border-top: 1px solid var(--border); }
+.album-exits { margin-top: 32px; padding-top: 24px; display: grid; gap: 16px; border-top: 1px solid var(--border); }
 .album-exits h3 { margin: 0; font-size: 1.2rem; letter-spacing: -.015em; }
-.album-exits__controls { display: flex; flex-wrap: wrap; gap: 12px; }
-.album-exits__controls > .button,
-.album-exits__controls > .album-export > .button { min-height: 48px; }
-.album-exits__controls > .album-export { display: contents; }
-.album-exits__controls > .album-export > .gallery-export__copy { order: 10; flex: 1 0 100%; max-width: 66ch; margin: 0; color: var(--muted); font-size: .82rem; line-height: 1.5; }
-.album-exits__controls > .album-export > .export-state { order: 11; flex: 1 0 100%; }
+.album-exits__controls { padding-top: 8px; display: flex; flex-wrap: wrap; gap: 12px; }
+.album-exits__controls > .button { min-height: 48px; }
+/* Current Album first, prepared download second, then the other Album exits.
+   The same source order carries through keyboard navigation and narrow layouts. */
+.album-exits > .album-export { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); justify-items: stretch; gap: 24px; }
+.album-export__current { min-width: 0; display: grid; gap: 12px; }
+.album-export__actions { display: flex; flex-wrap: wrap; align-items: start; gap: 12px; }
+.album-export__actions:empty { display: none; }
+.album-export .button, .album-export .text-button { min-height: 48px; font-size: .875rem; white-space: normal; }
+.album-export .gallery-export__copy { max-width: 66ch; font-size: .875rem; line-height: 1.5; }
+.album-export__prepared { min-width: 0; padding-top: 24px; border-top: 1px solid var(--border); gap: 8px; }
+.album-export__prepared-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+.album-export__prepared-heading h4 { margin: 0; color: var(--ink); font-size: 1rem; }
+.album-export__prepared-heading strong { font-size: .875rem; }
+.album-export__prepared > span { font-size: .875rem; line-height: 1.5; }
+.album-export__summary, .album-export__changed { margin: 0; max-width: 66ch; color: var(--ink); line-height: 1.5; }
+.album-export__summary { font-size: 1rem; }
+.album-export__changed { font-size: .875rem; }
+.album-export__prepared > .button, .album-export__prepared > .export-links { margin-top: 4px; }
+.album-export .export-links { max-width: 100%; }
+.album-export .export-links__lead { font-size: .875rem; }
+.album-export .export-links a { min-height: 48px; flex-wrap: wrap; gap: 4px 16px; font-size: .875rem; overflow-wrap: anywhere; }
+.album-export .export-links a span { color: inherit; font-size: inherit; }
+.album-export .export-links small { font-size: .875rem; }
+.album-export .export-links .album-export__manifest { justify-self: start; border-color: transparent; padding-inline: 0; font-weight: 400; text-decoration: underline; text-underline-offset: 3px; }
+.album-export .photo-export-chooser { padding-block: 0; border: 0; }
+.album-export .photo-export-heading h4 { margin: 0; font-size: 1rem; }
+.album-export .photo-export-entry p, .album-export .photo-export-chooser p { font-size: .875rem; line-height: 1.5; }
+.album-export .photo-export-counts span { font-size: .875rem; }
+@media (max-width: 560px) {
+  .album-export__actions > .button, .album-export__actions > .photo-export-entry { width: 100%; }
+  .album-export__actions .photo-export-entry > .button { width: 100%; }
+}
 .album-share { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); }
 .album-share p { margin: 0; color: var(--muted); font-size: .82rem; line-height: 1.5; }
 .album-share .link-card { margin-top: 4px; }

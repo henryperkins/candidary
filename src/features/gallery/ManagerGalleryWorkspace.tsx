@@ -213,6 +213,7 @@ ManagerGalleryWorkspaceProps
     return () => controller.abort();
   }, [eventId]);
   const [photoExportTarget, setPhotoExportTarget] = useState<{ eventId: string; mode: 'library' | 'album'; source: PhotoExportSource; origin: HTMLElement; resumeJobId?: string; key: number } | null>(null);
+  const photoExportFocusReturn = useRef<typeof photoExportTarget>(null);
   const photoExportSequence = useRef(0);
   const currentPhotoScope = useRef({ eventId, mode }); currentPhotoScope.current = { eventId, mode };
   const retirePhotoExport = useCallback(() => { photoExportSequence.current++; setPhotoExportTarget(null); }, []);
@@ -228,17 +229,34 @@ ManagerGalleryWorkspaceProps
     setPhotoExportTarget({ eventId, mode: source.scope, source, origin, resumeJobId, key: sequence });
   };
   const closePhotoExport = () => {
-    const target = photoExportTarget; retirePhotoExport();
-    if (!target || currentPhotoScope.current.mode !== target.mode || currentPhotoScope.current.eventId !== target.eventId) return;
-    const usable = (element: HTMLElement | null): element is HTMLElement => !!element?.isConnected && !element.closest('[hidden], [inert]') && !element.matches(':disabled');
-    const origin = usable(target.origin) ? target.origin : Array.from(document.querySelectorAll<HTMLElement>(target.mode === 'library' ? '.gallery-private-mode .gallery-select-toggle, .gallery-action [data-photo-export-origin], .gallery-private-mode [data-photo-export-origin]' : '.gallery-album-mode [data-photo-export-origin]')).find(usable) ?? null;
-    if (usable(origin)) origin.focus();
+    photoExportFocusReturn.current = photoExportTarget;
+    retirePhotoExport();
   };
+  useLayoutEffect(() => {
+    if (photoExportTarget) return;
+    const target = photoExportFocusReturn.current;
+    photoExportFocusReturn.current = null;
+    if (!target || mode !== target.mode || eventId !== target.eventId) return;
+    const usable = (element: HTMLElement | null): element is HTMLElement => !!element?.isConnected && !element.closest('[hidden], [inert]') && !element.matches(':disabled');
+    const origins = document.querySelectorAll<HTMLElement>(target.mode === 'library'
+      ? '.gallery-private-mode .gallery-select-toggle, .gallery-action [data-photo-export-origin], .gallery-private-mode [data-photo-export-origin]'
+      : '.gallery-album-mode [data-photo-export-origin]');
+    const matchingOrigin = Array.from(origins).find(element => usable(element)
+      && element.dataset.photoExportOrigin === target.origin.dataset.photoExportOrigin);
+    const origin = usable(target.origin) ? target.origin : matchingOrigin ?? Array.from(origins).find(usable)
+      ?? (target.mode === 'album'
+        ? Array.from(document.querySelectorAll<HTMLElement>('.album-export__actions > .button')).find(usable)
+          ?? document.getElementById('album-exits-title')
+        : null);
+    if (usable(origin)) origin.focus();
+  }, [photoExportTarget, eventId, mode]);
   const prepareLegacyPhotoArchive = async (scope: 'library' | 'album') => {
     if (scope === 'album' && (await albumRef.current?.prepareToLeave())?.status !== 'ready') return;
     await exports.onPrepare(scope === 'library' ? 'complete' : 'album');
   };
   const photoEntry = (scope: 'library' | 'album', actionDock?: HTMLElement | null) => <PhotoExportEntryActions
+    scope={scope}
+    chooserOpen={photoExportTarget?.eventId === eventId && photoExportTarget.mode === scope && mode === scope}
     actionDock={actionDock}
     capabilities={photoExports.capabilities} error={photoExportActionError ?? photoExports.error}
     recentJob={recentPhotoExport?.source.scope === scope ? recentPhotoExport : null}
@@ -998,7 +1016,9 @@ ManagerGalleryWorkspaceProps
         photoExportEnabled={photoExports.capabilities?.enabled === true && !photoExports.capabilities.activeJob}
         {...(canSelectForPhotoExport('album') ? { onPhotoExport: (source: PhotoExportSource, origin: HTMLElement) => { void openPhotoExport(source, origin); } } : {})}
         photoExportActionArea={photoEntry('album')}
-        photoExportActionAreaOwnsInitialAction={photoExports.capabilities?.enabled === true}
+        photoExportWaitMessage={photoExports.capabilities?.activeJob?.kind === 'selection'
+          ? 'A photo export is in progress. Prepare and retry will be available when it finishes or is cancelled.'
+          : undefined}
         photoExportChooser={photoChooser('album')}
         onPhotoExportSourceChange={retirePhotoExport}
       />

@@ -49,13 +49,16 @@ describe('photo export chooser', () => {
     expect(fetcher.mock.calls.some(([path]) => String(path).endsWith('/handoff'))).toBe(false);
     expect(screen.getByRole('button', { name: 'Use ZIP instead' })).toBeEnabled();
   });
-  it('keeps Resume and Cancel available to a paused current owner, including retirement', async () => {
+  it.each(['library', 'album'] as const)('keeps Resume and Cancel available to a paused %s owner, including retirement', async scope => {
     vi.stubGlobal('fetch', fixture({ paused: true, retired: true }));
-    render(<PhotoExportChooser {...props()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Resume photo export' }));
+    render(<PhotoExportChooser {...props()} source={{ ...props().source, scope }} onPrepareFullArchive={vi.fn()} />);
+    const resume = await screen.findByRole('button', { name: 'Resume photo export' });
+    if (scope === 'album') expect(screen.getByRole('button', { name: 'Prepare entire Album ZIP' })).toBeDisabled();
+    fireEvent.click(resume);
     expect(await screen.findByRole('button', { name: 'Retry ZIP fallback' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Cancel photo export' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: /Share 1/ })).toBeNull();
+    if (scope === 'album') expect(screen.queryByRole('button', { name: 'Prepare entire Album ZIP' })).toBeNull();
   });
 
   it('recovers receipt uncertainty after remount without reading or sharing the photos again', async () => {

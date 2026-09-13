@@ -4781,7 +4781,7 @@ describe('manager experience', () => {
       await waitFor(() => expect(interval.mock.calls.some(([, delay]) => delay === 10_000)).toBe(true));
 
       await user.click(galleryMode('Album'));
-      expect(await screen.findByRole('button', { name: 'Download album photos' })).toBeDisabled();
+      expect(await screen.findByRole('button', { name: 'Prepare Album ZIP' })).toBeDisabled();
       expect(screen.getByText(
         'Complete collection export is Queued. Prepare and retry actions will be available when it finishes.',
       )).toBeVisible();
@@ -5217,12 +5217,11 @@ describe('manager experience', () => {
     expect(screen.getByText('Frozen size: 1 KB · 3 guestbook entries.')).toBeVisible();
     expect(screen.getByText('Ready')).toBeVisible();
     await user.click(galleryMode('Album'));
-    expect((await screen.findAllByText(/2 photos · Failed/, { selector: 'span' }))[0]).toBeVisible();
-    expect(screen.getByText('Frozen size: 2 KB.')).toBeVisible();
+    expect(await screen.findByText('2 photos · 2 KB of originals')).toBeVisible();
     expect(screen.getByText('Failed')).toBeVisible();
   });
 
-  it('posts the exact album kind selector from Download album photos', async () => {
+  it('posts the exact album kind selector from Prepare Album ZIP', async () => {
     const exportBodies: string[] = [];
     const albumPhoto = {
       id: 'album-photo', originalFilename: 'album-photo.png', guestName: 'Avery', caption: null,
@@ -5268,7 +5267,7 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Album'));
-    await user.click(await screen.findByRole('button', { name: 'Download album photos' }));
+    await user.click(await screen.findByRole('button', { name: 'Prepare Album ZIP' }));
 
     await waitFor(() => expect(exportBodies).toEqual([JSON.stringify({ kind: 'album' })]));
   });
