@@ -879,7 +879,7 @@ ManagerGalleryWorkspaceProps
     }
   };
 
-  return <section className="manager-gallery" ref={rootRef} aria-labelledby="gallery-workspace-title">
+  return <section className="manager-gallery" data-mode={mode} ref={rootRef} aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading">
       <h2 id="gallery-workspace-title">{mode === 'library' ? 'Private Gallery' : 'Gallery'}</h2>
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} delivered photos</p>

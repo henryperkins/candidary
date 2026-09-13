@@ -33,6 +33,7 @@ interface AlbumExportControlProps {
   onAnnouncement?(message: string): void;
   actionArea?: ReactNode;
   chooser?: ReactNode;
+  showPrepareAction?: boolean;
 }
 
 /**
@@ -54,6 +55,7 @@ export function AlbumExportControl({
   onAnnouncement,
   actionArea,
   chooser,
+  showPrepareAction = true,
 }: AlbumExportControlProps) {
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
   const waitMessage = exportWaitMessage(activeJob, job?.id) ?? prepareBlockedReason ?? null;
@@ -87,7 +89,7 @@ export function AlbumExportControl({
     <div className="album-export__current" role="group" aria-label="Current Album download">
       <p className="gallery-export__copy">{currentCountCopy}</p>
       <div className="album-export__actions">
-        {!chooser && !preparing && <button
+        {showPrepareAction && !chooser && !preparing && <button
           type="button"
           className="button button--primary"
           disabled={prepareDisabled}

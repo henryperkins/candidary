@@ -1,0 +1,109 @@
+.gallery-album--organizer { --field: #fffdf8; min-width: 0; }
+.gallery-album--organizer [hidden] { display: none; }
+.manager-main .manager-title--library { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-bottom: 20px; }
+.manager-main .manager-title--library h1 { flex: 1; font-size: 1.375rem; line-height: 1.3; }
+.library-event-details { font-size: .8125rem; }
+.library-event-details > summary { min-height: 44px; padding: 12px 0 12px 8px; cursor: pointer; color: var(--muted); }
+.library-event-details__body { position: absolute; top: 100%; right: 0; z-index: 15; width: min(360px, calc(100vw - 40px)); padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); }
+.manager-main .library-event-details .lifecycle { display: grid; margin: 12px 0 0; padding: 12px 0 0; border-bottom: 0; }
+.manager-main .library-event-details .status { margin-top: 8px; }
+.library-event-details summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.album-delivery { min-width: 0; }
+.album-delivery__header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; }
+.album-surface-title { margin: 0; color: var(--ink); font-size: 1.6rem; line-height: 1.2; letter-spacing: -.03em; }
+.album-delivery__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.album-delivery__actions .button { min-height: 48px; padding: 10px 14px; font-size: .875rem; white-space: normal; }
+.album-delivery__actions .button > svg { width: 18px; height: 18px; }
+.album-delivery__actions .button > svg:last-child:not(:first-child) { width: 14px; }
+.album-delivery__reason { margin: 12px 0 0; color: var(--muted); font-size: .875rem; }
+.album-delivery__panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.album-delivery__panel-heading h4 { margin: 0; font-size: 1rem; line-height: 1.3; }
+.album-delivery__panel-heading .icon-button { flex: 0 0 44px; width: 44px; height: 44px; }
+.album-connections, .album-download-panel { margin-top: 16px; padding: 12px 16px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); }
+.album-connections > p { max-width: 60ch; margin: 4px 0 16px; color: var(--muted); font-size: .875rem; line-height: 1.5; }
+.album-connections__list { display: grid; gap: 0; }
+.album-connection { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; min-height: 52px; padding: 12px 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; color: var(--ink); font: inherit; font-size: .875rem; text-align: left; cursor: not-allowed; }
+.album-connection__status { flex-shrink: 0; color: var(--muted); font-size: .875rem; font-weight: 400; }
+.album-delivery__receipt { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; margin-top: 4px; padding: 8px 0; font-size: .875rem; }
+.album-delivery__receipt svg { width: 16px; height: 16px; }
+.album-download-panel .album-export { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; margin: 8px 0 0; padding: 0; gap: 16px; }
+.album-download-panel .album-export__prepared { padding-top: 16px; }
+.album-download-panel .album-export__current { gap: 0; }
+.gallery-album--organizer .album-autosave-row { justify-content: flex-start; flex-wrap: wrap; gap: 4px 16px; margin: 12px 0 0; font-size: .875rem; }
+.gallery-album--organizer .album-autosave-row > span { font-size: .875rem; }
+.gallery-album--organizer .album-organizer { margin: 16px 0; padding: 16px 0 0; gap: 10px; border-top: 1px solid var(--border); border-bottom: 0; }
+.gallery-album--organizer .album-organizer__controls { grid-template-columns: minmax(0, 1fr) minmax(140px, .55fr); gap: 12px; align-items: end; }
+.gallery-album--organizer .album-filter { position: relative; display: grid; gap: 6px; min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.gallery-album--organizer .album-filter:focus-within { box-shadow: none; }
+.gallery-album--organizer .album-filter label, .gallery-album--organizer .album-sort > span { color: var(--ink); font-size: .875rem; font-weight: 600; line-height: 1.3; }
+.gallery-album--organizer .album-filter > svg { position: absolute; top: auto; bottom: 15px; left: 13px; transform: none; width: 18px; height: 18px; }
+.gallery-album--organizer .album-filter input { width: 100%; min-height: 48px; padding: 10px 44px 10px 40px; border: 1px solid var(--border); border-radius: 7px; background: var(--field); font-size: .875rem; }
+.gallery-album--organizer .album-filter__clear { position: absolute; top: auto; bottom: 2px; right: 2px; transform: none; }
+.gallery-album--organizer .album-sort { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.gallery-album--organizer .album-sort select { min-height: 48px; background: var(--field); padding: 10px 30px 10px 12px; font-size: .875rem; }
+.gallery-album--organizer .album-organizer__state { color: var(--muted); font-size: .875rem; line-height: 1.5; }
+.gallery-album--organizer .album-review-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px 16px; }
+.gallery-album--organizer .album-review-grid__photo { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 0; min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; transition: opacity 180ms ease-out; }
+.gallery-album--organizer .album-review-grid__preview { flex-shrink: 0; aspect-ratio: 1; border-radius: 8px; background: var(--paper); }
+.gallery-album--organizer .album-review-grid__preview img { pointer-events: none; }
+.gallery-album--organizer .album-review-grid__meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 9px 0 4px; }
+.gallery-album--organizer .album-review-grid__meta strong { overflow: hidden; font-size: .875rem; font-weight: 500; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.gallery-album--organizer .album-review-grid__meta small { color: var(--muted); font-size: .875rem; line-height: 1.4; }
+.gallery-album--organizer .album-review-grid__number { inset: 8px auto auto 8px; min-width: 24px; padding: 4px 6px; background: var(--paper); color: var(--ink); border-radius: 5px; font-size: .75rem; text-align: center; font-variant-numeric: tabular-nums; }
+.gallery-album--organizer .album-review-grid__cover-badge { padding: 4px 7px; border-radius: 5px; font-size: .75rem; background: var(--paper); color: var(--ink); }
+.gallery-album--organizer .album-entry__controls { display: flex; align-items: center; align-self: stretch; flex-wrap: wrap; gap: 0; margin-top: auto; padding: 0; }
+.gallery-album--organizer .album-entry__controls > .icon-button { flex: 0 0 44px; width: 44px; height: 44px; min-width: 44px; min-height: 44px; border: 0; border-radius: 5px; background: transparent; color: var(--chestnut); }
+.gallery-album--organizer .album-entry__controls > .album-entry__remove { margin-left: auto; }
+.gallery-album--organizer .album-entry__controls > .icon-button[hidden] { display: none; }
+.gallery-album--organizer .album-entry__controls > .icon-button:hover:not(:disabled) { background: var(--denim-soft); }
+.gallery-album--organizer .album-entry__controls > .icon-button:disabled { opacity: .5; }
+.gallery-album--organizer .album-entry__controls > .album-entry__drag { position: absolute; inset: 4px 4px auto auto; display: grid; place-items: center; width: 44px; height: 44px; margin: 0; padding: 0; border: 0; border-radius: 7px; background: var(--paper); color: var(--ink); cursor: grab; touch-action: none; }
+.gallery-album--organizer .album-entry__drag svg { width: 20px; height: 20px; }
+.gallery-album--organizer .album-entry__drag:disabled { opacity: .6; cursor: default; }
+.gallery-album--organizer .album-entry__drag:active { cursor: grabbing; }
+.gallery-album--organizer [data-dragging="true"] { opacity: .45; }
+.gallery-album--organizer [data-drop-target="true"]::after { content: ''; position: absolute; inset: -4px auto -4px -9px; width: 3px; border-radius: 2px; background: var(--denim); pointer-events: none; }
+.gallery-album--organizer [data-drop-target="true"][data-drop-side="after"]::after { left: auto; right: -9px; }
+.gallery-album--organizer .album-review-grid__section { position: relative; }
+.gallery-album--organizer .album-review-grid__section .album-entry__drag { position: static; background: transparent; }
+.gallery-album--organizer .album-review-grid__section .album-entry__controls { margin: 0; }
+.gallery-album--organizer .album-review-grid__section[data-drop-target="true"]::after { inset: -4px 0 auto; width: auto; height: 3px; }
+.gallery-album--organizer .album-review-grid__section[data-drop-target="true"][data-drop-side="after"]::after { top: auto; bottom: -4px; }
+.gallery-album--organizer .album-entry__retained-note { padding: 8px 0; font-size: .875rem; }
+.album-settings { margin-top: 24px; border-top: 1px solid var(--border); }
+.album-settings__toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 48px; padding: 12px 0; border: 0; border-radius: 0; background: transparent; color: var(--muted); font: inherit; font-size: .875rem; text-align: left; cursor: pointer; }
+.album-settings__toggle svg { width: 18px; height: 18px; transition: transform 180ms ease-out; }
+.album-settings__toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.album-settings__body { display: grid; gap: 16px; padding: 8px 0 20px; }
+.gallery-album--organizer .album-metadata { margin: 0; padding: 0; border: 0; background: transparent; }
+.gallery-album--organizer .album-metadata__body { width: 100%; }
+.gallery-album--organizer .album-exits { margin: 0; padding: 16px 0 0; }
+.gallery-album--organizer :is(button, input, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.gallery-album--organizer input::placeholder { color: var(--muted); opacity: 1; }
+.gallery-album--organizer input { caret-color: var(--chestnut); }
+.gallery-album--organizer ::selection { color: var(--ink); background: var(--denim-soft); }
+.manager-gallery[data-mode="album"] .gallery-action:empty { display: none; }
+.manager-gallery[data-mode="album"] > .workspace-heading { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.manager-gallery[data-mode="album"] .gallery-audience { display: none; }
+.manager-gallery[data-mode="album"] .gallery-control-row { margin: 0 0 20px; justify-content: stretch; }
+.manager-gallery[data-mode="album"] .gallery-mode-switch { display: grid; width: 100%; padding: 3px; }
+.manager-gallery[data-mode="album"] .gallery-mode-switch button { display: inline-flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 6px; min-height: 44px; padding: 8px 5px; }
+.manager-gallery[data-mode="album"] .gallery-mode-switch__count { display: inline; font-size: inherit; }
+@media (max-width: 760px) {
+  .album-delivery__header { gap: 12px; }
+  .album-delivery__actions { width: 100%; display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); }
+  .album-delivery__actions .button { width: 100%; justify-content: center; padding-inline: 8px; }
+  .gallery-album--organizer .album-organizer__controls { grid-template-columns: minmax(0, 1fr); }
+  .gallery-album--organizer .album-review-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 12px; }
+  .gallery-album--organizer .album-review-grid__photo { grid-template: none; }
+  .gallery-album--organizer .album-entry__controls { flex-wrap: wrap; }
+  .gallery-album--organizer [data-drop-target="true"]::after { left: -7px; }
+  .gallery-album--organizer [data-drop-target="true"][data-drop-side="after"]::after { right: -7px; }
+  .album-connections, .album-download-panel { padding-inline: 12px; }
+}
+@media (min-width: 540px) and (max-width: 760px) {
+  .gallery-album--organizer .album-organizer__controls { grid-template-columns: minmax(0, 1fr) minmax(160px, .6fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gallery-album--organizer .album-review-grid__photo, .album-settings__toggle svg { transition: none; }
+}

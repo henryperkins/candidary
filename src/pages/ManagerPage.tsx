@@ -3114,6 +3114,11 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       managerLinkRotation?.phase === 'success'
       && managerLinkRotation.saveStatus === 'copied'
     );
+  const librarySurface = section === 'gallery' && (galleryMode === 'library' || galleryMode === 'album');
+  const uploadStatus = <span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span>;
+  const lifecycle = <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{purgeAfterDisplay === null
+    ? TIME_UNAVAILABLE
+    : <time dateTime={event.purgeAfter}>{purgeAfterDisplay}</time>}</strong></p></div>;
   return <>
     {createPortal(
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{galleryAnnouncement}</p>,
@@ -3133,15 +3138,19 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     </nav></header>
 
     <main className="manager-main">
-      <header className="manager-title"><div><p>{managerEventDate}</p><h1>{event.name}</h1></div><span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span></header>
+      {librarySurface ? <header className="manager-title manager-title--library">
+        <h1>{event.name}</h1>
+        <details className="library-event-details">
+          <summary>Event details</summary>
+          <div className="library-event-details__body"><p>{managerEventDate}</p>{uploadStatus}{lifecycle}</div>
+        </details>
+      </header> : <header className="manager-title"><div><p>{managerEventDate}</p><h1>{event.name}</h1></div>{uploadStatus}</header>}
       {eventResource.state.failure && <ErrorState
         message={eventResource.state.failure.message}
         recoveryHint={eventResource.state.failure.recoveryHint}
         onRetry={() => void eventResource.reload()}
       />}
-      <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{purgeAfterDisplay === null
-        ? TIME_UNAVAILABLE
-        : <time dateTime={event.purgeAfter}>{purgeAfterDisplay}</time>}</strong></p></div>
+      {!librarySurface && lifecycle}
 
       {visibleNotice && <section
         className="manager-action-error"

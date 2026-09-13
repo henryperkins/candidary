@@ -1763,6 +1763,31 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-metadata__fields .field-error { margin: 0; color: var(--danger); font-size: .78rem; }
 .album-metadata__fields > small:not(.field-error) { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
 
+.album-organizer { margin: 24px 0 0; padding: 20px 0; display: grid; gap: 14px; border-block: 1px solid var(--border); }
+.album-organizer__heading { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 20px; }
+.album-organizer__heading h3 { margin: 0; font-size: 1.2rem; letter-spacing: -.015em; }
+.album-organizer__heading p { margin: 4px 0 0; color: var(--muted); font-size: .84rem; line-height: 1.5; }
+.album-organizer__count { color: var(--ink); font-size: .78rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.album-organizer__controls { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.album-filter { min-width: 0; min-height: 48px; padding: 0 10px 0 12px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--field); color: var(--muted); }
+.album-filter:focus-within { border-color: var(--denim); box-shadow: 0 0 0 2px rgb(44 92 133 / 20%); }
+.album-filter svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.album-filter input { width: 100%; min-width: 0; min-height: 44px; padding: 0; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: .88rem; }
+.album-filter input::placeholder { color: var(--muted); opacity: 1; }
+.album-filter__clear { width: 44px; min-width: 44px; height: 44px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--chestnut); cursor: pointer; }
+.album-filter__clear:hover { background: var(--denim-soft); }
+.album-filter__clear:focus-visible, .album-sort select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.album-filter__clear svg { width: 17px; height: 17px; }
+.album-sort { min-height: 48px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; color: var(--ink); font-size: .78rem; font-weight: 700; }
+.album-sort select { min-width: 0; min-height: 48px; padding: 0 34px 0 12px; border: 1px solid var(--border); border-radius: 7px; appearance: auto; background: var(--field); color: var(--chestnut); font: inherit; font-size: .88rem; font-weight: 600; cursor: pointer; }
+.album-organizer__state { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+
+@media (min-width: 561px) {
+  .album-organizer__controls { grid-template-columns: minmax(0, 1fr) minmax(208px, .55fr); align-items: end; }
+  .album-sort { grid-template-columns: minmax(0, 1fr); align-content: end; gap: 4px; }
+  .album-sort select { width: 100%; }
+}
+
 .album-order-heading { margin: 22px 0 14px; display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
 .album-order-heading h3 { margin: 0; font-size: 1.2rem; letter-spacing: -.015em; }
 .album-order-heading p { margin: 3px 0 0; color: var(--muted); font-size: .8rem; line-height: 1.45; }
@@ -1797,6 +1822,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-section__input:focus { border-color: var(--denim); background: var(--paper); outline: none; }
 .album-section__input:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 .album-entry__controls { display: flex; flex-wrap: wrap; gap: 4px; }
+.album-entry__drag { width: 24px; height: 44px; display: grid; place-items: center; color: var(--muted); cursor: grab; }
+.album-entry__drag svg { width: 18px; height: 18px; }
 .album-entry__controls .icon-button { width: 44px; height: 44px; flex: 0 0 44px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--moss); cursor: pointer; }
 .album-entry__controls .icon-button svg { width: 18px; height: 18px; }
 .album-entry__controls .icon-button:disabled,

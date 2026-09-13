@@ -5,9 +5,11 @@ import {
   ChevronRight,
   ChevronUp,
   Eye,
+  GripVertical,
   ImageOff,
   Link,
   Plus,
+  Search,
   Star,
   Trash2,
   X,
@@ -18,6 +20,7 @@ import {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -63,7 +66,8 @@ import {
   type AlbumStartRequest,
 } from './album-api';
 import { AlbumPreview } from './AlbumPreview';
-import { AlbumExportControl } from './AlbumExportControl';
+import { AlbumDelivery } from './AlbumDelivery';
+import './album-organizer.css';
 import type { PhotoExportSource } from '../../../shared/photo-exports';
 import { emptySelection, selectAll, togglePhoto, isPhotoSelected, selectionLabel, toPhotoExportSource } from './photo-export-selection';
 import type { ExportCurrentSource } from './export-control-status';
@@ -77,7 +81,6 @@ import {
   type DomainAutosaveState,
 } from '../settings/autosave-queue';
 import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
-import { useWideViewport } from './viewport';
 import type { GalleryAnchor } from '../../app/manager-history-state';
 import {
   captureRenderedGalleryAnchor,
@@ -160,9 +163,11 @@ type AlbumDraft = {
 
 type ReorderDirection = 'earlier' | 'later';
 
+type AlbumOrderMode = 'manual' | 'newest' | 'oldest';
 type ReorderFocusRequest = {
   entryKey: string;
   direction: ReorderDirection;
+  control: 'button' | 'handle';
 };
 
 type CreateShareSnapshot = {
@@ -654,6 +659,58 @@ function timelineOrderedEntries(entries: readonly AlbumEntryView[]): AlbumEntryV
   });
 }
 
+function timelineValue(entry: AlbumPhotoEntry | AlbumRetainedEntry): string {
+  return isPhotoEntry(entry) ? entry.photo.timelineAt : entry.slot.timelineAt;
+}
+
+function timelineEntryId(entry: AlbumPhotoEntry | AlbumRetainedEntry): string {
+  return isPhotoEntry(entry) ? entry.photo.id : entry.slot.mediaId;
+}
+
+/**
+ * A chronological sort changes the photograph order but never turns a host-authored
+ * section into an accidental, invisible cross-section move. Sections remain the
+ * Album's editorial boundaries; each run of photos between them is re-ordered.
+ */
+function sortAlbumEntries(
+  entries: readonly AlbumEntryView[],
+  mode: Exclude<AlbumOrderMode, 'manual'>,
+): AlbumEntryView[] {
+  const direction = mode === 'newest' ? -1 : 1;
+  const sorted: AlbumEntryView[] = [];
+  let run: Array<AlbumPhotoEntry | AlbumRetainedEntry> = [];
+  const appendRun = () => {
+    sorted.push(...run.sort((left, right) => direction * (
+      timelineValue(left).localeCompare(timelineValue(right))
+      || timelineEntryId(left).localeCompare(timelineEntryId(right))
+    )));
+    run = [];
+  };
+  for (const entry of entries) {
+    if (entry.kind === 'section') {
+      appendRun();
+      sorted.push(entry);
+    } else {
+      run.push(entry);
+    }
+  }
+  appendRun();
+  return sorted;
+}
+
+function albumEntrySearchText(entry: AlbumEntryView): string {
+  if (isPhotoEntry(entry)) {
+    return [
+      galleryPhotoTitle(entry.photo),
+      entry.photo.originalFilename,
+      entry.photo.guestName,
+      entry.photo.caption ?? '',
+    ].join(' ').toLocaleLowerCase();
+  }
+  if (isRetainedEntry(entry)) return `${RETAINED_SLOT_NAME} ${entry.slot.mediaId}`.toLocaleLowerCase();
+  return entry.heading.toLocaleLowerCase();
+}
+
 function normalizeDraftCover(draft: AlbumDraft): AlbumDraft {
   return {
     ...draft,
@@ -886,7 +943,6 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   onAccessFailure,
   onAnnouncement,
   onAnchorReady,
-  actionDock = null,
   photoExportEnabled = false,
   onPhotoExport,
   onPhotoExportSourceChange,
@@ -913,6 +969,10 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const [starting, setStarting] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [albumDetailsOpen, setAlbumDetailsOpen] = useState(false);
+  const [albumFilterQuery, setAlbumFilterQuery] = useState('');
+  const [albumOrderMode, setAlbumOrderMode] = useState<AlbumOrderMode>('manual');
+  const [draggingEntryKey, setDraggingEntryKey] = useState<string | null>(null);
+  const [dropEntryKey, setDropEntryKey] = useState<string | null>(null);
   const [titleFocusRequest, setTitleFocusRequest] = useState(0);
   const [share, setShare] = useState<AlbumShareStatus>(null);
   const [sharePending, setSharePending] = useState(false);
@@ -941,7 +1001,6 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
    * `aria-expanded` stays honest, and so a focus request can never aim at a field
    * that CSS alone had taken off the screen.
    */
-  const wide = useWideViewport();
 
   const undo = useManagerUndo();
   const dismissUndo = undo.dismiss;
@@ -1743,9 +1802,10 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     const request = reorderFocusRequest.current;
     if (!request) return;
     reorderFocusRequest.current = null;
+    const control = request.control === 'handle' ? 'drag' : `move-${request.direction}`;
     listRef.current
       ?.querySelector<HTMLElement>(
-        `[data-entry-key="${CSS.escape(request.entryKey)}"] .album-entry__move-${request.direction}`,
+        `[data-entry-key="${CSS.escape(request.entryKey)}"] .album-entry__${control}`,
       )
       ?.focus();
   }, [draft.entries]);
@@ -1761,13 +1821,17 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     input?.select();
   }, [draft.entries]);
 
-  function move(from: number, to: number, direction: ReorderDirection) {
+  function move(from: number, to: number, direction: ReorderDirection, control: 'button' | 'handle' = 'button') {
+    if (albumOrderMode !== 'manual' || albumFilterQuery.trim()) {
+      setNotice('Return to manual order and clear the filter before moving an Album entry.');
+      return;
+    }
     const entry = draftRef.current.entries[from];
     if (!entry || from === to || to < 0 || to >= draftRef.current.entries.length) return;
     const entries = moveEntryTo(draftRef.current.entries, from, to);
     const context = removedEntryContext(entries, entryKey(entry));
     if (!context) return;
-    reorderFocusRequest.current = { entryKey: entryKey(entry), direction };
+    reorderFocusRequest.current = { entryKey: entryKey(entry), direction, control };
     applyDraft({ ...draftRef.current, entries }, false, [{
       kind: 'move-entry',
       key: entryKey(entry),
@@ -1777,6 +1841,41 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
       prefer: from < to ? 'previous' : 'next',
     }]);
     setAnnouncement(`${entryName(entry)} moved to position ${to + 1} of ${entries.length}.`);
+  }
+
+  function changeAlbumOrder(mode: AlbumOrderMode) {
+    if (mode === 'manual') {
+      setAlbumOrderMode(mode);
+      setAnnouncement('Manual order is active. Drag a handle or use the move controls to arrange the Album.');
+      return;
+    }
+    if (!undo.canPresent) {
+      setNotice('Wait for the current Album change to save before applying a new sort.');
+      return;
+    }
+    setAlbumOrderMode(mode);
+    const before = draftRef.current;
+    const entries = sortAlbumEntries(before.entries, mode);
+    const next = { ...before, entries };
+    const label = mode === 'newest' ? 'Newest first' : 'Oldest first';
+    if (draftKey(next) === draftKey(before)) {
+      setAnnouncement(`${label} is already the saved Album order.`);
+      return;
+    }
+    const fallback = fallbackForEntryKey(entries[0] ? entryKey(entries[0]) : null)
+      ?? leaveHeadingRef.current;
+    focusUndoFallback(fallback);
+    const message = `${label} was applied within each Album section.`;
+    applyDraft(next, true, [{ kind: 'replace-draft', draft: next }], {
+      inverse: {
+        kind: 'order',
+        restored: captureAlbumDraft(before),
+        message,
+        input: 'pointer',
+        fallback,
+      },
+    });
+    setAnnouncement(message);
   }
 
   function addSection() {
@@ -2291,6 +2390,9 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     await onPrepareExport();
   }, [onPrepareExport, settleDraft]);
 
+  const entryIndexes = useMemo(() => new Map(draft.entries.map((entry, index) => [entryKey(entry), index])), [draft.entries]);
+  const draggingEntryIndex = draggingEntryKey === null ? -1 : entryIndexes.get(draggingEntryKey) ?? -1;
+
   if (loading && !hasLoaded.current) return <LoadingState label="Opening the album…" live={false} />;
   if (loadFailure) {
     return <div className="gallery-album" ref={rootRef}>
@@ -2308,6 +2410,19 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const emptySections = emptySectionIds(draft.entries);
   const retainedSlots = draft.entries.filter(isRetainedEntry);
   const retainedCount = retainedSlots.length;
+  const normalizedAlbumFilter = albumFilterQuery.trim().toLocaleLowerCase();
+  const visibleEntries = normalizedAlbumFilter
+    ? draft.entries.filter((entry) => albumEntrySearchText(entry).includes(normalizedAlbumFilter))
+    : draft.entries;
+  const visiblePhotoCount = visibleEntries.filter(isPhotoEntry).length;
+  const canReorder = !selectingPhotos && normalizedAlbumFilter.length === 0 && albumOrderMode === 'manual';
+  const photoPositions = new Map<string, number>();
+  let savedPhotoPosition = 0;
+  for (const entry of draft.entries) {
+    if (!isPhotoEntry(entry)) continue;
+    savedPhotoPosition += 1;
+    photoPositions.set(entryKey(entry), savedPhotoPosition);
+  }
   const explicitCover = draft.coverMediaId
     ? photos.find((entry) => entry.photo.id === draft.coverMediaId)?.photo ?? null
     : null;
@@ -2336,7 +2451,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   const overCapacityReason = reconciliation?.kind === 'over-capacity'
     ? `Start from picks is unavailable because ${reconciliation.pickCount} picks exceed the ${ALBUM_MAX_ENTRIES}-entry Album limit.`
     : null;
-  const albumDetailsExpanded = wide || albumDetailsOpen;
+  const albumDetailsExpanded = albumDetailsOpen;
   const visibleAutosave = effectiveAlbumAutosaveState(
     autosave,
     loading,
@@ -2358,9 +2473,15 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     ? 'Stop Album link'
     : sharePending ? 'Creating Album link…' : 'Create Album link'}</button>;
 
-  let photoPosition = 0;
-  return <div className="gallery-album" ref={rootRef}>
-    <h3 className="section-label" ref={leaveHeadingRef} tabIndex={-1}>Album</h3>
+  return <div className="gallery-album gallery-album--organizer" ref={rootRef}>
+    <AlbumDelivery
+      heading={<h3 className="album-surface-title" ref={leaveHeadingRef} tabIndex={-1}>Album</h3>}
+      eventTimezone={eventTimezone ?? 'UTC'} currentSource={exportSource}
+      job={exportJob} activeJob={activeExport} download={exportDownload}
+      blockedReason={photoExportWaitMessage} onPrepare={prepareAlbumExport}
+      onDownload={onDownloadExport} onRetry={onRetryExport} onAnnouncement={onAnnouncement}
+      actionArea={photoExportActionArea} chooser={photoExportChooser}
+    />
     {notice && <div className="manager-action-error" role="alert">
       <div className="manager-action-error__summary">
         <div className="manager-action-error__alert">
@@ -2473,7 +2594,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
             {/* A trashed photo has not given its place back. Saying so here is the only
                 honest version of "how full is this album", and it is where a host
                 looks before deciding they have room for more. */}
-            <span>{photoCount} photo{photoCount === 1 ? '' : 's'} In Album{retainedCount > 0
+            <span>{photoCount} photo{photoCount === 1 ? '' : 's'}{retainedCount > 0
               ? `, and ${retainedCount} recently deleted photo${retainedCount === 1 ? '' : 's'} still holding a place`
               : ''}</span>
           </div>
@@ -2485,22 +2606,369 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                 onAnnouncement={onAnnouncement}
               />
             : <div className="album-editor">
-                <section className="album-metadata" aria-label="Album details">
-                  {/*
-                    A host opens the Album to reorder it, not to retype its title, so on a
-                    phone the details fold away and the order starts near the top.
+                <section className="album-organizer" aria-label="Organize album photos">
+                  <div className="album-organizer__controls">
+                    <div className="album-filter">
+                      <label htmlFor="album-filter-photos">Filter</label>
+                      <Search aria-hidden="true" />
+                      <input
+                        id="album-filter-photos"
+                        type="search"
+                        aria-label="Filter Album photos"
+                        value={albumFilterQuery}
+                        placeholder="Name, caption or filename"
+                        onChange={(change) => setAlbumFilterQuery(change.target.value)}
+                      />
+                      {albumFilterQuery && <button
+                        type="button"
+                        className="album-filter__clear"
+                        aria-label="Clear Album filter"
+                        onClick={() => { setAlbumFilterQuery(''); rootRef.current?.querySelector<HTMLInputElement>('#album-filter-photos')?.focus(); }}
+                      ><X aria-hidden="true" /></button>}
+                    </div>
+                    <label className="album-sort" htmlFor="album-sort-order">
+                      <span>Sort</span>
+                      <select
+                        id="album-sort-order"
+                        aria-label="Sort Album order"
+                        value={albumOrderMode}
+                        onChange={(change) => changeAlbumOrder(change.target.value as AlbumOrderMode)}
+                      >
+                        <option value="manual">Manual order</option>
+                        <option value="newest">Newest first</option>
+                        <option value="oldest">Oldest first</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p className="album-organizer__state" id="album-organizer-state" role="status">
+                    {normalizedAlbumFilter
+                      ? `Showing ${visiblePhotoCount} of ${photoCount} photos. Clear the filter to rearrange.`
+                      : albumOrderMode === 'manual'
+                        ? 'Drag photos to arrange, or use the move buttons.'
+                        : `${albumOrderMode === 'newest' ? 'Newest first' : 'Oldest first'} within sections. Choose Manual order to rearrange.`}
+                  </p>
+                </section>
 
-                    A real button over a conditional body, never a `<details>`: setting
-                    `details.open` imperatively can strand a collapsed block from 761,
-                    where the summary is hidden and nothing is left to reopen it.
-                  */}
-                  <button
-                    type="button"
-                    className="album-metadata__summary"
-                    aria-expanded={albumDetailsExpanded}
-                    aria-controls="album-metadata-body"
-                    onClick={() => setAlbumDetailsOpen((current) => !current)}
-                  >Album details</button>
+                {selectingPhotos && <div className="gallery-selection-controls" role="region" aria-label="Album photo selection">
+                  <button type="button" className="text-button" onClick={() => updatePhotoSelection(selectAll({ scope: 'album' }))}>Select all Album photos</button>
+                  <strong>{selectionLabel(photoSelection)}</strong>
+                  <button type="button" className="text-button" onClick={() => { updatePhotoSelection(emptySelection('album')); photoSelectControl.current?.focus(); }}>Clear selection</button>
+                  <button type="button" className="button button--primary" disabled={!photoExportEnabled || (photoSelection.mode === 'ids' && photoSelection.mediaIds.length === 0)} onClick={click => onPhotoExport?.(toPhotoExportSource(photoSelection), click.currentTarget)}>Save / Share photos</button>
+                </div>}
+
+                <p className="sr-only" id="album-reorder-help">Drag to move a photo. With a keyboard, use the arrow keys on its reorder handle.</p>
+                {draft.entries.length === 0
+                  ? <div className="empty-state">
+                      <h3>The Album is empty.</h3>
+                      <p>Add photos from Library to start arranging your album.</p>
+                      <button type="button" className="button button--secondary" onClick={onGoToLibrary}>Go to Library</button>
+                    </div>
+                  : visibleEntries.length === 0
+                    ? <div className="empty-state album-filter-empty">
+                        <h3>No Album photos match that filter.</h3>
+                        <p>Try a name, caption or filename, or clear the filter.</p>
+                        <button type="button" className="button button--secondary" onClick={() => setAlbumFilterQuery('')}>Clear filter</button>
+                      </div>
+                  : <ol
+                      className="album-review-grid"
+                      ref={listRef}
+                      onFocusCapture={(focusEvent) => {
+                        const focusedEntry = (focusEvent.target as HTMLElement)
+                          .closest<HTMLElement>('[data-entry-key]');
+                        const key = focusedEntry?.dataset.entryKey;
+                        if (key) lastFocusedEntryKey.current = key;
+                      }}
+                    >
+                      {visibleEntries.map((entry) => {
+                        const key = entryKey(entry);
+                        const name = entryName(entry);
+                        const index = entryIndexes.get(key)!;
+                        const earlierUnavailable = index === 0;
+                        const laterUnavailable = index === draft.entries.length - 1;
+                        // Retained slots are not numbered: the number is the guest's
+                        // reading position, and the public album omits the marker.
+                        const position = photoPositions.get(key) ?? 0;
+                        const isCover = entry.kind === 'photo' && entry.photo.id === effectiveCoverId;
+                        const previewFailed = entry.kind === 'photo'
+                          && failedPreviewIds.has(entry.photo.id);
+                        const retainedDeadline = entry.kind === 'photo-retained'
+                          ? retentionDisplay(entry.slot.restoreUntil, eventTimezone)
+                          : null;
+                        const retainedExpired = entry.kind === 'photo-retained'
+                          && retainedSlotExpired(entry.slot, deadlineNow);
+                        return <li
+                          key={key}
+                          data-entry-key={key}
+                          data-gallery-anchor-id={key}
+                          className={entry.kind === 'section'
+                            ? 'album-review-grid__section'
+                            : entry.kind === 'photo-retained'
+                              ? 'album-review-grid__photo album-review-grid__photo--retained'
+                              : 'album-review-grid__photo'}
+                          data-dragging={draggingEntryKey === key || undefined}
+                          data-drop-target={dropEntryKey === key && draggingEntryKey !== key || undefined}
+                          data-drop-side={draggingEntryIndex >= 0 && draggingEntryIndex < index ? 'after' : 'before'}
+                          draggable={canReorder}
+                          onDragStart={(dragEvent) => {
+                            if (!canReorder) { dragEvent.preventDefault(); return; }
+                            dragKey.current = key;
+                            setDraggingEntryKey(key);
+                            if (dragEvent.dataTransfer) {
+                              dragEvent.dataTransfer.effectAllowed = 'move';
+                              dragEvent.dataTransfer.setData('text/plain', key);
+                            }
+                          }}
+                          onDragOver={(dragEvent) => {
+                            if (canReorder && dragKey.current) {
+                              dragEvent.preventDefault();
+                              setDropEntryKey(key);
+                            }
+                          }}
+                          onDrop={(dropEvent) => {
+                            dropEvent.preventDefault();
+                            if (!canReorder) return;
+                            const sourceKey = dragKey.current;
+                            dragKey.current = null;
+                            setDraggingEntryKey(null);
+                            setDropEntryKey(null);
+                            if (!sourceKey) return;
+                            const currentEntries = draftRef.current.entries;
+                            const from = currentEntries.findIndex((item) => entryKey(item) === sourceKey);
+                            const to = currentEntries.findIndex((item) => entryKey(item) === key);
+                            if (from >= 0 && to >= 0) move(from, to, from < to ? 'later' : 'earlier');
+                          }}
+                          onDragEnd={(dragEvent) => {
+                            dragKey.current = null;
+                            setDraggingEntryKey(null);
+                            setDropEntryKey(null);
+                            dragEvent.dataTransfer?.clearData();
+                          }}
+                        >
+                          {selectingPhotos && entry.kind === 'photo' && <button type="button"
+                            className="album-photo-select"
+                            aria-pressed={isPhotoSelected(photoSelection, entry.photo.id)}
+                            aria-label={`${isPhotoSelected(photoSelection, entry.photo.id) ? 'Deselect' : 'Select'} ${name}, from ${entry.photo.guestName}`}
+                            onClick={() => { try { updatePhotoSelection(togglePhoto(photoSelection, entry.photo.id)); } catch (caught) { setNotice(errorMessage(caught, 'Selection could not be updated.')); } }}
+                          ><span aria-hidden="true">{isPhotoSelected(photoSelection, entry.photo.id) && <Check />}</span></button>}
+                          {entry.kind === 'section'
+                            ? <>
+                                <span className="album-section__marker" aria-hidden="true" />
+                                <div className="album-section__field">
+                                  <input
+                                    className="album-section__input"
+                                    // Named for what it becomes: the Album link renders this as a
+                                    // heading over the photos beneath it.
+                                    aria-label="Section heading"
+                                    placeholder="Untitled section"
+                                    value={entry.heading}
+                                    onChange={(change) => renameSection(
+                                      entry.id,
+                                      clampCodePoints(change.target.value, ALBUM_SECTION_HEADING_MAX_LENGTH),
+                                    )}
+                                    onBlur={() => commitSectionName(entry.id)}
+                                    onKeyDown={(pressed) => {
+                                      if (pressed.key === 'Enter') {
+                                        pressed.preventDefault();
+                                        pressed.currentTarget.blur();
+                                      }
+                                    }}
+                                  />
+                                  {emptySections.has(entry.id) && <small className="album-section__empty-note">
+                                    Empty section—omitted from the Album link
+                                  </small>}
+                                </div>
+                                <span className="album-section__rule" aria-hidden="true" />
+                              </>
+                            : entry.kind === 'photo-retained'
+                            /* Opaque on purpose. The host took this photograph out of
+                               view, so no image, caption, contributor or filename
+                               belongs here — only that the place is still held. */
+                            ? <>
+                                <div className="album-review-grid__preview">
+                                  <div className="album-review-grid__fallback album-review-grid__retained" aria-hidden="true">
+                                    <Trash2 />
+                                    <span>Not shown</span>
+                                  </div>
+                                </div>
+                                <span className="album-review-grid__meta">
+                                  <strong>{RETAINED_SLOT_NAME}</strong>
+                                </span>
+                                <small className="album-entry__retained-note">
+                                  {retainedExpired
+                                    ? <>
+                                        <span className="album-entry__retained-state">{RETAINED_SLOT_EXPIRED}</span>
+                                        {' '}Recovery ended{' '}
+                                        {retainedDeadline && <RetentionInstant display={retainedDeadline} />}
+                                        . Its place is held here until cleanup runs.
+                                      </>
+                                    : <>
+                                        Its place is held here. Recovery ends{' '}
+                                        {retainedDeadline && <RetentionInstant display={retainedDeadline} />}
+                                        .
+                                      </>}
+                                </small>
+                                {!retainedExpired && onOpenRecentlyDeleted && <button
+                                  type="button"
+                                  className="text-button album-entry__retained-open"
+                                  onClick={() => onOpenRecentlyDeleted(entry.slot.mediaId)}
+                                >Restore in Recently deleted</button>}
+                              </>
+                            : <>
+                                <div className="album-review-grid__preview">
+                                  {entry.photo.previewAvailable && !previewFailed
+                                    ? <img
+                                        src={mediaPreview(entry.photo.id)}
+                                        alt=""
+                                        loading={position <= 6 ? 'eager' : 'lazy'}
+                                        decoding="async"
+                                        onError={() => setFailedPreviewIds((current) => (
+                                          new Set(current).add(entry.photo.id)
+                                        ))}
+                                      />
+                                    : <div
+                                        className="album-review-grid__fallback"
+                                        role="img"
+                                        aria-label={`${name}, from ${entry.photo.guestName}`}
+                                      ><ImageOff aria-hidden="true" /><span>Preview unavailable</span></div>}
+                                  <span className="album-review-grid__number" data-testid="album-photo-position">{position}</span>
+                                  {isCover && <span className="album-review-grid__cover-badge">Cover</span>}
+                                </div>
+                                <span className="album-review-grid__meta">
+                                  <strong>{name}</strong>
+                                  <small>From {entry.photo.guestName}</small>
+                                </span>
+                              </>}
+
+                          {!(selectingPhotos && entry.kind === 'photo') && <span className="album-entry__controls">
+                            <button type="button" className="album-entry__drag"
+                              disabled={!canReorder}
+                              aria-label={`Reorder ${name}`}
+                              aria-describedby="album-reorder-help"
+                              onKeyDown={event => {
+                                if (['ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown'].includes(event.key)) {
+                                  event.preventDefault();
+                                  const earlier = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
+                                  move(index, index + (earlier ? -1 : 1), earlier ? 'earlier' : 'later', 'handle');
+                                }
+                              }}
+                              onPointerDown={event => {
+                                if (event.pointerType === 'mouse' || !canReorder) return;
+                                event.currentTarget.setPointerCapture(event.pointerId);
+                                dragKey.current = key;
+                                setDraggingEntryKey(key);
+                              }}
+                              onPointerMove={event => {
+                                if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                                const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-entry-key]');
+                                setDropEntryKey(target && listRef.current?.contains(target) ? target.dataset.entryKey ?? null : null);
+                                if (event.clientY > window.innerHeight - 72) window.scrollBy(0, 12);
+                                else if (event.clientY < 120) window.scrollBy(0, -12);
+                              }}
+                              onPointerUp={event => {
+                                if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                                event.currentTarget.releasePointerCapture(event.pointerId);
+                                const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-entry-key]');
+                                const targetKey = target && listRef.current?.contains(target) ? target.dataset.entryKey : null;
+                                const entries = draftRef.current.entries;
+                                const from = entries.findIndex(item => entryKey(item) === key);
+                                const to = entries.findIndex(item => entryKey(item) === targetKey);
+                                dragKey.current = null;
+                                setDraggingEntryKey(null);
+                                setDropEntryKey(null);
+                                if (from >= 0 && to >= 0) move(from, to, from < to ? 'later' : 'earlier');
+                              }}
+                              onPointerCancel={() => {
+                                dragKey.current = null;
+                                setDraggingEntryKey(null);
+                                setDropEntryKey(null);
+                              }}
+                            ><GripVertical aria-hidden="true" /></button>
+                            <button
+                              type="button"
+                              className="icon-button album-entry__move-earlier"
+                              disabled={!canReorder}
+                              aria-disabled={!canReorder || earlierUnavailable}
+                              aria-describedby={!canReorder ? 'album-organizer-state' : undefined}
+                              aria-label={`Move ${name} earlier`}
+                              onClick={() => {
+                                if (earlierUnavailable) return;
+                                move(index, index - 1, 'earlier');
+                              }}
+                              onKeyDown={(pressed) => {
+                                if (earlierUnavailable && (pressed.key === 'Enter' || pressed.key === ' ')) {
+                                  pressed.preventDefault();
+                                }
+                              }}
+                            >{entry.kind === 'section'
+                              ? <ChevronUp aria-hidden="true" />
+                              : <ChevronLeft aria-hidden="true" />}</button>
+                            <button
+                              type="button"
+                              className="icon-button album-entry__move-later"
+                              disabled={!canReorder}
+                              aria-disabled={!canReorder || laterUnavailable}
+                              aria-describedby={!canReorder ? 'album-organizer-state' : undefined}
+                              aria-label={`Move ${name} later`}
+                              onClick={() => {
+                                if (laterUnavailable) return;
+                                move(index, index + 1, 'later');
+                              }}
+                              onKeyDown={(pressed) => {
+                                if (laterUnavailable && (pressed.key === 'Enter' || pressed.key === ' ')) {
+                                  pressed.preventDefault();
+                                }
+                              }}
+                            >{entry.kind === 'section'
+                              ? <ChevronDown aria-hidden="true" />
+                              : <ChevronRight aria-hidden="true" />}</button>
+                            {entry.kind === 'photo' && <button
+                              type="button"
+                              className="icon-button album-entry__cover"
+                              hidden={!albumDetailsExpanded}
+                              aria-label={isCover
+                                ? `${name} is the Album cover`
+                                : `Use ${name} as the Album cover`}
+                              aria-pressed={isCover}
+                              onClick={() => {
+                                coverIntentGeneration.current += 1;
+                                applyDraft(
+                                  { ...draftRef.current, coverMediaId: entry.photo.id },
+                                  false,
+                                  [{ kind: 'set-cover', value: entry.photo.id }],
+                                );
+                                setAnnouncement(`${name} is the Album cover.`);
+                              }}
+                            ><Star aria-hidden="true" /></button>}
+                            {/* A retained slot has no Remove: the row is held for recovery, and
+                                dropping the marker would be a deletion the host did not ask for.
+                                Recently deleted owns what happens to it next. */}
+                            {entry.kind !== 'photo-retained' && <button
+                              type="button"
+                              className="icon-button album-entry__remove"
+                              disabled={!undo.canPresent
+                                || (entry.kind === 'photo' && pendingPickIds.has(entry.photo.id))}
+                              aria-label={entry.kind === 'section'
+                                ? `Remove the section ${name}`
+                                : `Remove ${name} from the Album`}
+                              onClick={(click) => {
+                                if (entry.kind === 'section') removeSection(entry.id, click.detail);
+                                else void trackOperation(() => removePhoto(entry, click.detail));
+                              }}
+                            ><X aria-hidden="true" /></button>}
+                          </span>}
+                        </li>;
+                      })}
+                    </ol>}
+              </div>}
+
+          <section className="album-settings" aria-label="Album settings">
+            <button type="button" className="album-settings__toggle"
+              aria-expanded={albumDetailsExpanded} aria-controls="album-settings-body"
+              onClick={() => setAlbumDetailsOpen(current => !current)}>
+              Album settings <ChevronDown aria-hidden="true" />
+            </button>
+            {albumDetailsExpanded && <div id="album-settings-body" className="album-settings__body">
+                <section className="album-metadata" aria-label="Album details">
                   {albumDetailsExpanded && <div
                     className="album-metadata__body"
                     id="album-metadata-body"
@@ -2604,297 +3072,31 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                   </div>}
                 </section>
 
-                <header className="album-order-heading">
-                  <div>
-                    <h3>Album order</h3>
-                    {/* Both ways to move a row, said once at the top of the list they act on: the
-                        rows are draggable, and every row also carries move controls for a host who
-                        is not dragging. */}
-                    {draft.entries.length > 0 && <p>
-                      {photoCount} photo{photoCount === 1 ? '' : 's'} · drag an entry, or use the move controls
-                    </p>}
-                  </div>
+
                   <div className="album-order-heading__controls">
                     {onPhotoExport && <button type="button" className="button button--secondary" ref={photoSelectControl} data-photo-export-origin aria-pressed={selectingPhotos} onClick={() => { setSelectingPhotos(value => !value); updatePhotoSelection(emptySelection('album')); }}>
                       {selectingPhotos ? 'Done selecting Album photos' : 'Select Album photos'}
                     </button>}
-                    <button type="button" className="button button--secondary" onClick={addSection}>
+                    <button type="button" className="button button--secondary" disabled={!canReorder} aria-describedby={!canReorder ? 'album-organizer-state' : undefined} onClick={addSection}>
                       <Plus aria-hidden="true" /> Add a section
                     </button>
                     <button
                       type="button"
                       className="text-button"
-                      disabled={!undo.canPresent}
+                      disabled={!undo.canPresent || !canReorder}
                       aria-describedby="album-reset-consequence"
                       onClick={(click) => resetOrder(click.detail)}
                     >
                       Reset to timeline order
                     </button>
                   </div>
-                </header>
-                {selectingPhotos && <div className="gallery-selection-controls" role="region" aria-label="Album photo selection">
-                  <button type="button" className="text-button" onClick={() => updatePhotoSelection(selectAll({ scope: 'album' }))}>Select all Album photos</button>
-                  <strong>{selectionLabel(photoSelection)}</strong>
-                  <button type="button" className="text-button" onClick={() => { updatePhotoSelection(emptySelection('album')); photoSelectControl.current?.focus(); }}>Clear selection</button>
-                  <button type="button" className="button button--primary" disabled={!photoExportEnabled || (photoSelection.mode === 'ids' && photoSelection.mediaIds.length === 0)} onClick={click => onPhotoExport?.(toPhotoExportSource(photoSelection), click.currentTarget)}>Save / Share photos</button>
-                </div>}
+
                 <small id="album-reset-consequence">
                   Reset removes every section and can be undone for {UNDO_WINDOW_MS / 1_000} seconds.
                 </small>
 
-                {draft.entries.length === 0
-                  ? <div className="empty-state">
-                      <h3>The Album is empty.</h3>
-                      <p>Pick photos in Library. Each pick makes a photo In Album for every host on this event. It does not publish to the Guest gallery.</p>
-                      <button type="button" className="button button--secondary" onClick={onGoToLibrary}>Go to Library</button>
-                    </div>
-                  : <ol
-                      className="album-review-grid"
-                      ref={listRef}
-                      onFocusCapture={(focusEvent) => {
-                        const focusedEntry = (focusEvent.target as HTMLElement)
-                          .closest<HTMLElement>('[data-entry-key]');
-                        const key = focusedEntry?.dataset.entryKey;
-                        if (key) lastFocusedEntryKey.current = key;
-                      }}
-                    >
-                      {draft.entries.map((entry, index) => {
-                        const key = entryKey(entry);
-                        const name = entryName(entry);
-                        const earlierUnavailable = index === 0;
-                        const laterUnavailable = index === draft.entries.length - 1;
-                        // Retained slots are not numbered: the number is the guest's
-                        // reading position, and the public album omits the marker.
-                        if (entry.kind === 'photo') photoPosition += 1;
-                        const position = photoPosition;
-                        const isCover = entry.kind === 'photo' && entry.photo.id === effectiveCoverId;
-                        const previewFailed = entry.kind === 'photo'
-                          && failedPreviewIds.has(entry.photo.id);
-                        const retainedDeadline = entry.kind === 'photo-retained'
-                          ? retentionDisplay(entry.slot.restoreUntil, eventTimezone)
-                          : null;
-                        const retainedExpired = entry.kind === 'photo-retained'
-                          && retainedSlotExpired(entry.slot, deadlineNow);
-                        return <li
-                          key={key}
-                          data-entry-key={key}
-                          data-gallery-anchor-id={key}
-                          className={entry.kind === 'section'
-                            ? 'album-review-grid__section'
-                            : entry.kind === 'photo-retained'
-                              ? 'album-review-grid__photo album-review-grid__photo--retained'
-                              : 'album-review-grid__photo'}
-                          draggable={!selectingPhotos}
-                          onDragStart={(dragEvent) => {
-                            if (selectingPhotos) { dragEvent.preventDefault(); return; }
-                            dragKey.current = key;
-                            if (dragEvent.dataTransfer) {
-                              dragEvent.dataTransfer.effectAllowed = 'move';
-                              dragEvent.dataTransfer.setData('text/plain', key);
-                            }
-                          }}
-                          onDragOver={(dragEvent) => dragEvent.preventDefault()}
-                          onDrop={(dropEvent) => {
-                            dropEvent.preventDefault();
-                            if (selectingPhotos) return;
-                            const sourceKey = dragKey.current;
-                            dragKey.current = null;
-                            if (!sourceKey) return;
-                            const currentEntries = draftRef.current.entries;
-                            const from = currentEntries.findIndex((item) => entryKey(item) === sourceKey);
-                            const to = currentEntries.findIndex((item) => entryKey(item) === key);
-                            if (from >= 0 && to >= 0) move(from, to, from < to ? 'later' : 'earlier');
-                          }}
-                          onDragEnd={(dragEvent) => {
-                            dragKey.current = null;
-                            dragEvent.dataTransfer?.clearData();
-                          }}
-                        >
-                          {selectingPhotos && entry.kind === 'photo' && <button type="button"
-                            className="album-photo-select"
-                            aria-pressed={isPhotoSelected(photoSelection, entry.photo.id)}
-                            aria-label={`${isPhotoSelected(photoSelection, entry.photo.id) ? 'Deselect' : 'Select'} ${name}, from ${entry.photo.guestName}`}
-                            onClick={() => { try { updatePhotoSelection(togglePhoto(photoSelection, entry.photo.id)); } catch (caught) { setNotice(errorMessage(caught, 'Selection could not be updated.')); } }}
-                          ><span aria-hidden="true">{isPhotoSelected(photoSelection, entry.photo.id) && <Check />}</span></button>}
-                          {entry.kind === 'section'
-                            ? <>
-                                <span className="album-section__marker" aria-hidden="true" />
-                                <div className="album-section__field">
-                                  <input
-                                    className="album-section__input"
-                                    // Named for what it becomes: the Album link renders this as a
-                                    // heading over the photos beneath it.
-                                    aria-label="Section heading"
-                                    placeholder="Untitled section"
-                                    value={entry.heading}
-                                    onChange={(change) => renameSection(
-                                      entry.id,
-                                      clampCodePoints(change.target.value, ALBUM_SECTION_HEADING_MAX_LENGTH),
-                                    )}
-                                    onBlur={() => commitSectionName(entry.id)}
-                                    onKeyDown={(pressed) => {
-                                      if (pressed.key === 'Enter') {
-                                        pressed.preventDefault();
-                                        pressed.currentTarget.blur();
-                                      }
-                                    }}
-                                  />
-                                  {emptySections.has(entry.id) && <small className="album-section__empty-note">
-                                    Empty section—omitted from the Album link
-                                  </small>}
-                                </div>
-                                <span className="album-section__rule" aria-hidden="true" />
-                              </>
-                            : entry.kind === 'photo-retained'
-                            /* Opaque on purpose. The host took this photograph out of
-                               view, so no image, caption, contributor or filename
-                               belongs here — only that the place is still held. */
-                            ? <>
-                                <div className="album-review-grid__preview">
-                                  <div className="album-review-grid__fallback album-review-grid__retained" aria-hidden="true">
-                                    <Trash2 />
-                                    <span>Not shown</span>
-                                  </div>
-                                </div>
-                                <span className="album-review-grid__meta">
-                                  <strong>{RETAINED_SLOT_NAME}</strong>
-                                </span>
-                                <small className="album-entry__retained-note">
-                                  {retainedExpired
-                                    ? <>
-                                        <span className="album-entry__retained-state">{RETAINED_SLOT_EXPIRED}</span>
-                                        {' '}Recovery ended{' '}
-                                        {retainedDeadline && <RetentionInstant display={retainedDeadline} />}
-                                        . Its place is held here until cleanup runs.
-                                      </>
-                                    : <>
-                                        Its place is held here. Recovery ends{' '}
-                                        {retainedDeadline && <RetentionInstant display={retainedDeadline} />}
-                                        .
-                                      </>}
-                                </small>
-                                {!retainedExpired && onOpenRecentlyDeleted && <button
-                                  type="button"
-                                  className="text-button album-entry__retained-open"
-                                  onClick={() => onOpenRecentlyDeleted(entry.slot.mediaId)}
-                                >Restore in Recently deleted</button>}
-                              </>
-                            : <>
-                                <div className="album-review-grid__preview">
-                                  {entry.photo.previewAvailable && !previewFailed
-                                    ? <img
-                                        src={mediaPreview(entry.photo.id)}
-                                        alt=""
-                                        loading={position <= 6 ? 'eager' : 'lazy'}
-                                        decoding="async"
-                                        onError={() => setFailedPreviewIds((current) => (
-                                          new Set(current).add(entry.photo.id)
-                                        ))}
-                                      />
-                                    : <div
-                                        className="album-review-grid__fallback"
-                                        role="img"
-                                        aria-label={`${name}, from ${entry.photo.guestName}`}
-                                      ><ImageOff aria-hidden="true" /><span>Preview unavailable</span></div>}
-                                  <span className="album-review-grid__number" data-testid="album-photo-position">{position}</span>
-                                  {isCover && <span className="album-review-grid__cover-badge">Cover</span>}
-                                </div>
-                                <span className="album-review-grid__meta">
-                                  <strong>{name}</strong>
-                                  <small>From {entry.photo.guestName}</small>
-                                </span>
-                              </>}
-
-                          {!(selectingPhotos && entry.kind === 'photo') && <span className="album-entry__controls">
-                            <button
-                              type="button"
-                              className="icon-button album-entry__move-earlier"
-                              aria-disabled={earlierUnavailable}
-                              aria-label={`Move ${name} earlier`}
-                              onClick={() => {
-                                if (earlierUnavailable) return;
-                                move(index, index - 1, 'earlier');
-                              }}
-                              onKeyDown={(pressed) => {
-                                if (earlierUnavailable && (pressed.key === 'Enter' || pressed.key === ' ')) {
-                                  pressed.preventDefault();
-                                }
-                              }}
-                            >{entry.kind === 'section'
-                              ? <ChevronUp aria-hidden="true" />
-                              : <ChevronLeft aria-hidden="true" />}</button>
-                            <button
-                              type="button"
-                              className="icon-button album-entry__move-later"
-                              aria-disabled={laterUnavailable}
-                              aria-label={`Move ${name} later`}
-                              onClick={() => {
-                                if (laterUnavailable) return;
-                                move(index, index + 1, 'later');
-                              }}
-                              onKeyDown={(pressed) => {
-                                if (laterUnavailable && (pressed.key === 'Enter' || pressed.key === ' ')) {
-                                  pressed.preventDefault();
-                                }
-                              }}
-                            >{entry.kind === 'section'
-                              ? <ChevronDown aria-hidden="true" />
-                              : <ChevronRight aria-hidden="true" />}</button>
-                            {entry.kind === 'photo' && <button
-                              type="button"
-                              className="icon-button album-entry__cover"
-                              aria-label={isCover
-                                ? `${name} is the Album cover`
-                                : `Use ${name} as the Album cover`}
-                              aria-pressed={isCover}
-                              onClick={() => {
-                                coverIntentGeneration.current += 1;
-                                applyDraft(
-                                  { ...draftRef.current, coverMediaId: entry.photo.id },
-                                  false,
-                                  [{ kind: 'set-cover', value: entry.photo.id }],
-                                );
-                                setAnnouncement(`${name} is the Album cover.`);
-                              }}
-                            ><Star aria-hidden="true" /></button>}
-                            {/* A retained slot has no Remove: the row is held for recovery, and
-                                dropping the marker would be a deletion the host did not ask for.
-                                Recently deleted owns what happens to it next. */}
-                            {entry.kind !== 'photo-retained' && <button
-                              type="button"
-                              className="icon-button album-entry__remove"
-                              disabled={!undo.canPresent
-                                || (entry.kind === 'photo' && pendingPickIds.has(entry.photo.id))}
-                              aria-label={entry.kind === 'section'
-                                ? `Remove the section ${name}`
-                                : `Remove ${name} from the Album`}
-                              onClick={(click) => {
-                                if (entry.kind === 'section') removeSection(entry.id, click.detail);
-                                else void trackOperation(() => removePhoto(entry, click.detail));
-                              }}
-                            ><X aria-hidden="true" /></button>}
-                          </span>}
-                        </li>;
-                      })}
-                    </ol>}
-              </div>}
-
-          <section className="album-exits" aria-labelledby="album-exits-title">
-            <h3 id="album-exits-title" ref={shareHeadingRef} tabIndex={-1}>Download Album</h3>
-            <AlbumExportControl
-              actionArea={photoExportActionArea}
-              chooser={photoExportChooser}
-              job={exportJob}
-              activeJob={activeExport}
-              prepareBlockedReason={photoExportWaitMessage}
-              download={exportDownload}
-              eventTimezone={eventTimezone ?? 'UTC'}
-              currentSource={exportSource}
-              onPrepare={prepareAlbumExport}
-              onDownload={onDownloadExport}
-              onRetry={onRetryExport}
-              live={false}
-            />
+            <div className="album-exits" aria-labelledby="album-exits-title">
+            <h4 className="sr-only" id="album-exits-title" ref={shareHeadingRef} tabIndex={-1}>Album link</h4>
             <div className="album-exits__controls">
               <button
                 type="button"
@@ -2902,10 +3104,9 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                 disabled={photoCount === 0}
                 onClick={() => { void togglePreview(); }}
               ><Eye aria-hidden="true" /> {previewOpen ? 'Back to editing' : 'Preview album'}</button>
-              {actionDock === null && shareAction}
+              {shareAction}
             </div>
 
-            {actionDock !== null && createPortal(shareAction, actionDock)}
 
             {share && <div className="album-share">
               <p>
@@ -2919,6 +3120,8 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                 value={share.url}
                 sensitive
               />
+            </div>}
+            </div>
             </div>}
           </section>
         </>}
