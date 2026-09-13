@@ -31,7 +31,7 @@ The slices are ordered. Later slices may consume contracts introduced earlier, b
 - A host-deleted original is recoverable until the earliest of 30 days after deletion, the event's existing management-access expiry, or the event's existing purge time. Recovery never outlives the authorization needed to perform it.
 - A live Album with no photos retains its URL and renders an intentional empty state.
 - Settings remains the sole owner of the Guest-gallery availability toggle. Guest gallery provides a focused route to the setting and an exact return intent.
-- Original download and deletion remain owned by Intake. Library may route to Intake but does not duplicate source-file actions.
+- Individual original-file download and deletion remain owned by Intake. Library may route to Intake but does not duplicate those per-photo actions. The later [Gallery export design](2026-09-12-photo-export-design.md) records the user's September 12 addition of bulk photo export from Library/Album, including full-tile selection; it is a scoped extension, not a relocation of Intake controls. The device-handoff and selected-photo ZIP phase is implemented locally; installed-release and physical-iPhone acceptance remain release gates. Direct Google Photos and OneDrive delivery remains the later phase.
 - The Manager shows the latest dated export snapshot per kind, not a full export-history product.
 - Manager section and Gallery mode use query parameters on the existing `/manage/event/:eventId` route.
 - Pause becomes upload-only. Existing Gallery, Guestbook, and My deliveries remain readable.
@@ -140,5 +140,5 @@ No deployment, remote migration, secret mutation, external message, or pull-requ
 - Cross-audience withdrawal orchestration
 - A support or unauthenticated ownerless-recovery bypass
 - Full export history or audit-log UI
-- Duplicating original-file actions in Library
+- Duplicating individual original-file actions in Library; the later bulk-export extension is scoped above
 - Replacing the Manager shell, upload queue, autosave queue, Router, or design system

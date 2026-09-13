@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
 
 import {
   MAX_NAMED_INVITEES_PER_HOUSEHOLD,
@@ -12,7 +13,9 @@ import type {
 } from '../../shared/contracts';
 import {
   EVENT_FIXTURE,
+  RSVP_HOUSEHOLD_DETAIL_FIXTURE,
   RSVP_HOUSEHOLD_FIXTURE,
+  RSVP_HOUSEHOLD_LIST_FIXTURE,
   stubGuestRoutes,
   stubManagerRoutes,
   stubRsvpRosterBatchRoutes,
@@ -77,6 +80,27 @@ async function expectTouchTargets(page: Page, selector: string, label: string) {
     expect(size.width, `${label} ${index + 1} width`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
     expect(size.height, `${label} ${index + 1} height`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
   }
+}
+
+async function expectHeadingInViewportAndClearManagerChrome(page: Page, heading: Locator, label: string) {
+  const viewport = page.viewportSize();
+  const headingBox = await heading.boundingBox();
+  const chromeBox = await page.locator('.manager-nav').boundingBox();
+  expect(viewport, `${label} viewport`).not.toBeNull();
+  expect(headingBox, `${label} heading box`).not.toBeNull();
+  expect(chromeBox, `${label} manager chrome box`).not.toBeNull();
+  expect(headingBox!.y, `${label} heading starts on screen`).toBeGreaterThanOrEqual(0);
+  // Chromium can report a box edge one device subpixel past the integer CSS viewport
+  // after scrollIntoView. Keep the allowance below one rendered CSS pixel so a clipped
+  // heading still fails while the observed 0.03125px rounding does not.
+  expect(headingBox!.y + headingBox!.height, `${label} heading ends on screen`)
+    .toBeLessThanOrEqual(viewport!.height + 0.5);
+
+  const overlapsChrome = headingBox!.x < chromeBox!.x + chromeBox!.width
+    && headingBox!.x + headingBox!.width > chromeBox!.x
+    && headingBox!.y < chromeBox!.y + chromeBox!.height
+    && headingBox!.y + headingBox!.height > chromeBox!.y;
+  expect(overlapsChrome, `${label} heading clears persistent manager chrome`).toBe(false);
 }
 
 async function openLookup(page: Page, household: RsvpHouseholdView | null = RSVP_HOUSEHOLD_FIXTURE) {
@@ -212,6 +236,89 @@ async function openManagerRsvp(page: Page) {
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}?section=rsvp`);
   await expect(page.getByRole('heading', { name: 'Guest list and RSVPs' })).toBeVisible();
 }
+
+test('RSVP focus keeps manager household opens visible and restores each rendered row', async ({ page }, testInfo) => {
+  const baseRow = RSVP_HOUSEHOLD_LIST_FIXTURE.households[0]!;
+  const householdRows = Array.from({ length: 12 }, (_, index) => {
+    const number = index + 1;
+    const label = index === 0
+      ? 'The Morgan household'
+      : index === 11
+        ? 'The Rivera household'
+        : `The Focus household ${number}`;
+    return {
+      ...baseRow,
+      id: `${String(number).padStart(8, '0')}-0000-4000-8000-${String(number).padStart(12, '0')}`,
+      householdKey: index === 0 ? 'morgan' : index === 11 ? 'rivera' : `focus-${number}`,
+      label,
+      version: baseRow.version + index,
+    };
+  });
+  const detailById = new Map(householdRows.map((row) => [row.id, {
+    ...RSVP_HOUSEHOLD_DETAIL_FIXTURE,
+    id: row.id,
+    householdKey: row.householdKey,
+    label: row.label,
+    version: row.version,
+  }]));
+
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: makeMedia(1), nextCursor: null } },
+    rsvp: { households: { households: householdRows, nextCursor: null } },
+  });
+  await page.route('**/api/manage/events/*/rsvp/households/*', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-1)!;
+    const detail = detailById.get(id);
+    if (!detail) return route.fallback();
+    await route.fulfill({ json: { data: detail, requestId: 'rsvp-focus-fixture' } });
+  });
+
+  const viewports = testInfo.project.name === 'mobile'
+    ? [{ width: 390, height: 844, screenshot: 'manager-390x844.png' }]
+    : [
+        { width: 320, height: 568, screenshot: 'manager-320x568.png' },
+        { width: 1440, height: 1000, screenshot: 'manager-1440x1000.png' },
+      ];
+  await mkdir('output/playwright/rsvp-focus', { recursive: true });
+
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await page.goto(`/manage/event/${EVENT_FIXTURE.id}?section=rsvp`);
+    await expect(page.getByRole('heading', { name: 'Guest list and RSVPs' })).toBeVisible();
+    await expect(page.locator('.rsvp-household-list > li')).toHaveCount(12);
+
+    const openAndClose = async (label: string, screenshot?: string) => {
+      const row = page.getByRole('button', { name: new RegExp(`^${label}`, 'u') });
+      await row.click();
+      const heading = page.getByRole('heading', { name: label, exact: true });
+      await expect(heading).toBeVisible();
+      await expect(heading).toBeFocused();
+      await expectHeadingInViewportAndClearManagerChrome(
+        page,
+        heading,
+        `${label} at ${viewport.width}x${viewport.height}`,
+      );
+      await expectTouchTargets(
+        page,
+        '.rsvp-household-editor .button',
+        `editor action at ${viewport.width}x${viewport.height}`,
+      );
+      await expectContained(
+        page,
+        page.locator('.rsvp-household-editor'),
+        `household editor at ${viewport.width}x${viewport.height}`,
+      );
+      if (screenshot) await page.screenshot({ path: `output/playwright/rsvp-focus/${screenshot}` });
+      await page.getByRole('button', { name: 'Close household', exact: true }).click();
+      await expect(row).toBeFocused();
+    };
+
+    await openAndClose('The Rivera household', viewport.screenshot);
+    await openAndClose('The Morgan household');
+    await openAndClose('The Rivera household');
+  }
+});
 
 test('six manager destinations and the RSVP panel stay contained at 320, 390, and 768', async ({ page }) => {
   await openManagerRsvp(page);

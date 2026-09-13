@@ -1,4 +1,4 @@
-import { MAX_EXPORT_PART_SOURCE_BYTES } from '../../shared/constants';
+import { MAX_EXPORT_PART_SOURCE_BYTES, MAX_IMAGE_BYTES, SUPPORTED_IMAGE_TYPES } from '../../shared/constants';
 import type { AppEnv } from '../env';
 import {
   ExportsRepository,
@@ -7,6 +7,7 @@ import {
 } from '../db/exports';
 import type { ExportRecord } from '../db/types';
 import { GuestbookRepository } from '../db/guestbook';
+import { PhotoExportsRepository } from '../db/photo-exports';
 import { MediaObjectWriteTombstoneRepository } from '../db/media-write-tombstones';
 import { buildExportManifest } from '../export/csv';
 import { resolveFrozenAlbumOrder } from '../export/album-order';
@@ -50,7 +51,7 @@ async function immutableMediaEntries(repository: ExportsRepository, jobId: strin
 async function immutableAlbumMediaEntries(
   repository: ExportsRepository,
   jobId: string,
-  rawEntries: string,
+  rawEntries: string | null,
 ) {
   const entries = [];
   let afterPosition = 0;
@@ -60,7 +61,29 @@ async function immutableAlbumMediaEntries(
     if (page.nextPosition === null) break;
     afterPosition = page.nextPosition;
   }
-  return resolveFrozenAlbumOrder(rawEntries, entries);
+  return rawEntries === null ? entries : resolveFrozenAlbumOrder(rawEntries, entries);
+}
+
+/** Fence each source pull, including the completion pull, while retaining backpressure. */
+function ownedSourceStream(body: ReadableStream<Uint8Array>, assertActive: () => Promise<void>, expectedBytes?: number) {
+  const reader = body.getReader(); let readBytes = 0; let closed = false;
+  const cancel = async () => { if (!closed) { closed = true; await reader.cancel(); } };
+  return { cancel, body: new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        await assertActive();
+        const chunk = await reader.read();
+        await assertActive();
+        if (chunk.done) {
+          if (expectedBytes !== undefined && readBytes !== expectedBytes) throw new Error('EXPORT_SOURCE_MISSING');
+          closed = true; reader.releaseLock(); controller.close(); return;
+        }
+        readBytes += chunk.value.byteLength;
+        if (expectedBytes !== undefined && (readBytes > expectedBytes || readBytes > MAX_IMAGE_BYTES)) throw new Error('EXPORT_SOURCE_MISSING');
+        controller.enqueue(chunk.value);
+      } catch (error) { await cancel(); controller.error(error); }
+    }, cancel,
+  }, { highWaterMark: 0 }) };
 }
 
 class ExportRunStopped extends Error {
@@ -95,6 +118,7 @@ export async function processExport(
   const exports = new ExportsRepository(env.DB);
   let job = await exports.getById(payload.jobId);
   if (!job) return null;
+  if (job.destination !== 'archive') return job;
   if (job.state === 'ready') return job;
   const claim = await exports.claimRunning(payload.jobId, payload.attempt, executionStartedAt);
   if (claim.status === 'lost') return claim.job;
@@ -112,8 +136,12 @@ export async function processExport(
     recordedAt: executionStartedAt,
   });
   const assertActive = async () => {
-    const activity = await exports.assertOwnedRunActive(owner);
+    const activity = await exports.assertOwnedRunActive(owner, owner.executionProtocol === 'selection-v1' ? clock().toISOString() : undefined);
     if (activity.status === 'active') return;
+    if (activity.status === 'expired' || (owner.executionProtocol === 'selection-v1' && activity.status === 'lost')) {
+      await new PhotoExportsRepository(env.DB).expireActive(clock().toISOString(), 100);
+      throw new ExportRunStopped(await exports.getById(owner.id));
+    }
     if (activity.status === 'event-deleted') {
       const failed = await exports.markOwnedFailed(
         owner,
@@ -145,8 +173,8 @@ export async function processExport(
   const manifestObjectKey = `${baseKey}/candidary-export-manifest.csv`;
   const uploadedKeys: string[] = [];
   try {
-    const snapshot = job.kind === 'album'
-      ? await immutableAlbumMediaEntries(exports, job.id, job.albumEntriesJson ?? '[]')
+    const snapshot = job.kind === 'album' || job.kind === 'selection'
+      ? await immutableAlbumMediaEntries(exports, job.id, job.kind === 'selection' ? null : job.albumEntriesJson ?? '[]')
       : await immutableMediaEntries(exports, job.id);
     if (snapshot.length !== job.mediaCount) throw new Error('EXPORT_SNAPSHOT_CHANGED');
     const partitions = partitionExportSnapshot(snapshot, maxPartBytes);
@@ -156,48 +184,61 @@ export async function processExport(
     let processedBytes = 0;
 
     for (const part of partitions) {
+      await assertActive();
       const entries = [];
-      for (const media of part.media) {
-        const bucket = media.objectBucketGeneration === 'canonical'
-          ? env.CANONICAL_MEDIA_BUCKET
-          : env.MEDIA_BUCKET;
+      const sources: Array<ReturnType<typeof ownedSourceStream>> = [];
+      try {
+        for (const media of part.media) {
+          const bucket = media.objectBucketGeneration === 'canonical'
+            ? env.CANONICAL_MEDIA_BUCKET
+            : env.MEDIA_BUCKET;
+          await assertActive();
+          const object = await bucket.get(media.objectKey);
+          if (!object?.body) throw new Error('EXPORT_SOURCE_MISSING');
+          const source = ownedSourceStream(object.body, assertActive,
+            job.kind === 'selection' ? media.byteSize ?? media.declaredByteSize : undefined);
+          sources.push(source);
+          await assertActive();
+          if (job.kind === 'selection' && (object.size !== (media.byteSize ?? media.declaredByteSize)
+            || object.size > MAX_IMAGE_BYTES || !SUPPORTED_IMAGE_TYPES.includes(media.mimeType)
+            || object.httpMetadata?.contentType !== media.mimeType)) throw new Error('EXPORT_SOURCE_MISSING');
+          entries.push({ media, body: source.body });
+        }
+        if (job.kind === 'complete') part.media.forEach((media, index) => photoArchiveByMediaId.set(media.id, {
+          partNumber: part.partNumber,
+          path: exportPath(media, index),
+        }));
+        const name = exportPartName(part.partNumber);
+        const objectKey = `${baseKey}/${name}`;
         await assertActive();
-        const object = await bucket.get(media.objectKey);
-        if (!object?.body) throw new Error('EXPORT_SOURCE_MISSING');
+        await inventoryExportWrite(objectKey);
         await assertActive();
-        entries.push({ media, body: object.body });
-      }
-      part.media.forEach((media, index) => photoArchiveByMediaId.set(media.id, {
-        partNumber: part.partNumber,
-        path: exportPath(media, index),
-      }));
-      const name = exportPartName(part.partNumber);
-      const objectKey = `${baseKey}/${name}`;
-      await assertActive();
-      await inventoryExportWrite(objectKey);
-      await assertActive();
-      await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries), {
-        httpMetadata: {
-          contentType: 'application/zip',
-          contentDisposition: `attachment; filename="candidary-${job.eventId}-${name}"`,
-        },
-      });
-      uploadedKeys.push(objectKey);
-      storedParts.push({
-        partNumber: part.partNumber,
-        objectKey,
-        mediaCount: part.media.length,
-        sourceBytes: part.sourceBytes,
-      });
-      processedMediaCount += part.media.length;
-      processedBytes += part.sourceBytes;
-      if (!await exports.recordProgress(owner, {
-        processedMediaCount,
-        processedBytes,
-        progressUpdatedAt: clock().toISOString(),
-      })) {
-        throw new ExportRunStopped(await exports.getById(job.id));
-      }
+        await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries), {
+          httpMetadata: {
+            contentType: 'application/zip',
+            contentDisposition: `attachment; filename="candidary-${job.eventId}-${name}"`,
+          },
+        });
+        await assertActive();
+        uploadedKeys.push(objectKey);
+        storedParts.push({
+          partNumber: part.partNumber,
+          objectKey,
+          mediaCount: part.media.length,
+          sourceBytes: part.sourceBytes,
+        });
+        processedMediaCount += part.media.length;
+        processedBytes += part.sourceBytes;
+        const replayingSelectionMilestone = owner.executionProtocol === 'selection-v1'
+          && processedMediaCount <= (job.processedMediaCount ?? 0) && processedBytes <= (job.processedBytes ?? 0);
+        if (!replayingSelectionMilestone && !await exports.recordProgress(owner, {
+          processedMediaCount,
+          processedBytes,
+          progressUpdatedAt: clock().toISOString(),
+        })) {
+          throw new ExportRunStopped(await exports.getById(job.id));
+        }
+      } finally { await Promise.all(sources.map(source => source.cancel().catch(() => undefined))); }
     }
 
     if (partitions.length) {
@@ -280,13 +321,17 @@ export async function processExport(
       new Date(completedAtDate.getTime() + 86_400_000).toISOString(),
     );
     if (ready.changed) return ready.job;
-    const activity = await exports.assertOwnedRunActive(owner);
+    const activity = await exports.assertOwnedRunActive(owner, owner.executionProtocol === 'selection-v1' ? clock().toISOString() : undefined);
     if (activity.status === 'event-deleted') {
       return (await exports.markOwnedFailed(
         owner,
         'EXPORT_EVENT_DELETED',
         clock().toISOString(),
       )).job;
+    }
+    if (activity.status === 'expired') {
+      await new PhotoExportsRepository(env.DB).expireActive(clock().toISOString(), 100);
+      return exports.getById(owner.id);
     }
     if (activity.status === 'lost') return activity.job;
     const failed = await exports.markOwnedFailed(owner, 'EXPORT_FAILED', clock().toISOString());

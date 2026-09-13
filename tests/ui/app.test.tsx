@@ -1172,6 +1172,9 @@ interface MediaPage { media: unknown[]; nextCursor: string | null }
 function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] = []) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
+    if (url.endsWith('/photo-exports/capabilities')) {
+      return json({ enabled: false, destinations: [], activeJob: null });
+    }
     if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
     if (url.endsWith('/guestbook/summary')) return json({ summary: {
       needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
@@ -4585,6 +4588,9 @@ describe('manager experience', () => {
         return errorJson({ code: 'MEDIA_STATE_CONFLICT', message: 'That photo changed before your update.', requestId: 'request-a' }, 409);
       }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/photo-exports/capabilities')) {
+        return json({ enabled: false, destinations: [], activeJob: null });
+      }
       if (url.includes('/media')) return json({ media: rows, nextCursor: null });
       if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
       if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
@@ -4981,6 +4987,9 @@ describe('manager experience', () => {
         return json({ exports: [queued] });
       }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/photo-exports/capabilities')) {
+        return json({ enabled: false, destinations: [], activeJob: null });
+      }
       if (url.endsWith('/guestbook/summary')) return json({ summary: {
         needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
       } });
@@ -6565,6 +6574,9 @@ describe('manager experience', () => {
         }, 401);
       }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
+      if (url.endsWith('/photo-exports/capabilities')) {
+        return json({ enabled: false, destinations: [], activeJob: null });
+      }
       if (url.endsWith('/guestbook/summary')) return json({ summary: {
         needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
       } });

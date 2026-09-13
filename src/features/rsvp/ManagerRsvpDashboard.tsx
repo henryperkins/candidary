@@ -37,7 +37,7 @@ interface ManagerRsvpDashboardProps {
   exportHref: string;
   onQueryChange: (value: string) => void;
   onStateChange: (value: RsvpHouseholdFilter) => void;
-  onOpenHousehold: (householdId: string) => void;
+  onOpenHousehold: (householdId: string, origin: HTMLButtonElement) => void;
   onLoadMore: () => void;
 }
 
@@ -100,10 +100,11 @@ export function ManagerRsvpDashboard({
       : <ul className="rsvp-household-list">
         {households.map((household) => <li key={household.id}>
           <button
+            id={`rsvp-household-row-${household.id}`}
             type="button"
             className={household.id === selectedId ? 'active' : ''}
             aria-pressed={household.id === selectedId}
-            onClick={() => onOpenHousehold(household.id)}
+            onClick={(event) => onOpenHousehold(household.id, event.currentTarget)}
           >
             <span className="rsvp-household-list__label">{household.label}</span>
             <span className="rsvp-household-list__counts">

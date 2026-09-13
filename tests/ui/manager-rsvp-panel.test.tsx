@@ -1,6 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type {
   EventView,
@@ -24,6 +24,12 @@ function failure(code: string, message: string, status: number) {
     status,
     headers: { 'content-type': 'application/json' },
   }));
+}
+
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((complete) => { resolve = complete; });
+  return { promise, resolve };
 }
 
 const event: EventView = {
@@ -150,6 +156,15 @@ function listPage(
 function route(input: RequestInfo | URL) {
   return new URL(String(input), 'https://candidary.test');
 }
+
+const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+
+beforeAll(() => { HTMLElement.prototype.scrollIntoView = vi.fn(); });
+
+afterAll(() => {
+  if (originalScrollIntoView) HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+  else Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
+});
 
 afterEach(() => {
   cleanup();
@@ -281,6 +296,304 @@ describe('manager RSVP panel', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Load more households' })).toBeVisible());
     await user.click(screen.getByRole('button', { name: 'Load more households' }));
     await waitFor(() => expect(requested.some((path) => path.includes('cursor=next-page'))).toBe(true));
+  });
+
+  it('keeps the latest household selection when an earlier response finishes last', async () => {
+    const first = deferredResponse();
+    const second = deferredResponse();
+    const other = { ...household, id: '55555555-5555-4555-8555-555555555555', householdKey: 'rivera', label: 'The Rivera household' };
+    const rows = listPage();
+    rows.households.push({ ...rows.households[0]!, id: other.id, householdKey: other.householdKey, label: other.label });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(rows);
+      if (url.pathname.endsWith(`/${household.id}`)) return first.promise;
+      if (url.pathname.endsWith(`/${other.id}`)) return second.promise;
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.click(screen.getByRole('button', { name: /The Rivera household/ }));
+    await act(async () => { second.resolve(await success(other)); });
+    expect(await screen.findByRole('heading', { name: other.label })).toHaveFocus();
+    await act(async () => { first.resolve(await success(household)); });
+    expect(screen.getByRole('heading', { name: other.label })).toHaveFocus();
+    expect(screen.queryByRole('heading', { name: household.label })).not.toBeInTheDocument();
+  });
+
+  it('keeps the current loading selection when a stale request fails and cleans up', async () => {
+    const first = deferredResponse();
+    const second = deferredResponse();
+    const other = { ...household, id: '55555555-5555-4555-8555-555555555555', householdKey: 'rivera', label: 'The Rivera household' };
+    const rows = listPage();
+    rows.households.push({ ...rows.households[0]!, id: other.id, householdKey: other.householdKey, label: other.label });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(rows);
+      if (url.pathname.endsWith(`/${household.id}`)) return first.promise;
+      if (url.pathname.endsWith(`/${other.id}`)) return second.promise;
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.click(screen.getByRole('button', { name: /The Rivera household/ }));
+    await act(async () => { first.resolve(await failure('INTERNAL_ERROR', 'Morgan failed.', 503)); });
+    expect(screen.queryByText('Morgan failed.')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Household label')).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Loading household');
+    expect(screen.getByRole('button', { name: 'Close household' })).toBeVisible();
+  });
+
+  it('stops announcing loading after the current household read fails and retains close', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(listPage());
+      if (url.pathname.endsWith(`/${household.id}`)) {
+        return failure('INTERNAL_ERROR', 'Morgan could not be opened.', 503);
+      }
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Morgan could not be opened.');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close household' })).toBeVisible();
+    expect(screen.queryByLabelText('Household label')).not.toBeInTheDocument();
+  });
+
+  it('retires a loading selection on close and returns focus to its row', async () => {
+    const pending = deferredResponse();
+    const other = { ...household, id: '55555555-5555-4555-8555-555555555555', householdKey: 'rivera', label: 'The Rivera household' };
+    const rows = listPage();
+    rows.households.push({ ...rows.households[0]!, id: other.id, householdKey: other.householdKey, label: other.label });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(rows);
+      if (url.pathname.endsWith(`/${other.id}`)) return pending.promise;
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    const origin = await screen.findByRole('button', { name: /The Rivera household/ });
+    await user.click(origin);
+    await user.click(screen.getByRole('button', { name: 'Close household' }));
+    await act(async () => { pending.resolve(await success(other)); });
+    expect(screen.queryByRole('heading', { name: other.label })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: /The Rivera household/ })).toHaveFocus());
+  });
+
+  it('does not let queued close focus override a newer household selection', async () => {
+    let restoreFocus: FrameRequestCallback | null = null;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      restoreFocus = callback;
+      return 1;
+    });
+    const other = { ...household, id: '55555555-5555-4555-8555-555555555555', householdKey: 'rivera', label: 'The Rivera household' };
+    const rows = listPage();
+    rows.households.push({ ...rows.households[0]!, id: other.id, householdKey: other.householdKey, label: other.label });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(rows);
+      if (url.pathname.endsWith(`/${household.id}`)) return success(household);
+      if (url.pathname.endsWith(`/${other.id}`)) return success(other);
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.click(screen.getByRole('button', { name: 'Close household' }));
+    expect(restoreFocus).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: /The Rivera household/ }));
+    expect(await screen.findByRole('heading', { name: other.label })).toHaveFocus();
+    await act(async () => { restoreFocus!(performance.now()); });
+    expect(screen.getByRole('heading', { name: other.label })).toHaveFocus();
+  });
+
+  it('retires detail callbacks when the managed event changes', async () => {
+    const pending = deferredResponse();
+    const nextEvent = { ...event, id: 'event-b', slug: 'rivera-event', name: 'Rivera event' };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(url.pathname.includes('/event-b/') ? emptySummary : summary);
+      if (url.pathname.endsWith('/households')) {
+        return success(url.pathname.includes('/event-b/') ? { households: [], nextCursor: null } : listPage());
+      }
+      if (url.pathname.endsWith(`/${household.id}`)) return pending.promise;
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const { rerender } = render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    rerender(<ManagerRsvpPanel event={nextEvent} onEventChanged={vi.fn()} />);
+    await act(async () => { pending.resolve(await success(household)); });
+    expect(screen.queryByRole('heading', { name: household.label })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Start your guest list' })).toBeVisible();
+  });
+
+  it('observes a committed stale write without replacing or unlocking the pending selection', async () => {
+    const write = deferredResponse();
+    const second = deferredResponse();
+    const onEventChanged = vi.fn();
+    const observed = vi.fn();
+    const other = { ...household, id: '55555555-5555-4555-8555-555555555555', householdKey: 'rivera', label: 'The Rivera household' };
+    const rows = listPage();
+    rows.households.push({ ...rows.households[0]!, id: other.id, householdKey: other.householdKey, label: other.label });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(rows);
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') return success(household);
+      if (url.pathname.endsWith(`/${household.id}`) && init?.method === 'PUT') return write.promise;
+      if (url.pathname.endsWith(`/${other.id}`)) return second.promise;
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={onEventChanged} onRosterVersionObserved={observed} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.clear(await screen.findByLabelText('Household label'));
+    await user.type(screen.getByLabelText('Household label'), 'Edited Morgan');
+    await user.click(screen.getByRole('button', { name: 'Save household' }));
+    await user.click(screen.getByRole('button', { name: /The Rivera household/ }));
+    await act(async () => {
+      write.resolve(await success({ household: { ...household, label: 'Edited Morgan', version: 5 }, rosterVersion: 8 }));
+    });
+    expect(observed).toHaveBeenCalledWith(8);
+    expect(onEventChanged).toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: 'Edited Morgan' })).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Loading household');
+    expect(screen.getByRole('button', { name: 'Close household' })).toBeVisible();
+    await act(async () => { second.resolve(await success(other)); });
+    expect(await screen.findByRole('heading', { name: other.label })).toHaveFocus();
+  });
+
+  it('observes a write that commits after close without reopening its household', async () => {
+    const write = deferredResponse();
+    const onEventChanged = vi.fn();
+    const observed = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(listPage());
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') return success(household);
+      if (url.pathname.endsWith(`/${household.id}`) && init?.method === 'PUT') return write.promise;
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={onEventChanged} onRosterVersionObserved={observed} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.click(await screen.findByRole('button', { name: 'Save household' }));
+    await user.click(screen.getByRole('button', { name: 'Close household' }));
+    await act(async () => {
+      write.resolve(await success({ household: { ...household, label: 'Edited Morgan', version: 5 }, rosterVersion: 8 }));
+    });
+    expect(observed).toHaveBeenCalledWith(8);
+    expect(onEventChanged).toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: 'Edited Morgan' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: /The Morgan household/ })).toHaveFocus());
+  });
+
+  it('retires a pending write when the panel unmounts', async () => {
+    const write = deferredResponse();
+    const onEventChanged = vi.fn();
+    const observed = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(listPage());
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') return success(household);
+      if (url.pathname.endsWith(`/${household.id}`) && init?.method === 'PUT') return write.promise;
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const { unmount } = render(
+      <ManagerRsvpPanel event={event} onEventChanged={onEventChanged} onRosterVersionObserved={observed} />,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.click(await screen.findByRole('button', { name: 'Save household' }));
+    unmount();
+    await act(async () => {
+      write.resolve(await success({ household: { ...household, version: 5 }, rosterVersion: 8 }));
+    });
+    expect(observed).not.toHaveBeenCalled();
+    expect(onEventChanged).not.toHaveBeenCalled();
+  });
+
+  it('ignores a conflict refresh after the household is reselected', async () => {
+    const conflict = deferredResponse();
+    const refresh = deferredResponse();
+    const other = { ...household, id: '55555555-5555-4555-8555-555555555555', householdKey: 'rivera', label: 'The Rivera household' };
+    const rows = listPage();
+    rows.households.push({ ...rows.households[0]!, id: other.id, householdKey: other.householdKey, label: other.label });
+    let morganReads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) return success(rows);
+      if (url.pathname.endsWith(`/${household.id}`) && (init?.method ?? 'GET') === 'GET') {
+        morganReads += 1;
+        return morganReads === 1 ? success(household) : refresh.promise;
+      }
+      if (url.pathname.endsWith(`/${household.id}`) && init?.method === 'PUT') return conflict.promise;
+      if (url.pathname.endsWith(`/${other.id}`)) return success(other);
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    await user.click(await screen.findByRole('button', { name: 'Save household' }));
+    await act(async () => { conflict.resolve(await failure('RSVP_HOUSEHOLD_CONFLICT', 'Morgan changed.', 409)); });
+    await waitFor(() => expect(morganReads).toBe(2));
+    await user.click(screen.getByRole('button', { name: /The Rivera household/ }));
+    expect(await screen.findByRole('heading', { name: other.label })).toHaveFocus();
+    await act(async () => { refresh.resolve(await success({ ...household, label: 'Stale conflict Morgan', version: 5 })); });
+    expect(screen.queryByText('Morgan changed.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Stale conflict Morgan' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: other.label })).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Save household' })).toBeEnabled();
+  });
+
+  it('focuses every explicit open and returns close focus to a current row or the dashboard heading', async () => {
+    const scrollIntoView = vi.mocked(HTMLElement.prototype.scrollIntoView);
+    scrollIntoView.mockClear();
+    const other = { ...household, id: '55555555-5555-4555-8555-555555555555', householdKey: 'rivera', label: 'The Rivera household' };
+    const rows = listPage();
+    rows.households.push({ ...rows.households[0]!, id: other.id, householdKey: other.householdKey, label: other.label });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = route(input);
+      if (url.pathname.endsWith('/summary')) return success(summary);
+      if (url.pathname.endsWith('/households')) {
+        return success(url.searchParams.get('state') === 'awaiting'
+          ? { households: [rows.households[0]], nextCursor: null }
+          : rows);
+      }
+      if (url.pathname.endsWith(`/${household.id}`)) return success(household);
+      if (url.pathname.endsWith(`/${other.id}`)) return success(other);
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    render(<ManagerRsvpPanel event={event} onEventChanged={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /The Morgan household/ }));
+    expect(await screen.findByRole('heading', { name: household.label })).toHaveFocus();
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'instant' });
+    await user.click(screen.getByRole('button', { name: /The Rivera household/ }));
+    expect(await screen.findByRole('heading', { name: other.label })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Close household' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /The Rivera household/ })).toHaveFocus());
+    await user.click(screen.getByRole('button', { name: /The Rivera household/ }));
+    expect(await screen.findByRole('heading', { name: other.label })).toHaveFocus();
+    await user.selectOptions(screen.getByLabelText('Response status'), 'awaiting');
+    await waitFor(() => expect(screen.queryByRole('button', { name: /The Rivera household/ })).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Close household' }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Guest list and RSVPs' })).toHaveFocus());
   });
 
   it('stages plain names, groups explicitly, previews, and commits the canonical batch', async () => {

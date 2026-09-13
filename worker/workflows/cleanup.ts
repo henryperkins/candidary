@@ -11,6 +11,7 @@ import {
   coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
 import type { AppEnv } from '../env';
+import { PhotoExportsRepository } from '../db/photo-exports';
 import {
   assertLegacyMediaCopyEnabled,
   eventRelationalPurgeEnabled,
@@ -99,6 +100,7 @@ export async function cleanupExpiredReservations(env: AppEnv, now = new Date()):
 export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Promise<number> {
   const repository = new ExportsRepository(env.DB);
   const timestamp = now.toISOString();
+  const expiredSelections = await new PhotoExportsRepository(env.DB).expireActive(timestamp, 100);
   const deleteInventory = async (candidate: ExpiredArtifactInventoryCandidate) => {
     const keys = [
       candidate.inventory.objectKey,
@@ -122,7 +124,7 @@ export async function cleanupExpiredExports(env: AppEnv, now = new Date()): Prom
   }
 
   const expired = await repository.listExpiredReady(timestamp);
-  let cleaned = 0;
+  let cleaned = expiredSelections;
   for (const candidate of expired) {
     const result = await repository.markExpired(candidate, timestamp);
     if (!result.changed) continue;
@@ -2670,6 +2672,8 @@ export async function scheduledCleanup(
   await cleanupGuestMessageRateEvents(env, now);
   await cleanupExpiredAlbumShareSessions(env, now);
   await cleanupExpiredReservations(env, now);
+  // Retire bounded expired selections before physical original deletion work.
+  await cleanupExpiredExports(env, now);
   // Before the promoter and the janitor, because a row whose recovery just ended
   // is a row those two are now allowed to act on. Its own bound means a large
   // backlog drains across passes rather than making one run unbounded.
@@ -2695,7 +2699,6 @@ export async function scheduledCleanup(
   // bounded latency pass preserves the prior same-run cleanup behavior for
   // aliases whose suppression was handed off while that first pass ran.
   await cleanupMediaObjectWriteTombstones(env, now);
-  await cleanupExpiredExports(env, now);
   // Global before per-instance recovery: a job whose exact legacy source is no
   // longer current has nothing left to restart, and current blockers rotate so
   // newer superseded rows cannot starve behind the same oldest hundred. Its

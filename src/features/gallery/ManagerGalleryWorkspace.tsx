@@ -14,7 +14,7 @@ import type { GalleryMode } from '../../app/manager-location';
 import type { ManagerMediaPage } from '../../app/types';
 import { describeLoadFailure, ErrorState } from '../../components/States';
 import { useManagerResource } from '../manager/resources';
-import type { EventView, ExportKind, GalleryAudienceSummaryView } from '../../../shared/contracts';
+import type { EventView, LegacyArchiveExportKind, GalleryAudienceSummaryView } from '../../../shared/contracts';
 import { MANAGER_BULK_SELECTION_MAX } from '../../../shared/constants';
 import type { LoadFailure } from '../../components/States';
 import type { DomainAutosaveState } from '../settings/autosave-queue';
@@ -35,6 +35,8 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { ExportCurrentSource } from './export-control-status';
 import type { GalleryAnchor, PublicationFilter } from '../../app/manager-history-state';
 import type { GalleryAnchorRestoreOutcome } from './gallery-anchor';
+import type { PhotoExportSource, PhotoExportView } from '../../../shared/photo-exports';
+import { PhotoExportChooser, PhotoExportEntryActions, usePhotoExportCapabilities } from './PhotoExportChooser';
 
 /**
  * Keyed by the mode union rather than matched with a fallback, so a fourth mode is a
@@ -133,7 +135,7 @@ export interface ManagerGalleryWorkspaceProps {
     download?: ExportDownloadView;
     albumDownload?: ExportDownloadView;
     status: 'idle' | 'loading' | 'ready' | 'failed';
-    onPrepare(kind?: ExportKind): Promise<void>;
+    onPrepare(kind?: LegacyArchiveExportKind): Promise<void>;
     onDownload(job: ExportView): Promise<void>;
     onRetry(job: ExportView): Promise<void>;
     failure?: LoadFailure | null;
@@ -198,6 +200,64 @@ ManagerGalleryWorkspaceProps
   onResourceEscalate,
   onAnchorReady,
 }, ref) {
+  const photoExports = usePhotoExportCapabilities(eventId);
+  const [recentPhotoExport, setRecentPhotoExport] = useState<PhotoExportView | null>(null);
+  const [photoExportActionError, setPhotoExportActionError] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController(); setRecentPhotoExport(null); setPhotoExportActionError(null);
+    let id: string | null = null;
+    try { id = sessionStorage.getItem(`candidary-last-photo-export:${eventId}`); } catch { /* New exports remain available when tab storage is restricted. */ }
+    if (id) void api<{ export: PhotoExportView }>(`/api/manage/events/${encodeURIComponent(eventId)}/photo-exports/${encodeURIComponent(id)}`, { signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setRecentPhotoExport(result.export);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [eventId]);
+  const [photoExportTarget, setPhotoExportTarget] = useState<{ eventId: string; mode: 'library' | 'album'; source: PhotoExportSource; origin: HTMLElement; resumeJobId?: string; key: number } | null>(null);
+  const photoExportSequence = useRef(0);
+  const currentPhotoScope = useRef({ eventId, mode }); currentPhotoScope.current = { eventId, mode };
+  const retirePhotoExport = useCallback(() => { photoExportSequence.current++; setPhotoExportTarget(null); }, []);
+  useLayoutEffect(() => { retirePhotoExport(); }, [eventId, mode, retirePhotoExport]);
+  const openPhotoExport = async (source: PhotoExportSource, origin: HTMLElement, resumeJobId?: string) => {
+    const sequence = ++photoExportSequence.current;
+    const scope = { eventId, mode };
+    if (source.scope === 'album' && !resumeJobId) {
+      const outcome = await albumRef.current?.prepareToLeave();
+      if (outcome?.status !== 'ready') return;
+    }
+    if (sequence !== photoExportSequence.current || currentPhotoScope.current.eventId !== scope.eventId || currentPhotoScope.current.mode !== scope.mode) return;
+    setPhotoExportTarget({ eventId, mode: source.scope, source, origin, resumeJobId, key: sequence });
+  };
+  const closePhotoExport = () => {
+    const target = photoExportTarget; retirePhotoExport();
+    if (!target || currentPhotoScope.current.mode !== target.mode || currentPhotoScope.current.eventId !== target.eventId) return;
+    const usable = (element: HTMLElement | null): element is HTMLElement => !!element?.isConnected && !element.closest('[hidden], [inert]') && !element.matches(':disabled');
+    const origin = usable(target.origin) ? target.origin : Array.from(document.querySelectorAll<HTMLElement>(target.mode === 'library' ? '.gallery-private-mode .gallery-select-toggle, .gallery-action [data-photo-export-origin], .gallery-private-mode [data-photo-export-origin]' : '.gallery-album-mode [data-photo-export-origin]')).find(usable) ?? null;
+    if (usable(origin)) origin.focus();
+  };
+  const prepareLegacyPhotoArchive = async (scope: 'library' | 'album') => {
+    if (scope === 'album' && (await albumRef.current?.prepareToLeave())?.status !== 'ready') return;
+    await exports.onPrepare(scope === 'library' ? 'complete' : 'album');
+  };
+  const photoEntry = (scope: 'library' | 'album', actionDock?: HTMLElement | null) => <PhotoExportEntryActions
+    actionDock={actionDock}
+    capabilities={photoExports.capabilities} error={photoExportActionError ?? photoExports.error}
+    recentJob={recentPhotoExport?.source.scope === scope ? recentPhotoExport : null}
+    onRetry={photoExports.refresh}
+    onOpen={origin => { void openPhotoExport(scope === 'library' ? { mode: 'all', scope, filter: { order: 'newest' }, excludedMediaIds: [] } : { mode: 'all', scope, excludedMediaIds: [] }, origin); }}
+    onResume={origin => { const id = photoExports.capabilities?.activeJob?.id ?? recentPhotoExport?.id; if (id) void openPhotoExport({ mode: 'ids', scope, mediaIds: [] }, origin, id); }}
+    onCancel={() => { const id = photoExports.capabilities?.activeJob?.id; if (!id) return; retirePhotoExport(); void api<{ export: PhotoExportView }>(`/api/manage/events/${encodeURIComponent(eventId)}/photo-exports/${id}/cancel`, { method: 'POST' }).then(result => { if (currentPhotoScope.current.eventId !== eventId) return; setRecentPhotoExport(result.export); setPhotoExportActionError(null); photoExports.refresh(); }).catch(caught => { if (currentPhotoScope.current.eventId !== eventId) return; setPhotoExportActionError(caught instanceof Error ? caught.message : 'Cancellation could not be confirmed. Try again.'); photoExports.refresh(); }); }}
+  />;
+  const ownsOpenPhotoSelection = (scope: 'library' | 'album') => photoExportTarget?.mode === scope
+    && photoExportTarget.eventId === eventId
+    && mode === scope;
+  const canSelectForPhotoExport = (scope: 'library' | 'album') => ownsOpenPhotoSelection(scope)
+    || (photoExports.capabilities?.enabled === true && !photoExports.capabilities.activeJob);
+  const photoChooser = (scope: 'library' | 'album') => photoExportTarget?.mode === scope && photoExportTarget.eventId === eventId && mode === scope ? <PhotoExportChooser
+    key={photoExportTarget.key} eventId={eventId} source={photoExportTarget.source} resumeJobId={photoExportTarget.resumeJobId}
+    onClose={closePhotoExport} onJobChanged={job => { if (job) { setRecentPhotoExport(job); try { sessionStorage.setItem(`candidary-last-photo-export:${eventId}`, job.id); } catch { /* Receipt persistence is enforced separately before a native handoff. */ } } photoExports.refresh(); exports.onRetryLoad?.(); }}
+    onPrepareFullArchive={() => prepareLegacyPhotoArchive(scope)}
+    onBeforeSnapshot={scope === 'album' ? async () => (await albumRef.current?.prepareToLeave())?.status === 'ready' : undefined}
+  /> : null;
   // Ordinary publication writes still own a narrow, workspace-local Library
   // refresh. The Manager epoch is additive: inverse commands use it to retire
   // every Gallery data owner plus Manager's affected sibling resources.
@@ -879,6 +939,9 @@ ManagerGalleryWorkspaceProps
           onRetry={exports.onRetry}
           live={false}
           actionDock={mode === 'library' ? actionDock : null}
+          actionArea={dock => photoEntry('library', dock)}
+          actionAreaOwnsInitialAction={photoExports.capabilities?.enabled === true}
+          chooser={photoChooser('library')}
         />
       </div>
       <ManagerPrivateGallery
@@ -894,6 +957,9 @@ ManagerGalleryWorkspaceProps
         live={false}
         onAnnouncement={setAnnouncement}
         onAnchorReady={reportLibraryAnchorReady}
+        photoExportEnabled={photoExports.capabilities?.enabled === true && !photoExports.capabilities.activeJob}
+        {...(canSelectForPhotoExport('library') ? { onPhotoExport: (source: PhotoExportSource, origin: HTMLElement) => { void openPhotoExport(source, origin); } } : {})}
+        onPhotoExportSourceChange={retirePhotoExport}
       />
     </div>
 
@@ -929,6 +995,12 @@ ManagerGalleryWorkspaceProps
         onAnnouncement={setAnnouncement}
         onAnchorReady={reportAlbumAnchorReady}
         actionDock={actionDock}
+        photoExportEnabled={photoExports.capabilities?.enabled === true && !photoExports.capabilities.activeJob}
+        {...(canSelectForPhotoExport('album') ? { onPhotoExport: (source: PhotoExportSource, origin: HTMLElement) => { void openPhotoExport(source, origin); } } : {})}
+        photoExportActionArea={photoEntry('album')}
+        photoExportActionAreaOwnsInitialAction={photoExports.capabilities?.enabled === true}
+        photoExportChooser={photoChooser('album')}
+        onPhotoExportSourceChange={retirePhotoExport}
       />
     </div>}
 

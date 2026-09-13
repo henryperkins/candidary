@@ -1,9 +1,20 @@
+import type { LegacyArchiveExportKind } from '../../shared/contracts';
+import type { PhotoExportDestination } from '../../shared/photo-exports';
 import { MAX_EVENT_BYTES } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import { GuestbookRepository } from './guestbook';
 import type { ExportMediaEntryRecord, ExportPartRecord, ExportRecord } from './types';
 
 interface ExportRow {
+  destination: PhotoExportDestination;
+  source_json: string | null;
+  request_digest: string | null;
+  idempotency_key: string | null;
+  initiating_principal: string | null;
+  confirmed_at: string | null;
+  hold_expires_at: string | null;
+  absolute_expires_at: string | null;
+  cancel_requested_at: string | null;
   id: string;
   event_id: string;
   kind: ExportRecord['kind'];
@@ -102,7 +113,7 @@ export interface ReadyExportInventory {
 
 export interface ExportRunOwner {
   id: string;
-  executionProtocol: 'attempt-v2';
+  executionProtocol: 'attempt-v2' | 'selection-v1';
   attempt: number;
   executionStartedAt: string;
 }
@@ -114,6 +125,7 @@ export type ExportRunClaim =
 
 export type ExportRunActivity =
   | { status: 'active'; job: ExportRecord }
+  | { status: 'expired'; job: ExportRecord }
   | { status: 'event-deleted'; job: ExportRecord }
   | { status: 'lost'; job: ExportRecord | null };
 
@@ -132,7 +144,7 @@ export interface ExportArtifactInventory {
 
 export interface ExportExpiryCandidate {
   id: string;
-  executionProtocol: 'legacy' | 'attempt-v2';
+  executionProtocol: 'legacy' | 'attempt-v2' | 'selection-v1';
   attempt: number;
   executionTransition: number;
   expiresAt: string;
@@ -158,6 +170,15 @@ export interface ExportDispatchFailureFence {
 
 function mapExport(row: ExportRow): ExportRecord {
   return {
+    destination: row.destination,
+    sourceJson: row.source_json,
+    requestDigest: row.request_digest,
+    idempotencyKey: row.idempotency_key,
+    initiatingPrincipal: row.initiating_principal,
+    confirmedAt: row.confirmed_at,
+    holdExpiresAt: row.hold_expires_at,
+    absoluteExpiresAt: row.absolute_expires_at,
+    cancelRequestedAt: row.cancel_requested_at,
     id: row.id,
     eventId: row.event_id,
     kind: row.kind,
@@ -256,6 +277,17 @@ function batchRow<T>(result: D1Result | undefined): T | null {
   return (result?.results[0] as T | undefined) ?? null;
 }
 
+/** Selection executions cannot outlive the frozen hold or the event. Legacy guards stay unchanged. */
+function archiveSelectionActiveSql(now: string): string {
+  return `(execution_protocol <> 'selection-v1' OR (
+    kind = 'selection' AND destination = 'archive' AND confirmed_at IS NOT NULL
+    AND cancel_requested_at IS NULL AND hold_expires_at > ${now} AND absolute_expires_at > ${now}
+    AND EXISTS (SELECT 1 FROM events WHERE events.id = export_jobs.event_id
+      AND events.deleted_at IS NULL AND events.management_access_expires_at > ${now}
+      AND events.purge_after > ${now})
+  ))`;
+}
+
 function albumGuestbookFieldsEmpty(job: ExportRecord): boolean {
   return job.guestbookEntryCount === null
     && job.guestbookSharedCount === null
@@ -314,7 +346,7 @@ function exportProtocolPaused(): ApiError {
  * instant; a complete export takes everything delivered by then, an album export
  * only what was picked by then.
  */
-function eligibleSourceSql(kind: 'complete' | 'album'): string {
+function eligibleSourceSql(kind: LegacyArchiveExportKind): string {
   return `
     media.event_id = ?2
     AND media.upload_state = 'stored'
@@ -343,7 +375,7 @@ function eligibleSourceSql(kind: 'complete' | 'album'): string {
  */
 function creationSentinel(
   db: D1Database,
-  kind: 'complete' | 'album',
+  kind: LegacyArchiveExportKind,
   jobId: string,
   eventId: string,
   snapshotAt: string,
@@ -666,14 +698,14 @@ export class ExportsRepository {
     return result.results.map(mapExport);
   }
 
-  async listLatestForManager(eventId: string): Promise<ExportRecord[]> {
+  async listLatestForManager(eventId: string): Promise<Array<ExportRecord & { kind: LegacyArchiveExportKind }>> {
     const result = await this.db.prepare(`
       WITH ranked AS (
         SELECT id, row_number() OVER (
           PARTITION BY kind ORDER BY created_at DESC, id DESC
         ) AS manager_rank
         FROM export_jobs
-        WHERE event_id = ?
+        WHERE event_id = ? AND kind IN ('complete', 'album')
       )
       SELECT export_jobs.*
       FROM export_jobs
@@ -681,7 +713,7 @@ export class ExportsRepository {
       WHERE ranked.manager_rank = 1
       ORDER BY export_jobs.created_at DESC, export_jobs.id DESC
     `).bind(eventId).all<ExportRow>();
-    return result.results.map(mapExport);
+    return result.results.map(mapExport).filter((job): job is ExportRecord & { kind: LegacyArchiveExportKind } => job.kind !== 'selection');
   }
 
   async listParts(exportJobId: string): Promise<ExportPartRecord[]> {
@@ -754,9 +786,12 @@ export class ExportsRepository {
   }
 
   async claimRunning(id: string, attempt: number, executionStartedAt: string): Promise<ExportRunClaim> {
+    const candidate = await this.getById(id);
+    if (!candidate || candidate.destination !== 'archive'
+      || (candidate.executionProtocol !== 'attempt-v2' && candidate.executionProtocol !== 'selection-v1')) return { status: 'lost', job: candidate };
     const owner: ExportRunOwner = {
       id,
-      executionProtocol: 'attempt-v2',
+      executionProtocol: candidate.executionProtocol,
       attempt,
       executionStartedAt,
     };
@@ -765,7 +800,8 @@ export class ExportsRepository {
       SET state = 'running', execution_transition = execution_transition + 1,
         execution_started_at = ?3, processed_media_count = 0,
         processed_bytes = 0, progress_updated_at = ?3, error_code = NULL
-      WHERE id = ?1 AND state = 'queued' AND execution_protocol = 'attempt-v2'
+      WHERE id = ?1 AND state = 'queued' AND execution_protocol = ?4
+        AND ${archiveSelectionActiveSql('?3')}
         AND attempt = ?2 AND execution_started_at IS NULL
         AND processed_media_count IS NULL AND processed_bytes IS NULL
         AND progress_updated_at IS NULL AND started_at IS NULL
@@ -779,7 +815,7 @@ export class ExportsRepository {
         SELECT 1 FROM events
         WHERE events.id = export_jobs.event_id AND events.deleted_at IS NULL
       )
-    `).bind(id, attempt, executionStartedAt).run();
+    `).bind(id, attempt, executionStartedAt, owner.executionProtocol).run();
     const job = await this.getById(id);
     const exactOwner = job?.state === 'running'
       && job.executionProtocol === owner.executionProtocol
@@ -791,15 +827,18 @@ export class ExportsRepository {
       : { status: 'resumed', owner, job };
   }
 
-  async assertOwnedRunActive(owner: ExportRunOwner): Promise<ExportRunActivity> {
+  async assertOwnedRunActive(owner: ExportRunOwner, now = new Date().toISOString()): Promise<ExportRunActivity> {
     const row = await this.db.prepare(`
-      SELECT j.*, e.id AS owner_event_id, e.deleted_at AS owner_event_deleted_at
+      SELECT j.*, e.id AS owner_event_id, e.deleted_at AS owner_event_deleted_at,
+        e.management_access_expires_at AS owner_management_expires_at, e.purge_after AS owner_purge_after
       FROM export_jobs j
       LEFT JOIN events e ON e.id = j.event_id
       WHERE j.id = ?
     `).bind(owner.id).first<ExportRow & {
       owner_event_id: string | null;
       owner_event_deleted_at: string | null;
+      owner_management_expires_at: string | null;
+      owner_purge_after: string | null;
     }>();
     if (!row) return { status: 'lost', job: null };
     const job = mapExport(row);
@@ -811,6 +850,12 @@ export class ExportsRepository {
     }
     if (row.owner_event_id === null || row.owner_event_deleted_at !== null) {
       return { status: 'event-deleted', job };
+    }
+    if (owner.executionProtocol === 'selection-v1') {
+      if (job.destination !== 'archive' || !job.confirmedAt || job.cancelRequestedAt) return { status: 'lost', job };
+      if (!job.holdExpiresAt || job.holdExpiresAt <= now || !job.absoluteExpiresAt || job.absoluteExpiresAt <= now
+        || !row.owner_management_expires_at || row.owner_management_expires_at <= now
+        || !row.owner_purge_after || row.owner_purge_after <= now) return { status: 'expired', job };
     }
     return { status: 'active', job };
   }
@@ -833,6 +878,7 @@ export class ExportsRepository {
       SET processed_media_count = ?5, processed_bytes = ?6, progress_updated_at = ?7
       WHERE id = ?1 AND state = 'running' AND execution_protocol = ?2
         AND attempt = ?3 AND execution_started_at = ?4
+        AND ${archiveSelectionActiveSql('?7')}
         AND processed_media_count IS NOT NULL AND processed_bytes IS NOT NULL
         AND ?5 >= processed_media_count AND ?6 >= processed_bytes
         AND (?5 > processed_media_count OR ?6 > processed_bytes)
@@ -848,7 +894,7 @@ export class ExportsRepository {
     ).run();
     if ((result.meta.changes ?? 0) === 1) return true;
     const job = await this.getById(owner.id);
-    return Boolean(job
+    return Boolean((await this.assertOwnedRunActive(owner, progress.progressUpdatedAt)).status === 'active' && job
       && job.state === 'running'
       && job.executionProtocol === owner.executionProtocol
       && job.attempt === owner.attempt
@@ -858,6 +904,8 @@ export class ExportsRepository {
   }
 
   async resetOwnedRunProgress(owner: ExportRunOwner, progressUpdatedAt: string): Promise<boolean> {
+    // Rebuilding a selection replays bytes while retaining its durable milestones.
+    if (owner.executionProtocol === 'selection-v1') return (await this.assertOwnedRunActive(owner, progressUpdatedAt)).status === 'active';
     const result = await this.db.prepare(`
       UPDATE export_jobs
       SET processed_media_count = 0, processed_bytes = 0, progress_updated_at = ?5
@@ -889,7 +937,8 @@ export class ExportsRepository {
       throw new Error('Photo inventory parts are incomplete or out of order.');
     }
     const albumFormat = job.kind === 'album';
-    const newCompleteFormat = !albumFormat
+    const selectionFormat = job.kind === 'selection';
+    const newCompleteFormat = job.kind === 'complete'
       && job.guestbookEntryCount !== null
       && job.guestbookSharedCount !== null
       && job.guestbookEventName !== null
@@ -897,8 +946,8 @@ export class ExportsRepository {
       && job.guestbookEventTimezone !== null
       && job.guestbookPrompt !== null
       && job.guestbookGalleryVisible !== null;
-    if (albumFormat) {
-      if (job.albumEntriesJson === null) {
+    if (albumFormat || selectionFormat) {
+      if (albumFormat && job.albumEntriesJson === null) {
         throw new Error('An album export requires frozen album order.');
       }
       if (!albumGuestbookFieldsEmpty(job) || inventory.guestbook !== null) {
@@ -943,6 +992,7 @@ export class ExportsRepository {
           error_code = ?5, completed_at = ?6, expires_at = ?7
         WHERE id = ?1 AND state = 'running' AND execution_protocol = ?2
           AND attempt = ?3 AND execution_started_at = ?4
+          AND ${archiveSelectionActiveSql('?6')}
           AND processed_media_count = media_count AND processed_bytes = total_bytes
           AND EXISTS (
           SELECT 1 FROM events
@@ -1013,6 +1063,7 @@ export class ExportsRepository {
         error_code = ?5, completed_at = ?6
       WHERE id = ?1 AND state = 'running' AND execution_protocol = ?2
         AND attempt = ?3 AND execution_started_at = ?4
+        AND (execution_protocol <> 'selection-v1' OR (destination = 'archive' AND cancel_requested_at IS NULL))
     `).bind(
       owner.id,
       owner.executionProtocol,
@@ -1025,6 +1076,19 @@ export class ExportsRepository {
       changed: (result.meta.changes ?? 0) === 1,
       job: await this.getById(owner.id),
     };
+  }
+
+  async markSelectionDispatchFailed(id: string, attempt: number, now: string): Promise<ExportDispatchFailureFence> {
+    const result = await this.db.prepare(`UPDATE export_jobs SET state='failed',
+      execution_transition=execution_transition+1,error_code='EXPORT_WORKFLOW_DISPATCH_FAILED',completed_at=?3
+      WHERE id=?1 AND attempt=?2 AND kind='selection' AND destination='archive'
+        AND execution_protocol='selection-v1' AND state='queued' AND confirmed_at IS NOT NULL
+        AND cancel_requested_at IS NULL AND execution_started_at IS NULL
+        AND processed_media_count IS NULL AND processed_bytes IS NULL AND progress_updated_at IS NULL
+        AND object_key IS NULL AND manifest_object_key IS NULL AND part_count=0
+        AND NOT EXISTS (SELECT 1 FROM export_parts WHERE export_job_id=?1)
+        AND ${archiveSelectionActiveSql('?3')}`).bind(id,attempt,now).run();
+    return { changed: result.meta.changes === 1, job: await this.getById(id) };
   }
 
   async markInitialDispatchFailed(
@@ -1111,7 +1175,7 @@ export class ExportsRepository {
    */
   async retry(id: string): Promise<ExportRecord> {
     const candidate = await this.getById(id);
-    if (!candidate) {
+    if (!candidate || candidate.kind === 'selection') {
       throw new ApiError('EXPORT_ALREADY_ACTIVE', 'Only failed or expired exports can be retried.', 409);
     }
     const sourcesIntact = `
@@ -1304,14 +1368,14 @@ export class ExportsRepository {
 
   async markExpired(candidate: ExportExpiryCandidate, now: string): Promise<ExportExpiryResult> {
     const expiryClaim = `expiry:${crypto.randomUUID()}`;
-    const nextTransition = candidate.executionProtocol === 'attempt-v2'
+    const nextTransition = candidate.executionProtocol !== 'legacy'
       ? candidate.executionTransition + 1
       : candidate.executionTransition;
     const results = await this.db.batch([
       this.db.prepare(`
         UPDATE export_jobs
         SET state = 'expired',
-          execution_transition = CASE WHEN execution_protocol = 'attempt-v2'
+          execution_transition = CASE WHEN execution_protocol IN ('attempt-v2', 'selection-v1')
             THEN execution_transition + 1 ELSE execution_transition END,
           error_code = ?6
         WHERE id = ?1 AND state = 'ready' AND execution_protocol = ?2

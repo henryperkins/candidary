@@ -15,6 +15,7 @@ interface RsvpHouseholdFormProps {
   saving: boolean;
   saveError: string;
   reviewUpdated: boolean;
+  focusHeading?: boolean;
   onDraftChange: (draft: RsvpDraft) => void;
   onSubmit: (draft: RsvpDraft) => Promise<void>;
 }
@@ -26,6 +27,7 @@ export function RsvpHouseholdForm({
   saving,
   saveError,
   reviewUpdated,
+  focusHeading = false,
   onDraftChange,
   onSubmit,
 }: RsvpHouseholdFormProps) {
@@ -37,6 +39,10 @@ export function RsvpHouseholdForm({
   useEffect(() => {
     if (reviewUpdated) reviewHeadingRef.current?.focus();
   }, [reviewUpdated, household.version]);
+
+  useEffect(() => {
+    if (focusHeading && !reviewUpdated) reviewHeadingRef.current?.focus();
+  }, [focusHeading, household.id, reviewUpdated]);
 
   function changeAttendance(inviteeId: string, attendance: 'attending' | 'declined') {
     const current = draft[inviteeId]!;
@@ -98,7 +104,7 @@ export function RsvpHouseholdForm({
         <p className="rsvp-eyebrow">{household.label}</p>
         <HeadingTag
           ref={reviewHeadingRef}
-          tabIndex={reviewUpdated ? -1 : undefined}
+          tabIndex={-1}
         >{reviewUpdated ? 'Review updated household' : 'Your household RSVP'}</HeadingTag>
         {reviewUpdated && <p>The invitation changed. Review every person before sending again.</p>}
       </header>

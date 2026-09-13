@@ -21,6 +21,10 @@ import {
   type ManagerGalleryWorkspaceProps,
 } from '../../src/features/gallery/ManagerGalleryWorkspace';
 import type { GalleryMode } from '../../src/app/manager-location';
+import {
+  GalleryExportControl,
+  type GalleryExportControlHandle,
+} from '../../src/features/gallery/GalleryExportControl';
 import type { ExportCurrentSource } from '../../src/features/gallery/export-control-status';
 import type { ExportDownloadView, ExportView, MediaView } from '../../src/app/types';
 import {
@@ -162,6 +166,9 @@ function managerFetch(overrides: {
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'https://candidary.test');
     const method = init?.method ?? 'GET';
+    if (url.pathname === '/api/manage/events/event-a/photo-exports/capabilities' && method === 'GET') {
+      return success({ enabled: false, destinations: [], activeJob: null });
+    }
     if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
       const query = url.searchParams.get('query');
       const favorites = url.searchParams.get('favorites') === '1';
@@ -255,7 +262,17 @@ function renderGalleryWithFetch(
       return gallerySummary(overrides.galleryRows);
     }
     if (!implementation) throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
-    return (implementation as (request: RequestInfo | URL, options?: RequestInit) => unknown)(input, init);
+    try {
+      return (implementation as (request: RequestInfo | URL, options?: RequestInit) => unknown)(input, init);
+    } catch (caught) {
+      if (url.pathname === '/api/manage/events/event-a/photo-exports/capabilities'
+        && method === 'GET'
+        && caught instanceof Error
+        && caught.message === `Unexpected request ${method} ${url.pathname}${url.search}`) {
+        return success({ enabled: false, destinations: [], activeJob: null });
+      }
+      throw caught;
+    }
   });
   vi.stubGlobal('fetch', fetchMock);
   const onPrepare = overrides.onPrepare ?? vi.fn(noop);
@@ -368,6 +385,71 @@ afterEach(() => {
 });
 
 describe('host private gallery', () => {
+  it('photo export selects the entire tile once and carries all-results exclusions to the existing card', async () => {
+    const original = managerFetch({ nextCursor: 'unloaded-page' });
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/photo-exports/capabilities')
+      ? success({ enabled: true, destinations: ['device', 'archive'], activeJob: null }) : original(input, init));
+    renderGalleryWithFetch(fetcher);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Select photos' }));
+    const tile = screen.getByRole('button', { name: 'Select First dance, from Jose' });
+    await user.click(tile);
+    expect(tile).toHaveAttribute('aria-pressed', 'true');
+    expect(tile.querySelector('input')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Select all matching photos' }));
+    await user.click(screen.getByRole('button', { name: 'Deselect First dance, from Jose' }));
+    expect(screen.getAllByText('All matching photos except 1').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /Pick for Album/ })).toBeDisabled();
+    const tray = screen.getByRole('region', { name: 'Album' });
+    const origin = within(tray).getByRole('button', { name: 'Save / Share photos' });
+    await user.click(origin);
+    const chooser = screen.getByRole('region', { name: 'Save or share photos' });
+    expect(chooser.closest('[aria-label="Complete export"]')).not.toBeNull();
+    expect(within(chooser).getByText(/All matching photos except 1/)).toBeVisible();
+    await user.click(within(chooser).getByRole('button', { name: 'Close photo export' }));
+    expect(origin).toHaveFocus();
+    expect(document.querySelectorAll('.gallery-action > button')).toHaveLength(1);
+    await user.click(origin);
+    const filter = screen.getByRole('button', { name: /Album picks/ });
+    await user.click(filter);
+    expect(screen.queryByRole('region', { name: 'Save or share photos' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Album' })).toBeNull();
+  });
+
+  it('photo export leaves the complete archive available when capability discovery fails', async () => {
+    const original = managerFetch();
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/photo-exports/capabilities') ? failure('INTERNAL_ERROR', 'Export availability is temporarily unavailable.') : original(input, init));
+    const onPrepare = vi.fn(noop); renderGalleryWithFetch(fetcher, { onPrepare });
+    await screen.findByText(/Export availability is temporarily unavailable/);
+    expect(screen.getByRole('button', { name: 'Save / Share photos' })).toBeDisabled();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Download all' }));
+    expect(onPrepare).toHaveBeenCalledWith();
+  });
+
+  it.each(['all-results', 'over-50 explicit'] as const)('photo export restores keyboard focus after clearing an %s selection', async (selectionKind) => {
+    const galleryRows = Array.from({ length: 51 }, (_, index) => photo(`export-${index}`, '2026-08-15T22:42:00.000Z'));
+    const original = managerFetch({ galleryRows });
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/photo-exports/capabilities')
+      ? success({ enabled: true, destinations: ['device', 'archive'], activeJob: null }) : original(input, init));
+    renderGalleryWithFetch(fetcher, { galleryRows });
+    const user = userEvent.setup();
+    const selectControl = await screen.findByRole('button', { name: 'Select photos' });
+    await user.click(selectControl);
+    if (selectionKind === 'all-results') {
+      await user.click(screen.getByRole('button', { name: 'Select all matching photos' }));
+      expect(within(screen.getByRole('region', { name: 'Album' })).getByText('All matching photos')).toBeVisible();
+    } else {
+      await user.click(screen.getByRole('button', { name: /Select this moment/ }));
+      expect(within(screen.getByRole('region', { name: 'Album' })).getByText('51 selected')).toBeVisible();
+    }
+    expect(screen.getByRole('button', { name: /Pick for Album/ })).toBeDisabled();
+    const clear = screen.getByRole('button', { name: 'Clear selection' });
+    clear.focus();
+    await user.keyboard('{Enter}');
+    expect(screen.queryByRole('region', { name: 'Album' })).toBeNull();
+    expect(selectControl).toHaveFocus();
+  });
+
   it('names the private workspace once and leaves Download all self-explanatory', async () => {
     renderGallery();
 
@@ -1553,6 +1635,44 @@ describe('host private gallery', () => {
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     expect(onPrepare).toHaveBeenCalledTimes(1);
     expect(onPrepare).toHaveBeenCalledWith();
+  });
+
+  it.each([
+    ['enabled selection', 'Save / Share photos'],
+    ['recent photo receipt', 'View photo export'],
+  ] as const)('waits for a resolved legacy export before falling back to an %s action', (_, photoActionName) => {
+    const control = createRef<GalleryExportControlHandle>();
+    const readyJob: ExportView = {
+      id: 'export-focus', kind: 'complete', state: 'ready',
+      snapshotAt: '2026-09-19T00:00:00Z', createdAt: '2026-09-19T00:00:01Z',
+      startedAt: '2026-09-19T00:00:02Z', completedAt: '2026-09-19T00:00:03Z',
+      mediaCount: 3, totalBytes: 384, processedMediaCount: 3, processedBytes: 384,
+      progressUpdatedAt: '2026-09-19T00:00:03Z', attempt: 1, partCount: 1,
+      expiresAt: '2026-09-20T00:00:03Z', errorCode: null,
+      guestbookEntryCount: 0, guestbookSharedCount: 0, guestbookEventName: null,
+      guestbookEventDate: null, guestbookEventTimezone: null, guestbookPrompt: null,
+      guestbookGalleryVisible: null,
+    };
+    const view = (resourceStatus: 'loading' | 'ready') => <GalleryExportControl
+      ref={control}
+      eventTimezone="America/Chicago"
+      currentSource={{ count: 3, freshness: 'fresh' }}
+      job={readyJob}
+      resourceStatus={resourceStatus}
+      onPrepare={noop}
+      onDownload={noop}
+      onRetry={noop}
+      actionArea={() => <button type="button" data-photo-export-origin>{photoActionName}</button>}
+      actionAreaOwnsInitialAction
+    />;
+    const rendered = render(view('loading'));
+
+    act(() => control.current?.focusIntendedAction());
+    expect(screen.getByRole('region', { name: 'Complete export' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: photoActionName })).not.toHaveFocus();
+
+    rendered.rerender(view('ready'));
+    expect(screen.getByRole('button', { name: 'Get download links' })).toHaveFocus();
   });
 
   it('keeps the ready frozen export and a separate current-source action', async () => {

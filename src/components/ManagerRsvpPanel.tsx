@@ -26,6 +26,12 @@ interface ManagerMutation {
   rosterVersion: number;
 }
 
+interface DetailOwner {
+  generation: number;
+  eventId: string;
+  householdId: string;
+}
+
 type EventWrite = <T>(request: () => Promise<T>) => Promise<T>;
 
 const passthroughEventWrite: EventWrite = <T,>(request: () => Promise<T>) => request();
@@ -36,6 +42,10 @@ const QUERY_DEBOUNCE_MS = 250;
 
 function failureMessage(caught: unknown, fallback: string): string {
   return caught instanceof Error && caught.message ? caught.message : fallback;
+}
+
+function householdRowId(householdId: string): string {
+  return `rsvp-household-row-${householdId}`;
 }
 
 export function ManagerRsvpPanel({
@@ -71,21 +81,52 @@ export function ManagerRsvpPanel({
   const [state, setState] = useState<RsvpHouseholdFilter>('all');
   const [listing, setListing] = useState(true);
   const [detail, setDetail] = useState<RsvpHouseholdDetail | null>(null);
+  const [selectedHouseholdId, setSelectedHouseholdId] = useState<string | null>(null);
+  const [detailReadState, setDetailReadState] = useState<'idle' | 'loading' | 'failed'>('idle');
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState('');
   const [notice, setNotice] = useState('');
-  const [conflictRefreshed, setConflictRefreshed] = useState(false);
+  const [focusHeading, setFocusHeading] = useState(false);
   // The roster version the next write is guarded on. It starts from the event the
   // manager loaded and then follows whatever the server actually committed.
   const [rosterVersion, setRosterVersion] = useState(event.rsvpRosterVersion);
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [intakeDirty, setIntakeDirty] = useState(false);
   const handledDiscardEpoch = useRef(0);
+  const detailGeneration = useRef(0);
+  const activeDetailOwner = useRef<DetailOwner | null>(null);
+  const mountedEvent = useRef<string | null>(eventId);
+  const detailOrigin = useRef<HTMLButtonElement | null>(null);
+  const pendingWrites = useRef(new Set<DetailOwner>());
+  const dashboardHeading = useRef<HTMLHeadingElement>(null);
   // Pages, filters, and refreshes all write the same list. Only the newest
   // intent may land, or a slow earlier answer would replace a narrower one.
   const listTicket = useRef(0);
 
+  function ownsDetail(owner: DetailOwner): boolean {
+    return mountedEvent.current === owner.eventId
+      && activeDetailOwner.current === owner
+      && detailGeneration.current === owner.generation;
+  }
+
   useEffect(() => { setRosterVersion((current) => Math.max(current, event.rsvpRosterVersion)); }, [event.rsvpRosterVersion]);
+  useEffect(() => {
+    mountedEvent.current = eventId;
+    activeDetailOwner.current = null;
+    detailOrigin.current = null;
+    setSelectedHouseholdId(null);
+    setDetail(null);
+    setDetailReadState('idle');
+    setBusy(false);
+    setFocusHeading(false);
+    setNotice('');
+    setAnnouncement('');
+    return () => {
+      mountedEvent.current = null;
+      activeDetailOwner.current = null;
+      detailGeneration.current += 1;
+    };
+  }, [eventId]);
   useEffect(() => {
     if (!discardDraftEpoch || handledDiscardEpoch.current === discardDraftEpoch) return;
     handledDiscardEpoch.current = discardDraftEpoch;
@@ -192,72 +233,136 @@ export function ManagerRsvpPanel({
   // Runs only after a write has already committed, so a failure here is a stale
   // total rather than a refused change. Saying so in the same status line keeps
   // a host from undoing work that actually landed.
-  async function refreshRoster() {
+  async function refreshRoster(expectedEventId = eventId) {
     try {
       await Promise.all([loadSummary(), loadList()]);
     } catch {
+      if (mountedEvent.current !== expectedEventId) return;
       setAnnouncement((current) => (current
         ? `${current} The totals could not be refreshed — reload to see them.`
         : 'The totals could not be refreshed — reload to see them.'));
     }
   }
 
-  function applyMutation(result: ManagerMutation, message: string) {
-    setDetail(result.household);
-    setRosterVersion(result.rosterVersion);
-    setAnnouncement(message);
-    setConflictRefreshed(false);
-    setNotice('');
-    // Roster version and RSVP activation live on the event, so the shell reloads
-    // it rather than guessing what changed.
-    onEventChanged();
-  }
-
   // A refused write means someone else's version won. Replace the view with the
   // winner and send the host back to the top of it before they edit again.
-  async function refreshAfterConflict(householdId: string, message: string) {
-    const current = await api<RsvpHouseholdDetail>(`${basePath}/households/${householdId}`);
+  async function refreshAfterConflict(owner: DetailOwner, message: string) {
+    const current = await api<RsvpHouseholdDetail>(`${basePath}/households/${owner.householdId}`);
+    if (!ownsDetail(owner)) return;
     setDetail(current);
     setAnnouncement(message);
-    setConflictRefreshed(true);
+    setNotice('');
+    setFocusHeading(true);
     onEventChanged();
   }
 
   async function runHouseholdWrite(
     householdId: string,
-    write: () => Promise<void>,
-  ) {
+    write: () => Promise<ManagerMutation>,
+    message: (result: ManagerMutation) => string,
+    onCommitted?: (result: ManagerMutation) => void,
+  ): Promise<number | undefined> {
+    const owner = activeDetailOwner.current;
+    if (!owner || owner.householdId !== householdId || selectedHouseholdId !== householdId) return;
+    if (pendingWrites.current.has(owner)) return;
+    pendingWrites.current.add(owner);
     setBusy(true);
+    setFocusHeading(false);
     setNotice('');
     try {
-      await write();
+      const result = await write();
+      if (mountedEvent.current !== owner.eventId) return result.rosterVersion;
+
+      setRosterVersion((current) => Math.max(current, result.rosterVersion));
+      onRosterVersionObserved?.(result.rosterVersion);
+      onCommitted?.(result);
+      // Roster version and RSVP activation live on the event, so the shell reloads
+      // it rather than guessing what changed.
+      onEventChanged();
+
+      if (ownsDetail(owner)) {
+        setDetail(result.household);
+        setAnnouncement(message(result));
+        setFocusHeading(false);
+        setNotice('');
+      }
+      await refreshRoster(owner.eventId);
+      return result.rosterVersion;
     } catch (caught) {
       if (caught instanceof ClientApiError && caught.code === 'RSVP_HOUSEHOLD_CONFLICT') {
+        if (!ownsDetail(owner)) return;
         try {
-          await refreshAfterConflict(householdId, caught.message);
+          await refreshAfterConflict(owner, caught.message);
           return;
         } catch (refreshFailure) {
-          setNotice(failureMessage(refreshFailure, 'The household changed, but could not be reloaded.'));
+          if (ownsDetail(owner)) {
+            setNotice(failureMessage(refreshFailure, 'The household changed, but could not be reloaded.'));
+          }
           return;
         }
       }
-      setNotice(failureMessage(caught, 'That change could not be saved.'));
+      if (ownsDetail(owner)) setNotice(failureMessage(caught, 'That change could not be saved.'));
     } finally {
-      setBusy(false);
+      pendingWrites.current.delete(owner);
+      if (ownsDetail(owner)) setBusy(false);
     }
   }
 
-  async function openHousehold(householdId: string) {
-    setConflictRefreshed(false);
+  async function openHousehold(householdId: string, origin?: HTMLButtonElement) {
+    const owner: DetailOwner = {
+      generation: ++detailGeneration.current,
+      eventId,
+      householdId,
+    };
+    activeDetailOwner.current = owner;
+    detailOrigin.current = origin ?? null;
+    setSelectedHouseholdId(householdId);
+    setDetail(null);
+    setDetailReadState('loading');
+    setFocusHeading(false);
     setNotice('');
     setBusy(true);
     try {
-      setDetail(await api<RsvpHouseholdDetail>(`${basePath}/households/${householdId}`));
+      const next = await api<RsvpHouseholdDetail>(`${basePath}/households/${householdId}`);
+      if (!ownsDetail(owner)) return;
+      setDetail(next);
+      setDetailReadState('idle');
+      setFocusHeading(true);
     } catch (caught) {
-      setNotice(failureMessage(caught, 'That household could not be opened.'));
+      if (ownsDetail(owner)) {
+        setDetailReadState('failed');
+        setNotice(failureMessage(caught, 'That household could not be opened.'));
+      }
     } finally {
-      setBusy(false);
+      if (ownsDetail(owner)) setBusy(false);
     }
+  }
+
+  function closeHousehold() {
+    const householdId = selectedHouseholdId;
+    const closingEventId = eventId;
+    const origin = detailOrigin.current;
+    detailGeneration.current += 1;
+    const closeGeneration = detailGeneration.current;
+    activeDetailOwner.current = null;
+    detailOrigin.current = null;
+    setSelectedHouseholdId(null);
+    setDetail(null);
+    setDetailReadState('idle');
+    setFocusHeading(false);
+    setBusy(false);
+    setNotice('');
+
+    window.requestAnimationFrame(() => {
+      if (mountedEvent.current !== closingEventId
+        || detailGeneration.current !== closeGeneration
+        || activeDetailOwner.current !== null) return;
+      const currentRow = householdId
+        ? document.getElementById(householdRowId(householdId)) as HTMLButtonElement | null
+        : null;
+      const target = origin?.isConnected ? origin : currentRow ?? dashboardHeading.current;
+      target?.focus({ preventScroll: true });
+    });
   }
 
   async function saveRoster(
@@ -265,52 +370,39 @@ export function ManagerRsvpPanel({
   ) {
     const current = detail;
     if (!current) return;
-    await runHouseholdWrite(current.id, async () => {
-      const result = await onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}`, {
+    await runHouseholdWrite(current.id, () => onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}`, {
         method: 'PUT',
         body: JSON.stringify({
           ...input,
           expectedVersion: current.version,
           expectedRosterVersion: rosterVersion,
         }),
-      }));
-      applyMutation(result, `${result.household.label} saved.`);
-      await refreshRoster();
-    });
+      })), (result) => `${result.household.label} saved.`);
   }
 
   async function saveCorrection(invitees: RsvpSubmissionInvitee[]) {
     const current = detail;
     if (!current) return;
-    await runHouseholdWrite(current.id, async () => {
-      const result = await onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}/response`, {
+    await runHouseholdWrite(current.id, () => onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}/response`, {
         method: 'PUT',
         body: JSON.stringify({
           invitees,
           expectedVersion: current.version,
           expectedRosterVersion: rosterVersion,
         }),
-      }));
-      applyMutation(result, 'Response correction saved.');
-      await refreshRoster();
-    });
+      })), () => 'Response correction saved.');
   }
 
   async function archiveHousehold() {
     const current = detail;
     if (!current) return;
-    await runHouseholdWrite(current.id, async () => {
-      const result = await onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}/archive`, {
+    await runHouseholdWrite(current.id, () => onEventWrite(() => api<ManagerMutation>(`${basePath}/households/${current.id}/archive`, {
         method: 'POST',
         body: JSON.stringify({
           expectedVersion: current.version,
           expectedRosterVersion: rosterVersion,
         }),
-      }));
-      applyMutation(result, `${result.household.label} archived.`);
-      setHasHistoricalHouseholds(true);
-      await refreshRoster();
-    });
+      })), (result) => `${result.household.label} archived.`, () => setHasHistoricalHouseholds(true));
   }
 
   const pristine = activeRosterState === 'known'
@@ -327,7 +419,7 @@ export function ManagerRsvpPanel({
 
   return <section className="rsvp-manager" aria-labelledby="rsvp-manager-title">
     <p className="section-label">Guest list</p>
-    <h2 id="rsvp-manager-title">Guest list and RSVPs</h2>
+    <h2 id="rsvp-manager-title" ref={dashboardHeading} tabIndex={-1}>Guest list and RSVPs</h2>
 
     {announcement && <p className="rsvp-manager__status" role="status">{announcement}</p>}
     {notice && <p className="rsvp-manager__notice" role="alert">{notice}</p>}
@@ -380,14 +472,14 @@ export function ManagerRsvpPanel({
       loading={listing}
       query={queryInput}
       state={state}
-      selectedId={detail?.id ?? null}
+      selectedId={selectedHouseholdId}
       exportHref={`${basePath}/export.csv`}
       onQueryChange={setQueryInput}
       onStateChange={(next) => {
         setState(next);
         setPage({ households: [], nextCursor: null });
       }}
-      onOpenHousehold={(householdId) => void openHousehold(householdId)}
+      onOpenHousehold={(householdId, origin) => void openHousehold(householdId, origin)}
       onLoadMore={() => void loadMore()}
     />}
 
@@ -395,18 +487,17 @@ export function ManagerRsvpPanel({
       detail={detail}
       creating={false}
       allowCreate={false}
+      loading={detailReadState === 'loading'}
+      selectionFailed={detailReadState === 'failed'}
       busy={busy}
-      autoFocusHeading={conflictRefreshed}
+      autoFocusHeading={focusHeading}
       onStartCreate={() => undefined}
       onCancelCreate={() => undefined}
       onCreate={() => undefined}
       onSaveRoster={(input) => void saveRoster(input)}
       onSaveCorrection={(invitees) => void saveCorrection(invitees)}
       onArchive={() => void archiveHousehold()}
-      onCloseDetail={() => {
-        setDetail(null);
-        setConflictRefreshed(false);
-      }}
+      onCloseDetail={closeHousehold}
     />
 
   </section>;

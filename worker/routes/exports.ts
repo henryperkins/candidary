@@ -152,7 +152,7 @@ async function dispatchWorkflowBatch(
   return observedWorkflowDispatch(workflow, id);
 }
 
-async function ensureRetryWorkflow(
+export async function ensureRetryWorkflow(
   workflow: AppEnv['EXPORT_WORKFLOW'],
   job: Awaited<ReturnType<typeof ownedJob>>,
 ): Promise<'dispatched' | 'failed'> {
@@ -176,7 +176,7 @@ async function ensureRetryWorkflow(
   throw new Error(`Retained retry Workflow ${id} has unknown status.`);
 }
 
-async function ensureInitialWorkflow(
+export async function ensureInitialWorkflow(
   workflow: AppEnv['EXPORT_WORKFLOW'],
   job: Awaited<ReturnType<typeof ownedJob>>,
 ): Promise<'dispatched' | 'failed'> {
@@ -212,7 +212,7 @@ async function ensureInitialWorkflow(
   }
 }
 
-async function attemptKeys(
+export async function attemptKeys(
   bucket: R2Bucket,
   job: Awaited<ReturnType<typeof ownedJob>>,
   attempt: number,
@@ -228,7 +228,7 @@ async function attemptKeys(
   return keys;
 }
 
-async function deleteExportKeys(bucket: R2Bucket, keys: string[]): Promise<void> {
+export async function deleteExportKeys(bucket: R2Bucket, keys: string[]): Promise<void> {
   for (let offset = 0; offset < keys.length; offset += 1_000) {
     await bucket.delete(keys.slice(offset, offset + 1_000));
   }
@@ -247,7 +247,8 @@ async function ownedReadyArtifact(
 ) {
   await manager(context);
   const job = await ownedJob(context);
-  if (job.kind === 'album'
+  if (job.destination !== 'archive') throw new ApiError('EXPORT_FAILED', 'This operation has no archive.', 409);
+  if ((job.kind === 'album' || job.kind === 'selection')
     && (kind === 'printable-guestbook' || kind === 'private-guestbook')) {
     throw new ApiError('EXPORT_FAILED', 'That export artifact is not available.', 404);
   }
@@ -425,6 +426,7 @@ exportRoutes.get('/manage/events/:eventId/exports/:jobId', async (context) => {
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context) => {
   await manager(context, true);
   const current = await ownedJob(context);
+  if (current.kind === 'selection') throw new ApiError('EXPORT_ALREADY_ACTIVE', 'Confirm the frozen photo selection through its photo export operation.', 409);
   const repository = new ExportsRepository(context.env.DB);
   const currentParts = await repository.listParts(current.id);
   const recovering = isRecoverableQueuedRetry(current) && currentParts.length === 0;
@@ -469,16 +471,18 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (context) => {
   await manager(context, true);
   const job = await ownedJob(context);
+  if (job.destination !== 'archive') throw new ApiError('EXPORT_FAILED', 'This operation has no archive.', 409);
   if (job.state !== 'ready' || !job.expiresAt || Date.parse(job.expiresAt) <= Date.now()) {
     throw new ApiError('EXPORT_FAILED', 'This export is not ready to download.', 409);
   }
   const repository = new ExportsRepository(context.env.DB);
   const parts = await repository.listParts(job.id);
   const albumFormat = job.kind === 'album';
-  const newCompleteFormat = !albumFormat && job.guestbookEntryCount !== null;
+  const photoOnly = albumFormat || job.kind === 'selection';
+  const newCompleteFormat = job.kind === 'complete' && job.guestbookEntryCount !== null;
   const snapshotMetadataComplete = albumFormat
     ? job.albumEntriesJson !== null && albumGuestbookSnapshotEmpty(job)
-    : !newCompleteFormat || (
+    : job.kind === 'selection' ? albumGuestbookSnapshotEmpty(job) : !newCompleteFormat || (
     job.guestbookSharedCount !== null && job.guestbookEventName !== null
     && job.guestbookEventDate !== null && job.guestbookEventTimezone !== null
     && job.guestbookPrompt !== null && job.guestbookGalleryVisible !== null
@@ -490,7 +494,7 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (cont
     : Boolean(job.manifestObjectKey) && partsComplete
       && parts.length === job.partCount && job.partCount > 0
       && parts.reduce((count, part) => count + part.mediaCount, 0) === job.mediaCount;
-  const guestbookComplete = albumFormat
+  const guestbookComplete = photoOnly
     ? job.guestbookHtmlObjectKey === null && job.guestbookHtmlBytes === null
       && job.guestbookHtmlSha256 === null && job.guestbookCsvObjectKey === null
       && job.guestbookCsvBytes === null && job.guestbookCsvSha256 === null

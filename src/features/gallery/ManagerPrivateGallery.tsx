@@ -19,6 +19,8 @@ import {
   type GallerySelectionAction,
 } from './selection-state';
 import { SelectionTray, type SelectionTrayInput } from './SelectionTray';
+import type { PhotoExportSource } from '../../../shared/photo-exports';
+import { emptySelection, selectAll, togglePhoto, isPhotoSelected, editingIds, selectionLabel, toPhotoExportSource } from './photo-export-selection';
 import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
 import type { GalleryAnchor } from '../../app/manager-history-state';
 import {
@@ -43,6 +45,9 @@ interface ManagerPrivateGalleryProps {
   live?: boolean;
   onAnnouncement?(message: string): void;
   onAnchorReady?(): void;
+  photoExportEnabled?: boolean;
+  onPhotoExport?(source: PhotoExportSource, origin: HTMLElement): void;
+  onPhotoExportSourceChange?(): void;
 }
 
 export interface ManagerPrivateGalleryHandle {
@@ -178,6 +183,9 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   live = true,
   onAnnouncement,
   onAnchorReady,
+  photoExportEnabled = false,
+  onPhotoExport,
+  onPhotoExportSourceChange,
 }, ref) {
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
@@ -204,6 +212,8 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   const [resultsFocusEpoch, setResultsFocusEpoch] = useState(0);
   const [favoritePendingIds, setFavoritePendingIds] = useState<ReadonlySet<string>>(() => new Set());
   const [selecting, setSelecting] = useState(false);
+  const [photoSelection, setPhotoSelection] = useState(() => emptySelection('library'));
+  const photoSelectionRef = useRef(photoSelection);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectedIdsRef = useRef<ReadonlySet<string>>(selectedIds);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -389,7 +399,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
 
   useEffect(() => {
     if (active) return;
-    if (selectedIdsRef.current.size > 0) clearSelection();
+    if (selectedIdsRef.current.size > 0 || photoSelectionRef.current.mode === 'all' || (photoSelectionRef.current.mode === 'ids' && photoSelectionRef.current.mediaIds.length > 0)) clearSelection(false, false);
     if (viewerPhotoId !== null) {
       setViewerPhotoId(null);
       viewerOrigin.current = null;
@@ -636,10 +646,32 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   }
 
   function commitSelection(action: GallerySelectionAction) {
+    if (onPhotoExport) {
+      let next = photoSelectionRef.current;
+      try {
+        if (action.type === 'clear') next = emptySelection('library');
+        else if (action.type === 'toggle') next = togglePhoto(next, action.id);
+        else {
+          const remove = action.type === 'toggle-moment' && action.ids.every(id => isPhotoSelected(next, id));
+          for (const id of action.ids) if (isPhotoSelected(next, id) === remove) next = togglePhoto(next, id);
+        }
+        commitPhotoSelection(next);
+      } catch (error) { setAnnouncement(errorMessage(error, 'Selection could not be updated.')); }
+      return;
+    }
     const transition = transitionSelection(selectedIdsRef.current, action);
     selectedIdsRef.current = transition.next;
     setSelectedIds(transition.next);
     if (transition.message !== null) setAnnouncement(transition.message);
+  }
+
+  function commitPhotoSelection(next: PhotoExportSource) {
+    photoSelectionRef.current = next; setPhotoSelection(next);
+    // The established reducer remains the only author of the editing selection.
+    const ids = editingIds(next);
+    const editing = transitionSelection(new Set(), { type: 'select-many', ids: ids ?? [], label: 'these results' }).next;
+    selectedIdsRef.current = editing; setSelectedIds(editing);
+    setAnnouncement(selectionLabel(next)); onPhotoExportSourceChange?.();
   }
 
   function clearSelection(announce = true, restoreControl = true) {
@@ -659,11 +691,16 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     selectToggleRef.current?.focus();
   }, []);
 
+  // Export-only selections can leave the editing projection empty throughout.
+  // Restore after the actual selection clears, including all-results and >50 IDs.
+  const selectionEmpty = onPhotoExport
+    ? photoSelection.mode === 'ids' && photoSelection.mediaIds.length === 0
+    : selectedIds.size === 0;
   useEffect(() => {
-    if (selectedIds.size !== 0 || !restoreSelectionFocus.current) return;
+    if (!selectionEmpty || !restoreSelectionFocus.current) return;
     restoreSelectionFocus.current = false;
     restoreSelectionControlFocus();
-  }, [restoreSelectionControlFocus, selectedIds.size]);
+  }, [restoreSelectionControlFocus, selectionEmpty]);
 
   function toggleSelecting() {
     if (selecting) clearSelection();
@@ -732,6 +769,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
    * second destructive act.
    */
   async function applyPicks(picked: boolean, input: SelectionTrayInput) {
+    if (onPhotoExport && editingIds(photoSelectionRef.current) === null) return;
     const ids = [...selectedIdsRef.current];
     if (ids.length === 0 || bulkBusy || !undo.canPresent) return;
     const newPicks = ids.filter((id) => !rows.find((row) => row.id === id)?.isFavorite).length;
@@ -907,7 +945,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
         loadingMore={loadingMore}
         favoritePendingIds={favoritePendingIds}
         selecting={selecting}
-        selectedIds={selectedIds}
+        selectedIds={onPhotoExport ? new Set(rows.filter(photo => isPhotoSelected(photoSelection, photo.id)).map(photo => photo.id)) : selectedIds}
         onLoadMore={() => void loadMore()}
         onOpen={openViewer}
         onFavorite={(photo) => void toggleFavorite(photo)}
@@ -1009,8 +1047,10 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       <button
         type="button"
         className="text-button"
-        onClick={() => selectMany(rows, 'these results')}
-      >Select all {rows.length} loaded photo{rows.length === 1 ? '' : 's'}</button>
+        onClick={() => onPhotoExport
+          ? commitPhotoSelection(selectAll({ scope: 'library', filter: { order: order === 'earliest' ? 'oldest' : 'newest', ...(query ? { query } : {}), ...(favoritesOnly ? { favorites: true } : {}) } }))
+          : selectMany(rows, 'these results')}
+      >{onPhotoExport ? 'Select all matching photos' : `Select all ${rows.length} loaded photo${rows.length === 1 ? '' : 's'}`}</button>
     </div>}
     {loading && hasConfirmedPage.current && <p className="sr-only" role={live ? 'status' : undefined}>Updating photos…</p>}
     <p
@@ -1040,8 +1080,11 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     {/* Busy scopes the results, not the surface: on the container it swept in the search
         field, so a host's own input sat inside a busy region during every load. */}
     <div aria-busy={loading || loadingMore}>{content}</div>
-    {selectedIds.size > 0 && <SelectionTray
-      count={selectedIds.size}
+    {(onPhotoExport ? photoSelection.mode === 'all' || photoSelection.mediaIds.length > 0 : selectedIds.size > 0) && <SelectionTray
+      count={onPhotoExport && photoSelection.mode === 'ids' ? photoSelection.mediaIds.length : selectedIds.size}
+      countLabel={onPhotoExport ? selectionLabel(photoSelection) : undefined}
+      editingDisabledReason={onPhotoExport && editingIds(photoSelection) === null ? 'Pick and Remove require an explicit selection of 50 photos or fewer.' : undefined}
+      exportAction={onPhotoExport && <button type="button" className="button button--primary" disabled={!photoExportEnabled || bulkBusy} onClick={event => onPhotoExport(toPhotoExportSource(photoSelection), event.currentTarget)}>Save / Share photos</button>}
       busy={bulkBusy}
       mutationLocked={!undo.canPresent}
       primary={{

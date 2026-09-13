@@ -1,0 +1,37 @@
+# Photo export selection: disabled release checklist
+
+This implementation record was prepared before release. It describes frozen Gallery photo selection, selected-photo ZIP export, and native device file handoff. Migration `0023_photo_export_selection.sql` initializes `photo_export_admission.enabled = 0`. At this checkpoint, installed Worker configuration, destination admission, deployment, provider credentials, and physical-device acceptance were unchanged.
+
+## Reviewed implementation
+
+- `export_jobs` retains all 36 prior columns in order and adds the versioned selection identity, destination, idempotency, principal, confirmation, hold, deadline, and retirement fields. Migration-local backups preserve every child row while D1 replaces the parent table; foreign keys, indexes, and referencing triggers are restored and verified against actual migrated D1.
+- Existing complete and Album archives remain narrow legacy archive contracts. Selection freezes canonical originals by exact bucket generation and object key, with SQL-derived count, bytes, order, and source sentinels. Library filters keep Gallery literal matching and translate UI `earliest` to export `oldest`; Album snapshots preserve stored photo order followed by unplaced timeline picks.
+- `worker/db/photo-exports.ts` owns atomic admission, principal-bound status and entries, confirmation, bounded device read leases, handoff receipts, cancellation/expiry, selected-archive retry, and explicit archive fallback. Device jobs become `handed-off` only after every frozen entry is acknowledged. Failed or unavailable originals remain progress, including the tested 21 handed off plus 1 unavailable state.
+- Private manager routes authorize before bounded request buffering. Original reads use the frozen lease, validate the actual MIME type and byte count, retain same-origin private response headers, and release on completion, abort, error, or timeout. Selected archives preserve frozen order and photo metadata and omit Guestbook lookups and artifacts. Cleanup expires bounded active selections before physical original cleanup.
+- Library and Album expose explicit-ID or all-results/exclusions selection without changing the 50-photo editing limit. Each photo is one keyboard-focusable pressed tile; chooser entry points remain inside the existing Complete export and Album cards. Capability failure or disabled admission leaves legacy complete and Album archive actions usable.
+- Destination preparation freezes the source and presents the exact count and bytes for confirmation. A later user gesture prepares at most 20 files and 40 MiB with at most two reads in flight; another fresh gesture invokes native sharing. Cancellation retains the batch, uncertain receipt persistence never reopens the share sheet automatically, and ZIP fallback retains the exact frozen snapshot.
+- Device copy says `Handed to your device`, explains `Save Images` when offered, and gives manual new/existing Photos album guidance. It does not claim a confirmed Photos save, iCloud sync, or an in-browser Apple album picker. Google Photos and OneDrive controls are absent.
+
+## Focused local evidence
+
+- Task 1 schema/contracts: `npx vitest run --config vitest.config.ts tests/unit/photo-export-contract.test.ts tests/unit/verify-fresh-d1.test.ts` — **30 passed**, exit 0, 3.45s at 17:32:43. `npx vitest run --config vitest.worker.config.ts tests/worker/photo-export-schema.test.ts` — **12 passed**, exit 0, 6.10s at 17:32:50. The D1 fixture executes all 31 schema-verifier statements.
+- Task 2 repository: `npx vitest run --config vitest.worker.config.ts tests/worker/photo-export-snapshot.test.ts` — **19 passed**, exit 0, 10.11s at 18:23:31. This includes the reviewed atomic prior-part retirement correction.
+- Task 3 API/archive/cleanup: `npx vitest run --config vitest.worker.config.ts tests/worker/photo-export-api.test.ts tests/worker/photo-export-archive.test.ts tests/worker/export-workflow-ownership.test.ts tests/worker/export-cleanup-ownership.test.ts` — **29 passed**, exit 0, 9.46s at 18:27:51.
+- Task 4 selection/device/chooser: `npx vitest run --config vitest.config.ts tests/unit/photo-export-selection.test.ts tests/unit/photo-export-device.test.ts tests/ui/photo-export-chooser.test.tsx` — **12 passed**, exit 0, 2.17s at 18:58:42. The final focused surface lane passed **6 tests with 294 unrelated skipped**, exit 0, 4.07s at 19:07:46.
+- Task 5 rendered/native boundary: `npx playwright test tests/e2e/photo-export.spec.ts --project=desktop --project=mobile` — configured `tsc -b && vite build` passed; **5 representative cases passed with 5 intentional cross-project skips**, exit 0, 53.6s. The native browser stub inspected actual `File` names, MIME types, lengths, and bytes for JPEG, PNG, WebP, HEIC, and HEIF fixtures. Browser mocks are not physical iPhone acceptance.
+- Fresh successful viewport captures: `phone-390-library-chooser-in-complete-card.png` shows the chooser heading, Close control, device/ZIP choices, and intact selection tray at 390x844; `phone-320-album-select-mode.png` shows Album Select mode, a selected whole-photo tile, and its visible focus ring at 320x568.
+
+The configured build initially exposed TypeScript diagnostics in Tasks 1–3. Their original owners made type-only corrections, independent reviewers approved those deltas, and the resumed named command first reached browser execution at 19:34:06-05:00. Exact initial diagnostics remain in `.superpowers/sdd/2026-09-12-gallery-device-export/task-5-build-failure.txt`. Established missing-local-secret, chunk-size, and `NO_COLOR`/`FORCE_COLOR` messages remain test-environment warnings. No repository-wide gate had been run at this implementation checkpoint.
+
+Known Minor limitation: an unusually long Unicode original filename can fail private-file header encoding if the existing sanitizer truncates through a UTF-16 surrogate pair. Code-point-safe filename handling remains deferred; this does not change the recorded focused results or physical-device acceptance gates.
+
+## Acceptance before opening admission
+
+- [x] Implement and independently approve all five export tasks, including focused browser and release evidence.
+- [x] Complete the controller's one independent whole-change review using the existing focused evidence. Approved with no Critical or Important findings.
+- [ ] Apply the migration first for the exact release candidate, record installed-Worker compatibility, confirm the existing protocol admission is open, and retain its historical cutover identity separately from the current photo Worker identity.
+- [ ] Confirm the installed release keeps photo selection admission disabled until archive and device acceptance is recorded; do not infer live production flag state from the local migration default.
+- [ ] On a physical iPhone, test Safari and Home Screen with mixed JPEG/PNG/WebP/HEIC/HEIF originals; verify the native sheet offers `Save Images`, cancellation returns with the batch intact, a later share can resume without duplicate automatic handoff, real new and existing Photos album routes work as documented, and repeated batches stay within acceptable memory behavior.
+- [ ] Keep Google Photos and OneDrive disabled. Direct provider OAuth, configuration, quota, transfer, and real-transfer acceptance remain a separate cloud phase after September 18, 2026.
+
+This record covers pre-release implementation evidence. Publication, the six-lane release gate, installed-release verification, and external acceptance require their own execution records.

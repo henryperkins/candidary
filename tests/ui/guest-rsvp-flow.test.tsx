@@ -144,6 +144,28 @@ describe('household RSVP guest flow', () => {
     expect(embedded.container.querySelector('.rsvp-flow--with-hero')).toBeNull();
   });
 
+  it.each(['primary', 'embedded'] as const)('does not move focus on %s session restore', async (presentation) => {
+    const restore = deferredResponse();
+    vi.stubGlobal('fetch', vi.fn(() => restore.promise));
+    render(<>
+      <button type="button">Outside RSVP</button>
+      <GuestRsvpFlow event={event} presentation={presentation} />
+    </>);
+    const outside = screen.getByRole('button', { name: 'Outside RSVP' });
+    outside.focus();
+
+    await act(async () => {
+      restore.resolve(await success({ household: {
+        ...household,
+        firstRespondedAt: '2026-08-01T00:00:00Z',
+        invitees: household.invitees.map((invitee) => ({ ...invitee, attendance: 'declined' })),
+      } }));
+    });
+
+    expect(await screen.findByRole('heading', { name: "You're all set" })).toBeVisible();
+    expect(outside).toHaveFocus();
+  });
+
   it('performs only an explicit exact-name lookup and never treats a remembered upload name as RSVP authority', async () => {
     localStorage.setItem('candidary_guest_name', 'Taylor Upload');
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -166,8 +188,53 @@ describe('household RSVP guest flow', () => {
     expect(localStorage.getItem('candidary_guest_name')).toBe('Taylor Upload');
 
     await user.click(screen.getByRole('button', { name: 'Find my invitation' }));
-    await screen.findByRole('heading', { name: 'Your household RSVP' });
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Your household RSVP' })).toHaveFocus());
     expect(localStorage.getItem('candidary_guest_name')).toBe('Taylor Morgan');
+
+    const attendance = within(screen.getByRole('group', { name: 'Taylor Morgan' }))
+      .getByRole('radio', { name: 'Attending' });
+    await user.click(attendance);
+    expect(attendance).toHaveFocus();
+  });
+
+  it('does not reuse explicit lookup focus during a passive lifecycle refresh', async () => {
+    let householdGets = 0;
+    const saved = {
+      ...household,
+      firstRespondedAt: '2026-08-01T00:00:00Z',
+      invitees: household.invitees.map((invitee) => ({ ...invitee, attendance: 'declined' as const })),
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = requestPath(input);
+      if (path.endsWith('/rsvp/household')) {
+        householdGets += 1;
+        return householdGets === 1 ? sessionRequired() : success({ household: saved });
+      }
+      if (path.endsWith('/rsvp/lookup')) return success({ status: 'matched', household });
+      throw new Error(`Unexpected request ${path}`);
+    }));
+    const user = userEvent.setup();
+    const rendered = render(<>
+      <button type="button">Outside RSVP</button>
+      <GuestRsvpFlow event={event} presentation="primary" />
+    </>);
+
+    await openInvitation(user);
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Your household RSVP' })).toHaveFocus());
+    const outside = screen.getByRole('button', { name: 'Outside RSVP' });
+    outside.focus();
+
+    rendered.rerender(<>
+      <button type="button">Outside RSVP</button>
+      <GuestRsvpFlow
+        event={{ ...event, phase: 'before-start', rsvpState: 'closed', rsvpAccess: 'read-only' }}
+        presentation="embedded"
+      />
+    </>);
+
+    expect(await screen.findByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+    await waitFor(() => expect(householdGets).toBe(2));
+    expect(outside).toHaveFocus();
   });
 
   it('ignores a lookup that finishes after RSVP becomes read-only', async () => {
@@ -414,7 +481,7 @@ describe('household RSVP guest flow', () => {
     expect(writes).toHaveLength(0);
 
     await user.click(screen.getByRole('button', { name: 'Submit RSVP' }));
-    await screen.findByRole('heading', { name: "You're all set" });
+    await waitFor(() => expect(screen.getByRole('heading', { name: "You're all set" })).toHaveFocus());
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({
       version: 4,
@@ -450,10 +517,10 @@ describe('household RSVP guest flow', () => {
     expect(screen.getByLabelText('Plus one 1 name')).toHaveValue('Jordan Lee');
 
     await user.click(screen.getByRole('button', { name: 'Try again' }));
-    await screen.findByRole('heading', { name: "You're all set" });
+    await waitFor(() => expect(screen.getByRole('heading', { name: "You're all set" })).toHaveFocus());
     expect(attempts.map(({ idempotencyKey }) => idempotencyKey)).toEqual(['stable-rsvp-key', 'stable-rsvp-key']);
     await user.click(screen.getByRole('button', { name: 'Change RSVP' }));
-    await screen.findByRole('heading', { name: 'Your household RSVP' });
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Your household RSVP' })).toHaveFocus());
   });
 
   it('starts a new submission intent when answers change after an interrupted save', async () => {

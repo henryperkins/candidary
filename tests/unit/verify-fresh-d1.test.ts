@@ -77,7 +77,7 @@ const migrationFileNames = [
   '0015_curated_private_guestbook.sql', '0016_host_private_gallery.sql',
   '0017_event_album.sql', '0018_album_end_to_end.sql', '0019_media_recovery.sql',
   '0020_export_progress.sql', '0021_manager_upload_and_album_era.sql',
-  '0022_event_cover_preset_asset_v2.sql',
+  '0022_event_cover_preset_asset_v2.sql', '0023_photo_export_selection.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -109,6 +109,121 @@ for (const name of migrationFileNames) {
     });
   }
 }
+const selectionTriggerRows = [
+  {
+    "name": "export_jobs_entryless_queued_insert",
+    "sql": "CREATE TRIGGER export_jobs_entryless_queued_insert\nBEFORE INSERT ON export_jobs\nWHEN NEW.state = 'queued'\n  AND NEW.kind = 'complete'\n  AND NEW.guestbook_entry_count IS NULL\nBEGIN\n  SELECT RAISE(ABORT, 'a queued export must freeze its sources');\nEND"
+  },
+  {
+    "name": "export_jobs_execution_insert",
+    "sql": "CREATE TRIGGER export_jobs_execution_insert\nBEFORE INSERT ON export_jobs\nWHEN NEW.execution_protocol = 'attempt-v2'\n  AND NOT (\n    NEW.state = 'queued'\n    AND NEW.attempt = 1\n    AND NEW.execution_transition = 0\n    AND NEW.started_at IS NULL\n    AND NEW.execution_started_at IS NULL\n    AND NEW.processed_media_count IS NULL\n    AND NEW.processed_bytes IS NULL\n    AND NEW.progress_updated_at IS NULL\n  )\nBEGIN\n  SELECT RAISE(ABORT, 'export execution transition is invalid');\nEND"
+  },
+  {
+    "name": "export_jobs_execution_update",
+    "sql": "CREATE TRIGGER export_jobs_execution_update\nBEFORE UPDATE ON export_jobs\nWHEN (OLD.execution_protocol = 'attempt-v2' OR NEW.execution_protocol = 'attempt-v2')\n  AND NOT (\n    NEW.media_count = OLD.media_count\n    AND NEW.total_bytes = OLD.total_bytes\n    AND (\n    \n    \n    \n      (\n      OLD.execution_protocol = 'attempt-v2'\n      AND NEW.execution_protocol = 'attempt-v2'\n      AND NEW.started_at IS NULL\n      AND NEW.state = OLD.state\n      AND NEW.attempt = OLD.attempt\n      AND NEW.execution_transition = OLD.execution_transition\n      AND NEW.execution_started_at IS OLD.execution_started_at\n      AND (\n        OLD.state = 'running'\n        OR (\n          NEW.processed_media_count IS OLD.processed_media_count\n          AND NEW.processed_bytes IS OLD.processed_bytes\n          AND NEW.progress_updated_at IS OLD.progress_updated_at\n        )\n      )\n    )\n      OR\n    \n      (\n      OLD.execution_protocol = 'attempt-v2'\n      AND NEW.execution_protocol = 'attempt-v2'\n      AND OLD.state = 'queued'\n      AND NEW.state = 'running'\n      AND NEW.attempt = OLD.attempt\n      AND NEW.execution_transition = OLD.execution_transition + 1\n      AND OLD.execution_started_at IS NULL\n      AND NEW.execution_started_at IS NOT NULL\n      AND NEW.started_at IS NULL\n      AND OLD.processed_media_count IS NULL\n      AND OLD.processed_bytes IS NULL\n      AND OLD.progress_updated_at IS NULL\n      AND NEW.processed_media_count = 0\n      AND NEW.processed_bytes = 0\n      AND NEW.progress_updated_at IS NOT NULL\n    )\n      OR\n    \n      (\n      OLD.execution_protocol = 'attempt-v2'\n      AND NEW.execution_protocol = 'attempt-v2'\n      AND OLD.state = 'queued'\n      AND NEW.state = 'failed'\n      AND NEW.attempt = OLD.attempt\n      AND NEW.execution_transition = OLD.execution_transition + 1\n      AND OLD.execution_started_at IS NULL\n      AND NEW.execution_started_at IS NULL\n      AND NEW.started_at IS NULL\n      AND NEW.processed_media_count IS NULL\n      AND NEW.processed_bytes IS NULL\n      AND NEW.progress_updated_at IS NULL\n    )\n      OR\n    \n      (\n      OLD.execution_protocol = 'attempt-v2'\n      AND NEW.execution_protocol = 'attempt-v2'\n      AND OLD.state = 'running'\n      AND NEW.state = 'ready'\n      AND NEW.attempt = OLD.attempt\n      AND NEW.execution_transition = OLD.execution_transition + 1\n      AND NEW.execution_started_at IS OLD.execution_started_at\n      AND NEW.execution_started_at IS NOT NULL\n      AND NEW.started_at IS NULL\n      AND NEW.processed_media_count = NEW.media_count\n      AND NEW.processed_bytes = NEW.total_bytes\n      AND NEW.progress_updated_at IS NOT NULL\n    )\n      OR\n    \n      (\n      OLD.execution_protocol = 'attempt-v2'\n      AND NEW.execution_protocol = 'attempt-v2'\n      AND OLD.state = 'running'\n      AND NEW.state = 'failed'\n      AND NEW.attempt = OLD.attempt\n      AND NEW.execution_transition = OLD.execution_transition + 1\n      AND NEW.execution_started_at IS OLD.execution_started_at\n      AND NEW.execution_started_at IS NOT NULL\n      AND NEW.started_at IS NULL\n      AND NEW.processed_media_count IS OLD.processed_media_count\n      AND NEW.processed_bytes IS OLD.processed_bytes\n      AND NEW.progress_updated_at IS OLD.progress_updated_at\n    )\n      OR\n    \n      (\n      OLD.execution_protocol = 'attempt-v2'\n      AND NEW.execution_protocol = 'attempt-v2'\n      AND OLD.state = 'ready'\n      AND NEW.state = 'expired'\n      AND NEW.attempt = OLD.attempt\n      AND NEW.execution_transition = OLD.execution_transition + 1\n      AND NEW.execution_started_at IS OLD.execution_started_at\n      AND NEW.started_at IS NULL\n      AND NEW.processed_media_count IS OLD.processed_media_count\n      AND NEW.processed_bytes IS OLD.processed_bytes\n      AND NEW.progress_updated_at IS OLD.progress_updated_at\n    )\n      OR\n    \n    \n      (\n      OLD.execution_protocol IN ('legacy', 'attempt-v2')\n      AND NEW.execution_protocol = 'attempt-v2'\n      AND OLD.state IN ('failed', 'expired')\n      AND NEW.state = 'queued'\n      AND NEW.attempt = OLD.attempt + 1\n      AND NEW.execution_transition = OLD.execution_transition + 1\n      AND NEW.started_at IS NULL\n      AND NEW.execution_started_at IS NULL\n      AND NEW.processed_media_count IS NULL\n      AND NEW.processed_bytes IS NULL\n      AND NEW.progress_updated_at IS NULL\n      )\n    )\n  )\nBEGIN\n  SELECT RAISE(ABORT, 'export execution transition is invalid');\nEND"
+  },
+  {
+    "name": "export_jobs_progress_insert",
+    "sql": "CREATE TRIGGER export_jobs_progress_insert\nBEFORE INSERT ON export_jobs\nWHEN NOT (\n  (\n    NEW.processed_media_count IS NULL\n    AND NEW.processed_bytes IS NULL\n    AND NEW.progress_updated_at IS NULL\n  )\n  OR (\n    NEW.processed_media_count IS NOT NULL\n    AND NEW.processed_bytes IS NOT NULL\n    AND NEW.progress_updated_at IS NOT NULL\n    AND NEW.processed_media_count >= 0\n    AND NEW.processed_media_count <= NEW.media_count\n    AND NEW.processed_bytes >= 0\n    AND NEW.processed_bytes <= NEW.total_bytes\n  )\n)\nBEGIN\n  SELECT RAISE(ABORT, 'export progress is invalid');\nEND"
+  },
+  {
+    "name": "export_jobs_progress_update",
+    "sql": "CREATE TRIGGER export_jobs_progress_update\nBEFORE UPDATE OF processed_media_count, processed_bytes, progress_updated_at,\n  media_count, total_bytes ON export_jobs\nWHEN NOT (\n  (\n    NEW.processed_media_count IS NULL\n    AND NEW.processed_bytes IS NULL\n    AND NEW.progress_updated_at IS NULL\n  )\n  OR (\n    NEW.processed_media_count IS NOT NULL\n    AND NEW.processed_bytes IS NOT NULL\n    AND NEW.progress_updated_at IS NOT NULL\n    AND NEW.processed_media_count >= 0\n    AND NEW.processed_media_count <= NEW.media_count\n    AND NEW.processed_bytes >= 0\n    AND NEW.processed_bytes <= NEW.total_bytes\n  )\n)\nBEGIN\n  SELECT RAISE(ABORT, 'export progress is invalid');\nEND"
+  },
+  {
+    "name": "export_jobs_protocol_admission_insert",
+    "sql": "CREATE TRIGGER export_jobs_protocol_admission_insert\nBEFORE INSERT ON export_jobs\nWHEN NEW.state IN ('queued', 'running')\n  AND NOT EXISTS (\n    SELECT 1 FROM export_protocol_admission\n    WHERE singleton = 1\n      AND (\n        (state = 'legacy-open' AND NEW.execution_protocol = 'legacy')\n        OR (state = 'open' AND (NEW.execution_protocol = 'attempt-v2'\n          OR (NEW.execution_protocol = 'selection-v1' AND NEW.destination IN ('archive', 'device')\n            AND EXISTS (SELECT 1 FROM photo_export_admission WHERE singleton = 1 AND enabled = 1))))\n      )\n  )\nBEGIN\n  SELECT RAISE(ABORT, 'export execution protocol is not admitted');\nEND"
+  },
+  {
+    "name": "export_jobs_protocol_admission_update",
+    "sql": "CREATE TRIGGER export_jobs_protocol_admission_update\nBEFORE UPDATE ON export_jobs\nWHEN NEW.state IN ('queued', 'running')\n  AND (\n    OLD.state NOT IN ('queued', 'running')\n    OR NEW.execution_protocol IS NOT OLD.execution_protocol\n  )\n  AND NOT EXISTS (\n    SELECT 1 FROM export_protocol_admission\n    WHERE singleton = 1\n      AND (\n        (state = 'legacy-open' AND NEW.execution_protocol = 'legacy')\n        OR (state = 'open' AND (NEW.execution_protocol = 'attempt-v2'\n          OR (NEW.execution_protocol = 'selection-v1' AND NEW.destination IN ('archive', 'device')\n            AND EXISTS (SELECT 1 FROM photo_export_admission WHERE singleton = 1 AND enabled = 1))))\n      )\n  )\nBEGIN\n  SELECT RAISE(ABORT, 'export execution protocol is not admitted');\nEND"
+  },
+  {
+    "name": "export_jobs_retry_source_fence",
+    "sql": "CREATE TRIGGER export_jobs_retry_source_fence\nBEFORE UPDATE OF state ON export_jobs\nWHEN NEW.state = 'queued'\n  AND OLD.state IN ('failed', 'expired')\n  AND (\n    (NEW.kind = 'selection' AND NEW.media_count <= 0)\n    OR (NEW.kind = 'complete' AND NEW.guestbook_entry_count IS NULL)\n    OR NOT (\n      (SELECT count(*) FROM export_media_entries AS e\n        WHERE e.export_job_id = NEW.id) = NEW.media_count\n      AND COALESCE((SELECT sum(COALESCE(e.byte_size, e.declared_byte_size))\n        FROM export_media_entries AS e\n        WHERE e.export_job_id = NEW.id), 0) = NEW.total_bytes\n      AND NOT EXISTS (\n        SELECT 1 FROM export_media_entries AS e\n        WHERE e.export_job_id = NEW.id\n          AND NOT EXISTS (\n            SELECT 1 FROM media_object_write_tombstones AS t\n            WHERE t.bucket_generation = e.object_bucket_generation\n              AND t.object_key = e.object_key\n              AND t.suppression_started_at IS NULL\n          )\n      )\n      AND NOT EXISTS (\n        SELECT 1 FROM export_media_entries AS e\n        WHERE e.export_job_id = NEW.id\n          AND NOT EXISTS (\n            SELECT 1 FROM media AS m\n            WHERE m.id = e.media_id\n              AND m.event_id = NEW.event_id\n              AND m.upload_state = 'stored'\n              AND m.object_bucket_generation = e.object_bucket_generation\n              AND m.object_key = e.object_key\n              AND (\n                (m.trashed_at IS NULL AND m.deleted_at IS NULL)\n                OR (m.trashed_at IS NOT NULL AND m.deleted_at = m.trashed_at)\n              )\n          )\n      )\n    )\n  )\nBEGIN\n  SELECT RAISE(ABORT, 'export source hold cannot be reacquired');\nEND"
+  },
+  {
+    "name": "export_jobs_running_source_fence",
+    "sql": "CREATE TRIGGER export_jobs_running_source_fence\nBEFORE UPDATE OF state ON export_jobs\nWHEN NEW.state = 'running'\n  AND OLD.state = 'queued'\n  AND NOT (\n    (NEW.kind <> 'selection' OR NEW.media_count > 0)\n    AND (SELECT count(*) FROM export_media_entries AS e\n      WHERE e.export_job_id = NEW.id) = NEW.media_count\n    AND COALESCE((SELECT sum(COALESCE(e.byte_size, e.declared_byte_size))\n      FROM export_media_entries AS e\n      WHERE e.export_job_id = NEW.id), 0) = NEW.total_bytes\n    AND NOT EXISTS (\n      SELECT 1 FROM export_media_entries AS e\n      WHERE e.export_job_id = NEW.id\n        AND NOT EXISTS (\n          SELECT 1 FROM media_object_write_tombstones AS t\n          WHERE t.bucket_generation = e.object_bucket_generation\n            AND t.object_key = e.object_key\n            AND t.suppression_started_at IS NULL\n        )\n    )\n  )\nBEGIN\n  SELECT RAISE(ABORT, 'export source hold is not intact');\nEND"
+  },
+  {
+    "name": "export_media_entry_suppressed_source_insert",
+    "sql": "CREATE TRIGGER export_media_entry_suppressed_source_insert\nBEFORE INSERT ON export_media_entries\nWHEN EXISTS (\n  SELECT 1 FROM media_object_write_tombstones AS t\n  WHERE t.bucket_generation = NEW.object_bucket_generation\n    AND t.object_key = NEW.object_key\n    AND t.suppression_started_at IS NOT NULL\n)\nBEGIN\n  SELECT RAISE(ABORT, 'export source object is permanently suppressed');\nEND"
+  },
+  {
+    "name": "export_protocol_admission_no_delete",
+    "sql": "CREATE TRIGGER export_protocol_admission_no_delete\nBEFORE DELETE ON export_protocol_admission\nBEGIN\n  SELECT RAISE(ABORT, 'export protocol admission row is immutable');\nEND"
+  },
+  {
+    "name": "export_protocol_admission_no_insert",
+    "sql": "CREATE TRIGGER export_protocol_admission_no_insert\nBEFORE INSERT ON export_protocol_admission\nWHEN EXISTS (SELECT 1 FROM export_protocol_admission)\nBEGIN\n  SELECT RAISE(ABORT, 'export protocol admission row is immutable');\nEND"
+  },
+  {
+    "name": "export_protocol_admission_transition",
+    "sql": "CREATE TRIGGER export_protocol_admission_transition\nBEFORE UPDATE ON export_protocol_admission\nWHEN NOT (\n  NEW.singleton = OLD.singleton\n  AND NOT EXISTS (\n    SELECT 1 FROM export_jobs\n    WHERE execution_protocol = 'legacy'\n      AND state IN ('queued', 'running')\n  )\n  AND (\n    (\n      OLD.state = 'legacy-open'\n      AND OLD.closed_at IS NULL\n      AND OLD.worker_version_id IS NULL\n      AND OLD.admitted_at IS NULL\n      AND NEW.state = 'closed'\n      AND NEW.closed_at IS NOT NULL\n      AND NEW.worker_version_id IS NULL\n      AND NEW.admitted_at IS NULL\n    )\n    OR (\n      OLD.state = 'closed'\n      AND OLD.closed_at IS NOT NULL\n      AND OLD.worker_version_id IS NULL\n      AND OLD.admitted_at IS NULL\n      AND NEW.state = 'open'\n      AND NEW.closed_at IS OLD.closed_at\n      AND NEW.worker_version_id IS NOT NULL\n      AND NEW.admitted_at IS NOT NULL\n    )\n  )\n)\nBEGIN\n  SELECT CASE\n    WHEN EXISTS (\n      SELECT 1 FROM export_jobs\n      WHERE execution_protocol = 'legacy'\n        AND state IN ('queued', 'running')\n    )\n    THEN RAISE(ABORT, 'active legacy export blocks protocol admission transition')\n    ELSE RAISE(ABORT, 'export protocol admission transition is invalid')\n  END;\nEND"
+  },
+  {
+    "name": "export_source_hold_tombstone_insert",
+    "sql": "CREATE TRIGGER export_source_hold_tombstone_insert\nBEFORE INSERT ON media_object_write_tombstones\nWHEN NEW.suppression_started_at IS NOT NULL\n  AND EXISTS (\n    SELECT 1 FROM export_media_entries AS e\n    JOIN export_jobs AS j ON j.id = e.export_job_id\n    WHERE e.object_bucket_generation = NEW.bucket_generation\n      AND e.object_key = NEW.object_key\n      AND j.state IN ('queued', 'running')\n  )\nBEGIN\n  SELECT RAISE(ABORT, 'an active export holds this source object');\nEND"
+  },
+  {
+    "name": "export_source_hold_tombstone_suppress",
+    "sql": "CREATE TRIGGER export_source_hold_tombstone_suppress\nBEFORE UPDATE OF suppression_started_at ON media_object_write_tombstones\nWHEN OLD.suppression_started_at IS NULL\n  AND NEW.suppression_started_at IS NOT NULL\n  AND EXISTS (\n    SELECT 1 FROM export_media_entries AS e\n    JOIN export_jobs AS j ON j.id = e.export_job_id\n    WHERE e.object_bucket_generation = NEW.bucket_generation\n      AND e.object_key = NEW.object_key\n      AND j.state IN ('queued', 'running')\n  )\nBEGIN\n  SELECT RAISE(ABORT, 'an active export holds this source object');\nEND"
+  },
+  {
+    "name": "photo_export_admission_no_delete",
+    "sql": "CREATE TRIGGER photo_export_admission_no_delete BEFORE DELETE ON photo_export_admission\nBEGIN SELECT RAISE(ABORT, 'photo export admission row is immutable'); END"
+  },
+  {
+    "name": "photo_export_admission_no_insert",
+    "sql": "CREATE TRIGGER photo_export_admission_no_insert BEFORE INSERT ON photo_export_admission\nWHEN EXISTS (SELECT 1 FROM photo_export_admission)\nBEGIN SELECT RAISE(ABORT, 'photo export admission row is immutable'); END"
+  },
+  {
+    "name": "photo_export_admission_update",
+    "sql": "CREATE TRIGGER photo_export_admission_update BEFORE UPDATE ON photo_export_admission\nWHEN NEW.singleton <> OLD.singleton OR (NEW.enabled = 1 AND NOT EXISTS (\n  SELECT 1 FROM export_protocol_admission WHERE singleton = 1 AND state = 'open'))\nBEGIN SELECT RAISE(ABORT, 'photo export worker is not admitted'); END"
+  },
+  {
+    "name": "photo_export_delivery_delete",
+    "sql": "CREATE TRIGGER photo_export_delivery_delete BEFORE DELETE ON photo_export_deliveries\nWHEN OLD.read_lease_token IS NOT NULL AND julianday(OLD.read_lease_expires_at) > julianday('now')\n  AND EXISTS (SELECT 1 FROM export_jobs WHERE id = OLD.export_job_id AND state IN ('queued', 'running'))\nBEGIN SELECT RAISE(ABORT, 'photo export read lease is still active'); END"
+  },
+  {
+    "name": "photo_export_delivery_insert",
+    "sql": "CREATE TRIGGER photo_export_delivery_insert BEFORE INSERT ON photo_export_deliveries\nWHEN NOT EXISTS (SELECT 1 FROM export_jobs WHERE id = NEW.export_job_id AND kind = 'selection'\n  AND destination = 'device' AND state IN ('queued', 'running') AND attempt = NEW.attempt\n  AND cancel_requested_at IS NULL)\nBEGIN SELECT RAISE(ABORT, 'photo export delivery has no active owner'); END"
+  },
+  {
+    "name": "photo_export_delivery_update",
+    "sql": "CREATE TRIGGER photo_export_delivery_update BEFORE UPDATE ON photo_export_deliveries\nWHEN NEW.export_job_id IS NOT OLD.export_job_id OR NEW.media_id IS NOT OLD.media_id\n  OR NEW.attempt < OLD.attempt\n  OR (OLD.read_lease_token IS NOT NULL AND NEW.read_lease_token IS NOT NULL\n    AND NEW.read_lease_token IS NOT OLD.read_lease_token\n    AND julianday(OLD.read_lease_expires_at) > julianday('now'))\n  OR NOT EXISTS (SELECT 1 FROM export_jobs WHERE id = NEW.export_job_id AND attempt = NEW.attempt\n    AND state IN ('queued', 'running')\n    AND (cancel_requested_at IS NULL OR (\n      NEW.state = OLD.state AND NEW.attempt = OLD.attempt AND NEW.prepared_at IS OLD.prepared_at\n      AND NEW.acknowledged_at IS OLD.acknowledged_at AND NEW.failed_at IS OLD.failed_at\n      AND NEW.read_lease_token IS NULL AND NEW.read_lease_expires_at IS NULL)))\n  OR (NEW.attempt = OLD.attempt AND OLD.state = 'acknowledged' AND\n    (NEW.state <> 'acknowledged' OR NEW.acknowledged_at IS NOT OLD.acknowledged_at))\nBEGIN SELECT RAISE(ABORT, 'photo export delivery ownership is invalid'); END"
+  },
+  {
+    "name": "photo_export_entry_delete",
+    "sql": "CREATE TRIGGER photo_export_entry_delete BEFORE DELETE ON export_media_entries\nWHEN EXISTS (SELECT 1 FROM export_jobs WHERE id = OLD.export_job_id AND kind = 'selection' AND state IN ('queued', 'running'))\nBEGIN SELECT RAISE(ABORT, 'active selection source inventory is frozen'); END"
+  },
+  {
+    "name": "photo_export_entry_insert",
+    "sql": "CREATE TRIGGER photo_export_entry_insert BEFORE INSERT ON export_media_entries\nWHEN EXISTS (SELECT 1 FROM export_jobs WHERE id = NEW.export_job_id AND kind = 'selection'\n  AND (state <> 'queued' OR confirmed_at IS NOT NULL OR cancel_requested_at IS NOT NULL))\nBEGIN SELECT RAISE(ABORT, 'selection source inventory is frozen'); END"
+  },
+  {
+    "name": "photo_export_entry_update",
+    "sql": "CREATE TRIGGER photo_export_entry_update BEFORE UPDATE ON export_media_entries\nWHEN EXISTS (SELECT 1 FROM export_jobs WHERE id IN (NEW.export_job_id, OLD.export_job_id) AND kind = 'selection')\nBEGIN SELECT RAISE(ABORT, 'selection source inventory is frozen'); END"
+  },
+  {
+    "name": "photo_export_execution_insert",
+    "sql": "CREATE TRIGGER photo_export_execution_insert BEFORE INSERT ON export_jobs\nWHEN NEW.execution_protocol = 'selection-v1' AND (\n  NEW.state = 'queued' AND NEW.attempt = 1 AND NEW.execution_transition = 0\n  AND NEW.started_at IS NULL AND NEW.execution_started_at IS NULL\n  AND NEW.confirmed_at IS NULL AND NEW.completed_at IS NULL AND NEW.cancel_requested_at IS NULL\n  AND NEW.processed_media_count IS NULL AND NEW.processed_bytes IS NULL AND NEW.progress_updated_at IS NULL) IS NOT TRUE\nBEGIN SELECT RAISE(ABORT, 'selection execution must start pristine'); END"
+  },
+  {
+    "name": "photo_export_execution_update",
+    "sql": "CREATE TRIGGER photo_export_execution_update BEFORE UPDATE ON export_jobs\nWHEN (OLD.execution_protocol = 'selection-v1' OR NEW.execution_protocol = 'selection-v1') AND (\n  NEW.execution_protocol = OLD.execution_protocol\n  AND NEW.id IS OLD.id AND NEW.event_id IS OLD.event_id AND NEW.kind IS OLD.kind\n  AND NEW.destination IS OLD.destination AND NEW.source_json IS OLD.source_json\n  AND NEW.request_digest IS OLD.request_digest AND NEW.idempotency_key IS OLD.idempotency_key\n  AND NEW.initiating_principal IS OLD.initiating_principal AND NEW.snapshot_at IS OLD.snapshot_at\n  AND NEW.created_at IS OLD.created_at AND NEW.absolute_expires_at IS OLD.absolute_expires_at\n  AND NEW.media_count = OLD.media_count AND NEW.total_bytes = OLD.total_bytes\n  AND NEW.started_at IS NULL\n  AND (\n    (NEW.hold_expires_at >= OLD.hold_expires_at\n      AND (NEW.confirmed_at IS OLD.confirmed_at OR\n        (OLD.confirmed_at IS NULL AND OLD.state = 'queued' AND NEW.confirmed_at IS NOT NULL))\n      AND (NEW.cancel_requested_at IS OLD.cancel_requested_at OR\n        (OLD.cancel_requested_at IS NULL AND OLD.state IN ('queued', 'running') AND NEW.cancel_requested_at IS NOT NULL)))\n    \n    \n    OR (OLD.destination = 'archive' AND OLD.state IN ('failed', 'expired') AND NEW.state = 'queued'\n      AND NEW.attempt = OLD.attempt + 1 AND NEW.execution_transition = OLD.execution_transition + 1\n      AND NEW.confirmed_at IS NULL AND NEW.cancel_requested_at IS NULL)\n  )\n  AND (\n    \n    (NEW.state = OLD.state AND NEW.attempt = OLD.attempt\n      AND NEW.execution_transition = OLD.execution_transition\n      AND NEW.execution_started_at IS OLD.execution_started_at\n      AND ((OLD.state = 'running' AND OLD.cancel_requested_at IS NULL AND NEW.cancel_requested_at IS NULL\n          AND NEW.processed_media_count >= OLD.processed_media_count AND NEW.processed_bytes >= OLD.processed_bytes\n          AND NEW.progress_updated_at >= OLD.progress_updated_at)\n        OR (NEW.processed_media_count IS OLD.processed_media_count AND NEW.processed_bytes IS OLD.processed_bytes\n          AND NEW.progress_updated_at IS OLD.progress_updated_at)))\n    OR (OLD.state = 'queued' AND NEW.state = 'running' AND OLD.cancel_requested_at IS NULL\n      AND NEW.cancel_requested_at IS NULL AND NEW.confirmed_at IS NOT NULL\n      AND NEW.attempt = OLD.attempt AND NEW.execution_transition = OLD.execution_transition + 1\n      AND OLD.execution_started_at IS NULL AND NEW.execution_started_at IS NOT NULL\n      AND NEW.processed_media_count = 0 AND NEW.processed_bytes = 0 AND NEW.progress_updated_at IS NOT NULL)\n    OR (OLD.state IN ('queued', 'running') AND NEW.state IN ('ready', 'handed-off', 'delivered', 'failed', 'cancelled', 'expired')\n      AND NEW.attempt = OLD.attempt AND NEW.execution_transition = OLD.execution_transition + 1\n      AND NEW.execution_started_at IS OLD.execution_started_at\n      AND NOT EXISTS (SELECT 1 FROM photo_export_deliveries AS d WHERE d.export_job_id = NEW.id\n        AND d.read_lease_token IS NOT NULL AND julianday(d.read_lease_expires_at) > julianday('now'))\n      AND ((NEW.state IN ('failed', 'cancelled', 'expired')\n          AND NEW.processed_media_count IS OLD.processed_media_count AND NEW.processed_bytes IS OLD.processed_bytes\n          AND NEW.progress_updated_at IS OLD.progress_updated_at\n          AND (NEW.state <> 'cancelled' OR NEW.cancel_requested_at IS NOT NULL))\n        OR (OLD.state = 'running' AND NEW.cancel_requested_at IS NULL\n          AND NEW.processed_media_count = NEW.media_count AND NEW.processed_bytes = NEW.total_bytes\n          AND NEW.progress_updated_at IS NOT NULL\n          AND ((NEW.state = 'ready' AND NEW.destination = 'archive')\n            OR (NEW.state = 'handed-off' AND NEW.destination = 'device'\n              AND (SELECT count(*) FROM photo_export_deliveries WHERE export_job_id = NEW.id\n                AND attempt = NEW.attempt AND state = 'acknowledged') = NEW.media_count)))))\n    OR (OLD.state = 'ready' AND NEW.state = 'expired' AND NEW.attempt = OLD.attempt\n      AND NEW.execution_transition = OLD.execution_transition + 1 AND NEW.execution_started_at IS OLD.execution_started_at\n      AND NEW.processed_media_count IS OLD.processed_media_count AND NEW.processed_bytes IS OLD.processed_bytes\n      AND NEW.progress_updated_at IS OLD.progress_updated_at)\n    OR (OLD.state IN ('failed', 'expired') AND NEW.state = 'queued'\n      AND (OLD.cancel_requested_at IS NULL OR OLD.destination = 'archive')\n      AND (NEW.destination <> 'archive' OR NEW.confirmed_at IS NULL)\n      AND NEW.cancel_requested_at IS NULL AND NEW.attempt = OLD.attempt + 1\n      AND NEW.execution_transition = OLD.execution_transition + 1 AND NEW.execution_started_at IS NULL\n      AND NEW.processed_media_count IS NULL AND NEW.processed_bytes IS NULL AND NEW.progress_updated_at IS NULL)\n  )\n) IS NOT TRUE\nBEGIN SELECT RAISE(ABORT, 'selection execution transition is invalid'); END"
+  },
+  {
+    "name": "photo_export_guestbook_insert",
+    "sql": "CREATE TRIGGER photo_export_guestbook_insert BEFORE INSERT ON export_guestbook_entries\nWHEN EXISTS (SELECT 1 FROM export_jobs WHERE id = NEW.export_job_id AND kind = 'selection')\nBEGIN SELECT RAISE(ABORT, 'selection exports contain photos only'); END"
+  },
+  {
+    "name": "photo_export_guestbook_update",
+    "sql": "CREATE TRIGGER photo_export_guestbook_update BEFORE UPDATE ON export_guestbook_entries\nWHEN EXISTS (SELECT 1 FROM export_jobs WHERE id = NEW.export_job_id AND kind = 'selection')\nBEGIN SELECT RAISE(ABORT, 'selection exports contain photos only'); END"
+  }
+];
+for (const row of selectionTriggerRows) triggerRowsByName.set(row.name, row);
 const triggerRows = [...triggerRowsByName.values()]
   .sort((left, right) => left.name.localeCompare(right.name));
 
@@ -162,6 +277,7 @@ const guestbookColumns: Record<string, string[]> = {
     'guestbook_prompt', 'guestbook_gallery_visible', 'kind', 'album_entries_json',
     'processed_media_count', 'processed_bytes', 'progress_updated_at',
     'execution_protocol', 'execution_transition', 'execution_started_at',
+    'destination', 'source_json', 'request_digest', 'idempotency_key', 'initiating_principal', 'confirmed_at', 'hold_expires_at', 'absolute_expires_at', 'cancel_requested_at',
   ],
   export_media_entries: [
     'export_job_id', 'media_id', 'object_key', 'object_bucket_generation', 'original_filename',
@@ -224,6 +340,7 @@ const guestbookIndexRows = [
   { tbl: 'export_guestbook_entries', idx: 'sqlite_autoindex_export_guestbook_entries_1', uniq: 1, partial: 0 },
   { tbl: 'export_jobs', idx: 'export_jobs_expiry', uniq: 0, partial: 0 },
   { tbl: 'export_jobs', idx: 'export_jobs_one_active_per_event', uniq: 1, partial: 1 },
+  { tbl: 'export_jobs', idx: 'photo_export_idempotency', uniq: 1, partial: 1 },
   { tbl: 'export_jobs', idx: 'sqlite_autoindex_export_jobs_1', uniq: 1, partial: 0 },
   { tbl: 'export_media_entries', idx: 'export_album_media_position', uniq: 1, partial: 1 },
   { tbl: 'export_media_entries', idx: 'export_media_entries_order', uniq: 0, partial: 0 },
@@ -358,33 +475,129 @@ const recoveryIndexRows = [
 // Captured from sqlite_master after applying the exact 0001-0020 ledger. Keep
 // this independent fixture literal so the verifier's pinned digest is not
 // tested against its own constant.
-const exportJobsTableSql = "CREATE TABLE export_jobs ( id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE, state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'ready', 'failed', 'expired')), snapshot_at TEXT NOT NULL, object_key TEXT, media_count INTEGER NOT NULL CHECK (media_count >= 0), total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0), attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1), error_code TEXT, created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, expires_at TEXT , manifest_object_key TEXT, part_count INTEGER NOT NULL DEFAULT 0 CHECK (part_count >= 0), guestbook_html_object_key TEXT, guestbook_html_bytes INTEGER CHECK (guestbook_html_bytes IS NULL OR guestbook_html_bytes >= 0), guestbook_html_sha256 TEXT, guestbook_csv_object_key TEXT, guestbook_csv_bytes INTEGER CHECK (guestbook_csv_bytes IS NULL OR guestbook_csv_bytes >= 0), guestbook_csv_sha256 TEXT, guestbook_entry_count INTEGER CHECK (guestbook_entry_count IS NULL OR guestbook_entry_count >= 0), guestbook_shared_count INTEGER CHECK ( guestbook_shared_count IS NULL OR (guestbook_shared_count >= 0 AND guestbook_shared_count <= guestbook_entry_count) ), guestbook_event_name TEXT, guestbook_event_date TEXT, guestbook_event_timezone TEXT, guestbook_prompt TEXT CHECK (guestbook_prompt IS NULL OR length(trim(guestbook_prompt)) BETWEEN 1 AND 160), guestbook_gallery_visible INTEGER CHECK (guestbook_gallery_visible IS NULL OR guestbook_gallery_visible IN (0, 1)), kind TEXT NOT NULL DEFAULT 'complete' CHECK (kind IN ('complete', 'album')), album_entries_json TEXT CHECK ( (kind = 'complete' AND album_entries_json IS NULL) OR (kind = 'album' AND album_entries_json IS NOT NULL AND json_valid(album_entries_json) AND json_type(album_entries_json) = 'array') ), processed_media_count INTEGER CHECK (processed_media_count IS NULL OR processed_media_count >= 0), processed_bytes INTEGER CHECK (processed_bytes IS NULL OR processed_bytes >= 0), progress_updated_at TEXT, execution_protocol TEXT NOT NULL DEFAULT 'legacy' CHECK (execution_protocol IN ('legacy', 'attempt-v2')), execution_transition INTEGER NOT NULL DEFAULT 0 CHECK (execution_transition >= 0), execution_started_at TEXT)";
+const exportJobsTableSql = "CREATE TABLE \"export_jobs\" (\n  id TEXT PRIMARY KEY,\n  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,\n  state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'ready', 'failed', 'expired', 'delivered', 'handed-off', 'cancelled')),\n  snapshot_at TEXT NOT NULL,\n  object_key TEXT,\n  media_count INTEGER NOT NULL CHECK (media_count >= 0),\n  total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),\n  attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),\n  error_code TEXT,\n  created_at TEXT NOT NULL,\n  started_at TEXT,\n  completed_at TEXT,\n  expires_at TEXT\n, manifest_object_key TEXT, part_count INTEGER NOT NULL DEFAULT 0 CHECK (part_count >= 0), guestbook_html_object_key TEXT, guestbook_html_bytes INTEGER\n  CHECK (guestbook_html_bytes IS NULL OR guestbook_html_bytes >= 0), guestbook_html_sha256 TEXT, guestbook_csv_object_key TEXT, guestbook_csv_bytes INTEGER\n  CHECK (guestbook_csv_bytes IS NULL OR guestbook_csv_bytes >= 0), guestbook_csv_sha256 TEXT, guestbook_entry_count INTEGER\n  CHECK (guestbook_entry_count IS NULL OR guestbook_entry_count >= 0), guestbook_shared_count INTEGER\n  CHECK (\n    guestbook_shared_count IS NULL\n    OR (guestbook_shared_count >= 0 AND guestbook_shared_count <= guestbook_entry_count)\n  ), guestbook_event_name TEXT, guestbook_event_date TEXT, guestbook_event_timezone TEXT, guestbook_prompt TEXT\n  CHECK (guestbook_prompt IS NULL OR length(trim(guestbook_prompt)) BETWEEN 1 AND 160), guestbook_gallery_visible INTEGER\n  CHECK (guestbook_gallery_visible IS NULL OR guestbook_gallery_visible IN (0, 1)), kind TEXT NOT NULL DEFAULT 'complete'\n  CHECK (kind IN ('complete', 'album', 'selection')), album_entries_json TEXT\n  CHECK (\n    (kind = 'complete' AND album_entries_json IS NULL)\n    OR (kind = 'selection' AND album_entries_json IS NULL)\n    OR (kind = 'album' AND album_entries_json IS NOT NULL\n        AND json_valid(album_entries_json) AND json_type(album_entries_json) = 'array')\n  ), processed_media_count INTEGER\n  CHECK (processed_media_count IS NULL OR processed_media_count >= 0), processed_bytes INTEGER\n  CHECK (processed_bytes IS NULL OR processed_bytes >= 0), progress_updated_at TEXT, execution_protocol TEXT NOT NULL DEFAULT 'legacy'\n  CHECK (execution_protocol IN ('legacy', 'attempt-v2', 'selection-v1')), execution_transition INTEGER NOT NULL DEFAULT 0\n  CHECK (execution_transition >= 0), execution_started_at TEXT,\n  destination TEXT NOT NULL DEFAULT 'archive' CHECK (destination IN ('archive', 'device', 'google-photos', 'onedrive')),\n  source_json TEXT,\n  request_digest TEXT,\n  idempotency_key TEXT,\n  initiating_principal TEXT,\n  confirmed_at TEXT,\n  hold_expires_at TEXT,\n  absolute_expires_at TEXT,\n  cancel_requested_at TEXT,\n  CHECK (\n    (kind IN ('complete', 'album') AND execution_protocol IN ('legacy', 'attempt-v2')\n      AND destination = 'archive' AND source_json IS NULL AND request_digest IS NULL\n      AND idempotency_key IS NULL AND initiating_principal IS NULL AND confirmed_at IS NULL\n      AND hold_expires_at IS NULL AND absolute_expires_at IS NULL AND cancel_requested_at IS NULL\n      AND state IN ('queued', 'running', 'ready', 'failed', 'expired'))\n    OR (kind = 'selection' AND execution_protocol = 'selection-v1' AND media_count > 0\n      AND typeof(source_json) = 'text' AND json_valid(source_json)\n      AND json_extract(source_json, '$.version') IS 1 AND json_type(source_json, '$.source') IS 'object'\n      AND typeof(request_digest) = 'text' AND length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'\n      AND typeof(idempotency_key) = 'text' AND length(idempotency_key) BETWEEN 1 AND 128\n      AND typeof(initiating_principal) = 'text' AND length(initiating_principal) > 0\n      AND typeof(hold_expires_at) = 'text' AND typeof(absolute_expires_at) = 'text'\n      AND hold_expires_at <= absolute_expires_at AND absolute_expires_at > created_at\n      AND guestbook_html_object_key IS NULL AND guestbook_html_bytes IS NULL AND guestbook_html_sha256 IS NULL AND guestbook_csv_object_key IS NULL AND guestbook_csv_bytes IS NULL AND guestbook_csv_sha256 IS NULL AND guestbook_entry_count IS NULL AND guestbook_shared_count IS NULL AND guestbook_event_name IS NULL AND guestbook_event_date IS NULL AND guestbook_event_timezone IS NULL AND guestbook_prompt IS NULL AND guestbook_gallery_visible IS NULL\n      AND (state <> 'ready' OR destination = 'archive')\n      AND (state <> 'handed-off' OR destination = 'device')\n      AND (state <> 'delivered' OR destination IN ('google-photos', 'onedrive')))\n  )\n)";
 
 const exportProgressColumnRows = [
   {
-    cid: 30, name: 'processed_media_count', type: 'INTEGER',
-    notnull: 0, dflt_value: null, pk: 0,
+    "cid": 30,
+    "name": "processed_media_count",
+    "type": "INTEGER",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
   },
   {
-    cid: 31, name: 'processed_bytes', type: 'INTEGER',
-    notnull: 0, dflt_value: null, pk: 0,
+    "cid": 31,
+    "name": "processed_bytes",
+    "type": "INTEGER",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
   },
   {
-    cid: 32, name: 'progress_updated_at', type: 'TEXT',
-    notnull: 0, dflt_value: null, pk: 0,
+    "cid": 32,
+    "name": "progress_updated_at",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
   },
   {
-    cid: 33, name: 'execution_protocol', type: 'TEXT',
-    notnull: 1, dflt_value: "'legacy'", pk: 0,
+    "cid": 33,
+    "name": "execution_protocol",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": "'legacy'",
+    "pk": 0
   },
   {
-    cid: 34, name: 'execution_transition', type: 'INTEGER',
-    notnull: 1, dflt_value: '0', pk: 0,
+    "cid": 34,
+    "name": "execution_transition",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": "0",
+    "pk": 0
   },
   {
-    cid: 35, name: 'execution_started_at', type: 'TEXT',
-    notnull: 0, dflt_value: null, pk: 0,
+    "cid": 35,
+    "name": "execution_started_at",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
   },
+  {
+    "cid": 36,
+    "name": "destination",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": "'archive'",
+    "pk": 0
+  },
+  {
+    "cid": 37,
+    "name": "source_json",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 38,
+    "name": "request_digest",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 39,
+    "name": "idempotency_key",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 40,
+    "name": "initiating_principal",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 41,
+    "name": "confirmed_at",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 42,
+    "name": "hold_expires_at",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 43,
+    "name": "absolute_expires_at",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 44,
+    "name": "cancel_requested_at",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  }
 ].map((row) => ({ ...row, table_sql: exportJobsTableSql }));
 
 // Captured from sqlite_master after applying the exact 0001-0020 ledger. The
@@ -508,6 +721,29 @@ function resultEnvelope(results: unknown[]) {
   return { results, success: true, meta: { duration: 0.01 } };
 }
 
+const photoExportSchemaRows = [
+  {
+    "name": "photo_export_admission",
+    "sql": "CREATE TABLE photo_export_admission (\n  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),\n  worker_version_id TEXT,\n  admitted_at TEXT,\n  CHECK ((enabled = 0 AND worker_version_id IS NULL AND admitted_at IS NULL)\n    OR (enabled = 1 AND typeof(worker_version_id) = 'text'\n      AND length(worker_version_id) = 36 AND worker_version_id = lower(worker_version_id)\n      AND substr(worker_version_id, 9, 1) = '-' AND substr(worker_version_id, 14, 1) = '-'\n      AND substr(worker_version_id, 19, 1) = '-' AND substr(worker_version_id, 24, 1) = '-'\n      AND length(replace(worker_version_id, '-', '')) = 32\n      AND replace(worker_version_id, '-', '') NOT GLOB '*[^0-9a-f]*'\n      AND typeof(admitted_at) = 'text' AND length(admitted_at) = 24\n      AND strftime('%Y-%m-%dT%H:%M:%fZ', admitted_at) IS NOT NULL\n      AND strftime('%Y-%m-%dT%H:%M:%fZ', admitted_at) = admitted_at))\n)"
+  },
+  {
+    "name": "photo_export_admission_row",
+    "sql": "{\"singleton\":1,\"enabled\":0,\"worker_version_id\":null,\"admitted_at\":null}"
+  },
+  {
+    "name": "photo_export_deliveries",
+    "sql": "CREATE TABLE photo_export_deliveries (\n  export_job_id TEXT NOT NULL,\n  media_id TEXT NOT NULL,\n  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'uploading', 'prepared', 'acknowledged', 'failed', 'unresolved')),\n  attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),\n  prepared_at TEXT,\n  acknowledged_at TEXT,\n  failed_at TEXT,\n  read_lease_token TEXT,\n  read_lease_expires_at TEXT,\n  PRIMARY KEY (export_job_id, media_id),\n  FOREIGN KEY (export_job_id, media_id) REFERENCES export_media_entries(export_job_id, media_id) ON DELETE CASCADE,\n  CHECK ((read_lease_token IS NULL AND read_lease_expires_at IS NULL)\n    OR (typeof(read_lease_token) = 'text' AND length(read_lease_token) > 0 AND typeof(read_lease_expires_at) = 'text'\n      AND length(read_lease_expires_at) = 24 AND strftime('%Y-%m-%dT%H:%M:%fZ', read_lease_expires_at) IS NOT NULL\n      AND strftime('%Y-%m-%dT%H:%M:%fZ', read_lease_expires_at) = read_lease_expires_at)),\n  CHECK (state NOT IN ('prepared', 'acknowledged') OR prepared_at IS NOT NULL),\n  CHECK (state <> 'acknowledged' OR acknowledged_at IS NOT NULL),\n  CHECK (state <> 'failed' OR failed_at IS NOT NULL)\n)"
+  },
+  {
+    "name": "photo_export_delivery_leases",
+    "sql": "CREATE INDEX photo_export_delivery_leases ON photo_export_deliveries(export_job_id, read_lease_expires_at)\n  WHERE read_lease_token IS NOT NULL"
+  },
+  {
+    "name": "photo_export_idempotency",
+    "sql": "CREATE UNIQUE INDEX photo_export_idempotency ON export_jobs(event_id, initiating_principal, idempotency_key) WHERE kind = 'selection'"
+  }
+];
+
 function invariantOutput(ledgerNames: string[]): unknown[] {
   const terminal = terminalRows();
   return [
@@ -541,6 +777,7 @@ function invariantOutput(ledgerNames: string[]): unknown[] {
     resultEnvelope(structuredClone(managerUploadAlbumEraColumnRows)),
     resultEnvelope(structuredClone(managerUploadAlbumEraForeignKeyRows)),
     resultEnvelope(structuredClone(managerUploadAlbumEraIndexRows)),
+    resultEnvelope(structuredClone(photoExportSchemaRows)),
   ];
 }
 
@@ -590,6 +827,40 @@ function successfulAdapters(output: string) {
 }
 
 describe('fresh local D1 verification', () => {
+  it('matches affected invariant rows captured from the actual migrated D1 schema lane', () => {
+    const hashes: Record<number, string> = {
+  "13": "e4112d745f59a3c61a97390a17842a74a6336a740a9153e574a00214c6a41086",
+  "15": "f3263dae840a38e8b927684de7fcf602e0b65314e9dbb56d0cc9abba208425c9",
+  "16": "31eb2a4335e093a8815b25873b1e62041dfd30eef293d8ab9c0b0e0504c3ff04",
+  "22": "b9783fdc084bb88130605d703f6a09cb5c69e1d8e4b35e269a64404079ac1169",
+  "25": "a811326444183b87973ecf19f142e22c07dbbfb4bcf40e332090ca1b6df8713d",
+  "26": "068110157347c81ad35900760ab9697fe712ab7ab36eec70d1e1a17ae9227da8",
+  "30": "8ee61d630344f8e6b7deaa5c915a7902c5f50b55d0572193c3d858a9b5175424"
+};
+    const output = invariantOutput(migrationFileNames) as Array<{ results: unknown[] }>;
+    for (const [index, expected] of Object.entries(hashes)) {
+      const rows = output[Number(index)]!.results as Array<Record<string, unknown>>;
+      const normalized = rows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [
+        key, key.endsWith('sql') && typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : value,
+      ])));
+      expect(sha256(canonicalJson(normalized)), 'D1 result ' + index).toBe(expected);
+    }
+  });
+  it('rejects selection admission, delivery FK, lease, column, and trigger drift', async () => {
+    const candidate = await fixture();
+    for (const name of ['photo_export_admission', 'photo_export_deliveries', 'photo_export_idempotency', 'photo_export_delivery_leases', 'photo_export_admission_row']) {
+      const output = invariantOutput(candidate.ledgerNames);
+      const rows = (output[30] as { results: Array<{ name: string; sql: string }> }).results;
+      rows.find(row => row.name === name)!.sql += ' weakened';
+      expect(() => parseWranglerInvariantOutput(JSON.stringify(output), candidate.ledgerNames)).toThrow();
+    }
+    for (const name of ['photo_export_execution_update', 'photo_export_delivery_update', 'photo_export_entry_delete']) {
+      const output = invariantOutput(candidate.ledgerNames);
+      const rows = (output[11] as { results: Array<{ name: string; sql: string }> }).results;
+      rows.find(row => row.name === name)!.sql += ' weakened';
+      expect(() => parseWranglerInvariantOutput(JSON.stringify(output), candidate.ledgerNames)).toThrow();
+    }
+  });
   it('withholds deployment credentials from standalone local Wrangler commands', () => {
     const environment = freshD1ProcessEnvironment({
       PATH: 'tools',
@@ -745,7 +1016,7 @@ describe('fresh local D1 verification', () => {
       .map((statement) => statement.trim())
       .filter(Boolean);
 
-    expect(statements).toHaveLength(30);
+    expect(statements).toHaveLength(31);
     const exportProgressColumns = statements[25]!;
     expect(exportProgressColumns).toContain("pragma_table_info('export_jobs')");
     expect(exportProgressColumns).toContain("name = 'export_jobs'");
@@ -774,7 +1045,7 @@ describe('fresh local D1 verification', () => {
       .map((statement) => statement.trim())
       .filter(Boolean);
 
-    expect(statements).toHaveLength(30);
+    expect(statements).toHaveLength(31);
     const columns = statements[27]!;
     for (const column of [
       'manager_upload_account_id',

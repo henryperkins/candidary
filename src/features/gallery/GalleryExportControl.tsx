@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ReactElement,
+  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -49,6 +50,9 @@ interface GalleryExportControlProps {
    * ref, focus contract and pending state are untouched.
    */
   actionDock?: HTMLElement | null;
+  actionArea?: (dock: HTMLElement | null) => ReactElement;
+  actionAreaOwnsInitialAction?: boolean;
+  chooser?: ReactNode;
   onAnnouncement?(message: string): void;
 }
 
@@ -84,6 +88,9 @@ export const GalleryExportControl = forwardRef<
   onDownload,
   onRetry,
   actionDock,
+  actionArea,
+  actionAreaOwnsInitialAction = false,
+  chooser,
   onAnnouncement,
 }, ref) {
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
@@ -143,7 +150,11 @@ export const GalleryExportControl = forwardRef<
     let enabledAction: HTMLElement | null = null;
     if (resourceStatus === 'ready') {
       if (!normalizedJob) {
-        enabledAction = initialPrepare.current?.disabled ? null : initialPrepare.current;
+        enabledAction ??= initialPrepare.current?.disabled ? null : initialPrepare.current;
+        if (!enabledAction && actionArea) {
+          enabledAction = region.current?.querySelector<HTMLElement>('[data-photo-export-origin]:not(:disabled)')
+            ?? actionDock?.querySelector<HTMLElement>('[data-photo-export-origin]:not(:disabled)') ?? null;
+        }
       } else {
         if (download) {
           enabledAction = manifestDownload.current
@@ -185,9 +196,11 @@ export const GalleryExportControl = forwardRef<
     tabIndex={-1}
     ref={region}
   >
+    {actionArea?.(actionAreaOwnsInitialAction ? dockPrepare : null)}
+    {chooser}
     {!normalizedJob
       ? <>
-          {place(<button
+          {!chooser && !actionAreaOwnsInitialAction && place(<button
             ref={initialPrepare}
             type="button"
             className="button button--primary"
@@ -249,7 +262,7 @@ export const GalleryExportControl = forwardRef<
                 {pendingAction === 'retry' ? 'Retrying export…' : 'Retry this prepared export'}
               </button>
             : null}
-          {isTerminalExport(normalizedJob)
+          {!chooser && isTerminalExport(normalizedJob)
             ? <button
                 ref={prepareCurrent}
                 type="button"

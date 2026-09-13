@@ -9,6 +9,7 @@ import { albumShareRoutes } from './routes/album-share';
 import { entryRoutes } from './routes/entry';
 import { eventRoutes } from './routes/event';
 import { exportRoutes } from './routes/exports';
+import { photoExportRoutes } from './routes/photo-exports';
 import { exchangeRoutes } from './routes/exchange';
 import { contentRoutes } from './routes/content';
 import { eventCoverRoutes } from './routes/event-cover';
@@ -43,6 +44,7 @@ export function createApp() {
   app.route('/api', hostAuthRoutes);
   app.route('/api', eventRoutes);
   app.route('/api', exportRoutes);
+  app.route('/api', photoExportRoutes);
   app.route('/api', uploadRoutes);
   app.route('/api', contentRoutes);
   app.route('/api', galleryRoutes);

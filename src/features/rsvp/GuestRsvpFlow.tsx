@@ -23,11 +23,11 @@ type Presentation = 'primary' | 'secondary' | 'embedded';
 type Screen =
   | { kind: 'restoring' }
   | { kind: 'lookup'; secondNameRequired: boolean }
-  | { kind: 'editing'; household: RsvpHouseholdView; draft: RsvpDraft }
+  | { kind: 'editing'; household: RsvpHouseholdView; draft: RsvpDraft; focusHeading?: boolean }
   | { kind: 'saving'; household: RsvpHouseholdView; draft: RsvpDraft }
-  | { kind: 'receipt'; household: RsvpHouseholdView }
-  | { kind: 'read-only'; household: RsvpHouseholdView }
-  | { kind: 'before-start'; household: RsvpHouseholdView }
+  | { kind: 'receipt'; household: RsvpHouseholdView; focusHeading?: boolean }
+  | { kind: 'read-only'; household: RsvpHouseholdView; focusHeading?: boolean }
+  | { kind: 'before-start'; household: RsvpHouseholdView; focusHeading?: boolean }
   | { kind: 'closed' }
   | { kind: 'paused'; household: RsvpHouseholdView | null };
 
@@ -96,6 +96,14 @@ function screenAfterConflict(
     household,
     draft: sameRoster ? draft : createHouseholdDraft(household),
   };
+}
+
+function withExplicitHeadingFocus(next: Screen): Screen {
+  if (next.kind === 'editing' || next.kind === 'receipt'
+    || next.kind === 'read-only' || next.kind === 'before-start') {
+    return { ...next, focusHeading: true };
+  }
+  return next;
 }
 
 export function GuestRsvpFlow({
@@ -169,7 +177,7 @@ export function GuestRsvpFlow({
       if (onGuestNameChange) onGuestNameChange(rememberedName);
       else rememberGuestName(rememberedName);
       setReviewUpdated(false);
-      setScreen(screenForHousehold(event, result.household));
+      setScreen(withExplicitHeadingFocus(screenForHousehold(event, result.household)));
     } catch (caught) {
       if (requestGeneration.current !== generation) return;
       setLookupMessage(caught instanceof Error ? caught.message : 'We could not find that invitation.');
@@ -199,7 +207,7 @@ export function GuestRsvpFlow({
       });
       if (requestGeneration.current !== generation) return;
       setReviewUpdated(false);
-      setScreen({ kind: 'receipt', household: result.household });
+      setScreen({ kind: 'receipt', household: result.household, focusHeading: true });
     } catch (caught) {
       if (requestGeneration.current !== generation) return;
       if (caught instanceof ClientApiError && caught.code === 'RSVP_HOUSEHOLD_CONFLICT') {
@@ -272,7 +280,12 @@ export function GuestRsvpFlow({
       setScreen(screenForHousehold(event, household));
       return;
     }
-    setScreen({ kind: 'editing', household, draft: createHouseholdDraft(household) });
+    setScreen({
+      kind: 'editing',
+      household,
+      draft: createHouseholdDraft(household),
+      focusHeading: true,
+    });
   }
 
   // Effects retire stale requests, but they run after render. Never paint an
@@ -318,6 +331,7 @@ export function GuestRsvpFlow({
       saving={renderedScreen.kind === 'saving'}
       saveError={saveError}
       reviewUpdated={reviewUpdated}
+      focusHeading={renderedScreen.kind === 'editing' && renderedScreen.focusHeading === true}
       onDraftChange={changeDraft}
       onSubmit={(draft) => submit(renderedScreen.household, draft)}
     />;
@@ -329,6 +343,7 @@ export function GuestRsvpFlow({
       presentation={presentation}
       household={renderedScreen.household}
       mode="receipt"
+      focusHeading={renderedScreen.focusHeading}
       onChange={() => changeResponse(renderedScreen.household)}
       onRenew={() => setScreen({ kind: 'lookup', secondNameRequired: false })}
     />;
@@ -340,6 +355,7 @@ export function GuestRsvpFlow({
       presentation={presentation}
       household={renderedScreen.household}
       mode="read-only"
+      focusHeading={renderedScreen.focusHeading}
       onChange={() => changeResponse(renderedScreen.household)}
       onRenew={() => setScreen({ kind: 'lookup', secondNameRequired: false })}
     />;
@@ -351,6 +367,7 @@ export function GuestRsvpFlow({
       presentation={presentation}
       household={renderedScreen.household}
       mode="before-start"
+      focusHeading={renderedScreen.focusHeading}
       onChange={() => undefined}
       onRenew={() => setScreen({ kind: 'lookup', secondNameRequired: false })}
     />;

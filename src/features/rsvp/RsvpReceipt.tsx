@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react';
+
 import type {
   GuestEventView,
   RsvpHouseholdView,
@@ -9,6 +11,7 @@ interface RsvpReceiptProps {
   presentation: 'primary' | 'secondary' | 'embedded';
   household: RsvpHouseholdView;
   mode: 'receipt' | 'read-only' | 'before-start' | 'paused';
+  focusHeading?: boolean;
   onChange: () => void;
   onRenew: () => void;
 }
@@ -26,6 +29,7 @@ export function RsvpReceipt({
   presentation,
   household,
   mode,
+  focusHeading = false,
   onChange,
   onRenew,
 }: RsvpReceiptProps) {
@@ -39,14 +43,21 @@ export function RsvpReceipt({
     && household.editable
     && !household.renewalRequired;
   const HeadingTag = presentation === 'embedded' ? 'h2' : 'h1';
+  const headingRef = useRef<HTMLHeadingElement>(null);
   let plusOneNumber = 0;
+
+  useEffect(() => {
+    if (focusHeading) headingRef.current?.focus();
+  }, [focusHeading, household.id]);
 
   return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--receipt">
     <div className="rsvp-card rsvp-receipt" aria-live="polite">
       {/* The before-start page names the event in its hero and again in its start line; a third
           reading of it here would be the only new copy on that surface. */}
       {presentation !== 'embedded' && <p className="rsvp-eyebrow">{event.name}</p>}
-      <HeadingTag>{mode === 'receipt' ? "You're all set" : 'Your RSVP'}</HeadingTag>
+      <HeadingTag ref={headingRef} tabIndex={-1}>
+        {mode === 'receipt' ? "You're all set" : 'Your RSVP'}
+      </HeadingTag>
       {mode === 'receipt' && <p>Your household response has been saved.</p>}
       {mode === 'read-only' && event.rsvpState !== 'open' && <p>
         RSVP is closed. Your saved response is shown below.

@@ -30,6 +30,9 @@ interface SelectionTrayProps {
   /** What the two verbs do and do not change. Defaults to the Album sentence. */
   note?: string;
   onClear(): void;
+  countLabel?: string;
+  editingDisabledReason?: string;
+  exportAction?: ReactNode;
 }
 
 export type SelectionTrayInput = 'keyboard' | 'pointer';
@@ -70,6 +73,9 @@ export function SelectionTray({
   secondary,
   note = ALBUM_TRAY_NOTE,
   onClear,
+  countLabel,
+  editingDisabledReason,
+  exportAction,
 }: SelectionTrayProps) {
   const countMessage = count >= MANAGER_BULK_SELECTION_MAX
     ? selectionCapacityMessage()
@@ -80,20 +86,22 @@ export function SelectionTray({
           is guaranteed to be on screen when it does: the block only happens at the ceiling, which
           cannot be reached without a selection. */}
       <div className="selection-tray__count" id="bulk-selection-status">
-        <strong>{countMessage}</strong>
+        <strong>{countLabel ?? countMessage}</strong>
         <span>{note}</span>
+        {editingDisabledReason && <span>{editingDisabledReason}</span>}
       </div>
       <div className="selection-tray__actions">
+        {exportAction}
         <button
           type="button"
           className={`button button--${primary.variant ?? 'primary'}`}
-          disabled={busy || mutationLocked}
+          disabled={busy || mutationLocked || !!editingDisabledReason}
           onClick={(event) => primary.onClick(activationInput(event))}
         >{primary.icon} {primary.label}</button>
         <button
           type="button"
           className={`button button--${secondary.variant ?? 'secondary'}`}
-          disabled={busy || mutationLocked}
+          disabled={busy || mutationLocked || !!editingDisabledReason}
           onClick={(event) => secondary.onClick(activationInput(event))}
         >{secondary.icon} {secondary.label}</button>
         {/* Below 761 Clear is the tray's corner X — the one glyph this system lets go unlabelled —

@@ -44,9 +44,11 @@ interface ManagerRsvpHouseholdEditorProps {
   // The unified staging workspace owns new invitations. Keep the legacy create
   // callbacks for callers that still need them, without surfacing both flows.
   allowCreate?: boolean;
+  loading: boolean;
+  selectionFailed?: boolean;
   busy: boolean;
-  // Set only when a refused write replaced the view with the winning version, so
-  // the host reads the newer roster from the top before editing it again.
+  // Explicit opens and refused-write refreshes move the host to the winning
+  // household heading; ordinary committed writes leave focus in place.
   autoFocusHeading: boolean;
   onStartCreate: () => void;
   onCancelCreate: () => void;
@@ -81,6 +83,8 @@ export function ManagerRsvpHouseholdEditor({
   detail,
   creating,
   allowCreate = true,
+  loading,
+  selectionFailed = false,
   busy,
   autoFocusHeading,
   onStartCreate,
@@ -92,7 +96,17 @@ export function ManagerRsvpHouseholdEditor({
   onCloseDetail,
 }: ManagerRsvpHouseholdEditorProps) {
   return <div className="rsvp-manager__editor">
-    {!creating && !detail && <div className="rsvp-manager__editor-empty">
+    {!creating && !detail && loading && <div className="rsvp-manager__editor-empty">
+      <p role="status">Loading household…</p>
+      <button type="button" className="text-button" onClick={onCloseDetail}>Close household</button>
+    </div>}
+
+    {!creating && !detail && selectionFailed && <div className="rsvp-manager__editor-empty">
+      <p>Household details are unavailable.</p>
+      <button type="button" className="text-button" onClick={onCloseDetail}>Close household</button>
+    </div>}
+
+    {!creating && !detail && !loading && !selectionFailed && <div className="rsvp-manager__editor-empty">
       <p>{allowCreate ? 'Open a household to edit it, or add one by hand.' : 'Open a household to edit, correct, or archive it.'}</p>
       {allowCreate && <button type="button" className="button button--secondary" onClick={onStartCreate}>
         Add household
@@ -225,8 +239,10 @@ function HouseholdEditor({
   const nameRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
-    if (autoFocusHeading) headingRef.current?.focus();
-  }, [autoFocusHeading]);
+    if (!autoFocusHeading) return;
+    headingRef.current?.focus({ preventScroll: true });
+    headingRef.current?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  }, [autoFocusHeading, detail.id]);
 
   const responded = detail.firstRespondedAt !== null;
   const growth = Math.max(0, (Number(plusOneSlots) || 0) - detail.plusOneSlots);

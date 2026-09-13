@@ -41,7 +41,7 @@ import {
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
 } from '../../shared/constants';
-import type { ExportKind, GalleryAudienceSummaryView, PhotoIntakeState } from '../../shared/contracts';
+import type { LegacyArchiveExportKind, GalleryAudienceSummaryView, PhotoIntakeState } from '../../shared/contracts';
 import type {
   EventView,
   ExportDownloadView,
@@ -2560,7 +2560,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     await exportsResource.reload().catch(() => undefined);
   }
 
-  async function prepareExport(kind: ExportKind = 'complete') {
+  async function prepareExport(kind: LegacyArchiveExportKind = 'complete') {
     const scope = eventScope.current.generation;
     const body = kind === 'album' ? JSON.stringify({ kind: 'album' }) : '{}';
     let result: { export: ExportView };

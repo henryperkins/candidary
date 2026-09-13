@@ -1,5 +1,6 @@
 import {
   ChevronDown,
+  Check,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
@@ -19,6 +20,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 
@@ -62,6 +64,8 @@ import {
 } from './album-api';
 import { AlbumPreview } from './AlbumPreview';
 import { AlbumExportControl } from './AlbumExportControl';
+import type { PhotoExportSource } from '../../../shared/photo-exports';
+import { emptySelection, selectAll, togglePhoto, isPhotoSelected, selectionLabel, toPhotoExportSource } from './photo-export-selection';
 import type { ExportCurrentSource } from './export-control-status';
 import { fetchAlbumShare, shareAlbum, stopAlbumShare } from './album-share-api';
 import { galleryPhotoTitle } from './gallery-timeline';
@@ -124,6 +128,12 @@ interface ManagerAlbumProps {
    * a second `Create Album link` in the document.
    */
   actionDock?: HTMLElement | null;
+  photoExportEnabled?: boolean;
+  onPhotoExport?(source: PhotoExportSource, origin: HTMLElement): void;
+  onPhotoExportSourceChange?(): void;
+  photoExportActionArea?: ReactNode;
+  photoExportActionAreaOwnsInitialAction?: boolean;
+  photoExportChooser?: ReactNode;
 }
 
 export type AlbumLeavePreparation =
@@ -877,7 +887,19 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   onAnnouncement,
   onAnchorReady,
   actionDock = null,
+  photoExportEnabled = false,
+  onPhotoExport,
+  onPhotoExportSourceChange,
+  photoExportActionArea,
+  photoExportActionAreaOwnsInitialAction = false,
+  photoExportChooser,
 }, ref) {
+  const [selectingPhotos, setSelectingPhotos] = useState(false);
+  const [photoSelection, setPhotoSelection] = useState(() => emptySelection('album'));
+  const photoSelectControl = useRef<HTMLButtonElement>(null);
+  const updatePhotoSelection = (next: PhotoExportSource) => {
+    setPhotoSelection(next); onPhotoExportSourceChange?.();
+  };
   const [album, setAlbum] = useState<AlbumView | null>(null);
   const [draft, setDraft] = useState<AlbumDraft>(() => ({
     ...INITIAL_DRAFT,
@@ -2593,6 +2615,9 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                     </p>}
                   </div>
                   <div className="album-order-heading__controls">
+                    {onPhotoExport && <button type="button" className="button button--secondary" ref={photoSelectControl} data-photo-export-origin aria-pressed={selectingPhotos} onClick={() => { setSelectingPhotos(value => !value); updatePhotoSelection(emptySelection('album')); }}>
+                      {selectingPhotos ? 'Done selecting Album photos' : 'Select Album photos'}
+                    </button>}
                     <button type="button" className="button button--secondary" onClick={addSection}>
                       <Plus aria-hidden="true" /> Add a section
                     </button>
@@ -2607,6 +2632,12 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                     </button>
                   </div>
                 </header>
+                {selectingPhotos && <div className="gallery-selection-controls" role="region" aria-label="Album photo selection">
+                  <button type="button" className="text-button" onClick={() => updatePhotoSelection(selectAll({ scope: 'album' }))}>Select all Album photos</button>
+                  <strong>{selectionLabel(photoSelection)}</strong>
+                  <button type="button" className="text-button" onClick={() => { updatePhotoSelection(emptySelection('album')); photoSelectControl.current?.focus(); }}>Clear selection</button>
+                  <button type="button" className="button button--primary" disabled={!photoExportEnabled || (photoSelection.mode === 'ids' && photoSelection.mediaIds.length === 0)} onClick={click => onPhotoExport?.(toPhotoExportSource(photoSelection), click.currentTarget)}>Save / Share photos</button>
+                </div>}
                 <small id="album-reset-consequence">
                   Reset removes every section and can be undone for {UNDO_WINDOW_MS / 1_000} seconds.
                 </small>
@@ -2653,8 +2684,9 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                             : entry.kind === 'photo-retained'
                               ? 'album-review-grid__photo album-review-grid__photo--retained'
                               : 'album-review-grid__photo'}
-                          draggable
+                          draggable={!selectingPhotos}
                           onDragStart={(dragEvent) => {
+                            if (selectingPhotos) { dragEvent.preventDefault(); return; }
                             dragKey.current = key;
                             if (dragEvent.dataTransfer) {
                               dragEvent.dataTransfer.effectAllowed = 'move';
@@ -2664,6 +2696,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                           onDragOver={(dragEvent) => dragEvent.preventDefault()}
                           onDrop={(dropEvent) => {
                             dropEvent.preventDefault();
+                            if (selectingPhotos) return;
                             const sourceKey = dragKey.current;
                             dragKey.current = null;
                             if (!sourceKey) return;
@@ -2677,6 +2710,12 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                             dragEvent.dataTransfer?.clearData();
                           }}
                         >
+                          {selectingPhotos && entry.kind === 'photo' && <button type="button"
+                            className="album-photo-select"
+                            aria-pressed={isPhotoSelected(photoSelection, entry.photo.id)}
+                            aria-label={`${isPhotoSelected(photoSelection, entry.photo.id) ? 'Deselect' : 'Select'} ${name}, from ${entry.photo.guestName}`}
+                            onClick={() => { try { updatePhotoSelection(togglePhoto(photoSelection, entry.photo.id)); } catch (caught) { setNotice(errorMessage(caught, 'Selection could not be updated.')); } }}
+                          ><span aria-hidden="true">{isPhotoSelected(photoSelection, entry.photo.id) && <Check />}</span></button>}
                           {entry.kind === 'section'
                             ? <>
                                 <span className="album-section__marker" aria-hidden="true" />
@@ -2766,7 +2805,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                                 </span>
                               </>}
 
-                          <span className="album-entry__controls">
+                          {!(selectingPhotos && entry.kind === 'photo') && <span className="album-entry__controls">
                             <button
                               type="button"
                               className="icon-button album-entry__move-earlier"
@@ -2834,7 +2873,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                                 else void trackOperation(() => removePhoto(entry, click.detail));
                               }}
                             ><X aria-hidden="true" /></button>}
-                          </span>
+                          </span>}
                         </li>;
                       })}
                     </ol>}
@@ -2851,6 +2890,9 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
               ><Eye aria-hidden="true" /> {previewOpen ? 'Back to editing' : 'Preview album'}</button>
               {actionDock === null && shareAction}
               <AlbumExportControl
+                actionArea={photoExportActionArea}
+                actionAreaOwnsInitialAction={photoExportActionAreaOwnsInitialAction}
+                chooser={photoExportChooser}
                 job={exportJob}
                 activeJob={activeExport}
                 download={exportDownload}

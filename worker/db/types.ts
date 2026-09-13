@@ -1,3 +1,4 @@
+import type { PhotoExportDestination } from '../../shared/photo-exports';
 import type {
   ChallengePurpose,
   EventThemeConfigV1,
@@ -527,6 +528,15 @@ export interface ExportMediaEntryRecord extends ExportableMediaRecord {
 }
 
 export interface ExportRecord {
+  destination: PhotoExportDestination;
+  sourceJson: string | null;
+  requestDigest: string | null;
+  idempotencyKey: string | null;
+  initiatingPrincipal: string | null;
+  confirmedAt: string | null;
+  holdExpiresAt: string | null;
+  absoluteExpiresAt: string | null;
+  cancelRequestedAt: string | null;
   id: string;
   eventId: string;
   kind: ExportKind;
@@ -539,7 +549,7 @@ export interface ExportRecord {
   mediaCount: number;
   totalBytes: number;
   attempt: number;
-  executionProtocol: 'legacy' | 'attempt-v2';
+  executionProtocol: 'legacy' | 'attempt-v2' | 'selection-v1';
   executionTransition: number;
   executionStartedAt: string | null;
   processedMediaCount: number | null;

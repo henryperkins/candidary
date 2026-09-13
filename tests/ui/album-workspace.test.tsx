@@ -447,6 +447,9 @@ function harness(overrides: Partial<Harness> = {}) {
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : null;
 
+    if (url.pathname.endsWith('/photo-exports/capabilities') && method === 'GET') {
+      return success({ enabled: false, destinations: [], activeJob: null });
+    }
     if (url.pathname.endsWith('/gallery/summary') && method === 'GET') {
       const read = state.audienceReads++;
       await state.audienceReadGates[read];
@@ -1028,6 +1031,46 @@ function contextDisclosure(): HTMLDetailsElement {
 }
 
 describe('gallery modes', () => {
+  it('photo export Album uses one covering toggle and excludes sections and edit controls', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const controlled = harness({ galleryRows: [p1], album: { revision: 1, saved: true, entries: [{ kind: 'photo', photo: p1 }, { kind: 'section', id: 'section-a', heading: 'Dance' }] } });
+    const original = controlled.fetchMock.getMockImplementation()!;
+    controlled.fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/photo-exports/capabilities') ? success({ enabled: true, destinations: ['device', 'archive'], activeJob: null }) : original(input, init));
+    renderWorkspace(controlled.fetchMock, {}, { mode: 'album' });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Select Album photos' }));
+    const tile = screen.getByRole('button', { name: 'Select p1.jpg, from Jose' });
+    expect(tile.closest('li')).toHaveAttribute('draggable', 'false');
+    expect(within(tile.closest('li')!).getAllByRole('button')).toHaveLength(1);
+    await user.click(tile); expect(tile).toHaveAttribute('aria-pressed', 'true');
+    tile.focus(); await user.keyboard(' '); expect(tile).toHaveAttribute('aria-pressed', 'false');
+    await user.click(screen.getByRole('button', { name: 'Select all Album photos' }));
+    expect(screen.queryByRole('button', { name: 'Select Dance' })).toBeNull();
+    const origin = within(screen.getByRole('region', { name: 'Album photo selection' })).getByRole('button', { name: 'Save / Share photos' });
+    await user.click(origin);
+    const chooser = await screen.findByRole('region', { name: 'Save or share photos' });
+    expect(chooser.closest('.album-export')).not.toBeNull();
+    await user.click(within(chooser).getByRole('button', { name: 'Close photo export' }));
+    expect(origin).toHaveFocus();
+  });
+
+  it('photo export settles the Album draft before opening the snapshot chooser', async () => {
+    const p1 = photo('p1', '2026-08-15T22:42:00.000Z', { isFavorite: true });
+    const saved = deferred();
+    const controlled = harness({ galleryRows: [p1], album: { revision: 1, saved: true, entries: [{ kind: 'photo', photo: p1 }] }, orderGates: [saved.promise] });
+    const original = controlled.fetchMock.getMockImplementation()!;
+    controlled.fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/photo-exports/capabilities') ? success({ enabled: true, destinations: ['device', 'archive'], activeJob: null }) : original(input, init));
+    renderWorkspace(controlled.fetchMock, {}, { mode: 'album' });
+    const title = await screen.findByLabelText('Album title');
+    fireEvent.change(title, { target: { value: 'Our saved Album' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save / Share photos' }));
+    await waitFor(() => expect(controlled.state.metadataWrites).toHaveLength(1));
+    expect(screen.queryByRole('region', { name: 'Save or share photos' })).toBeNull();
+    await act(async () => saved.resolve());
+    await screen.findByRole('region', { name: 'Save or share photos' });
+    expect(controlled.state.metadataWrites[0]?.title).toBe('Our saved Album');
+  });
+
   it('waits for the controlled Gallery mode to be adopted', async () => {
     const { fetchMock } = harness();
     const onModeChange = vi.fn();

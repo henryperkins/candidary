@@ -17,8 +17,9 @@ export type UploadState = 'reserved' | 'stored' | 'failed' | 'deleted';
 export type ModerationStatus = 'pending' | 'approved' | 'rejected';
 export type PublicationStatus = 'unpublished' | 'published' | 'hidden';
 export type TimelineSource = 'capture' | 'received';
-export type ExportKind = 'complete' | 'album';
-export type ExportState = 'queued' | 'running' | 'ready' | 'failed' | 'expired';
+export type LegacyArchiveExportKind = 'complete' | 'album';
+export type ExportKind = LegacyArchiveExportKind | 'selection';
+export type ExportState = 'queued' | 'running' | 'ready' | 'failed' | 'expired' | 'delivered' | 'handed-off' | 'cancelled';
 
 export const MANAGER_EXPORT_ERROR_CODES = [
   'EXPORT_SOURCE_MISSING',

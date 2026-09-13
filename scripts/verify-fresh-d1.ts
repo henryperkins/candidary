@@ -138,14 +138,14 @@ SELECT name,
       (instr(sql, 'guestbook_shared_count >= 0 AND guestbook_shared_count <= guestbook_entry_count') > 0) || '|' ||
       (instr(sql, 'guestbook_prompt IS NULL OR length(trim(guestbook_prompt)) BETWEEN 1 AND 160') > 0) || '|' ||
       (instr(sql, 'guestbook_gallery_visible IS NULL OR guestbook_gallery_visible IN (0, 1)') > 0) || '|' ||
-      (instr(sql, 'kind IN (''complete'', ''album'')') > 0) || '|' ||
+      (instr(sql, 'kind IN (''complete'', ''album'', ''selection'')') > 0) || '|' ||
       (instr(sql, '(kind = ''complete'' AND album_entries_json IS NULL)') > 0) || '|' ||
       (instr(sql, '(kind = ''album'' AND album_entries_json IS NOT NULL') > 0) || '|' ||
       (instr(sql, 'json_valid(album_entries_json)') > 0) || '|' ||
       (instr(sql, 'json_type(album_entries_json) = ''array''') > 0) || '|' ||
       (instr(sql, 'processed_media_count IS NULL OR processed_media_count >= 0') > 0) || '|' ||
       (instr(sql, 'processed_bytes IS NULL OR processed_bytes >= 0') > 0) || '|' ||
-      (instr(sql, 'execution_protocol IN (''legacy'', ''attempt-v2'')') > 0) || '|' ||
+      (instr(sql, 'execution_protocol IN (''legacy'', ''attempt-v2'', ''selection-v1'')') > 0) || '|' ||
       (instr(sql, 'execution_transition >= 0') > 0)
     WHEN 'export_media_entries' THEN
       (instr(sql, 'object_bucket_generation IN (''legacy'', ''canonical'')') > 0) || '|' ||
@@ -266,14 +266,14 @@ SELECT name,
       (instr(sql, 'length(trim(title)) BETWEEN 1 AND 120') > 0) || '|' ||
       (instr(sql, 'length(description) <= 1000') > 0)
     WHEN 'export_jobs' THEN
-      (instr(sql, 'kind IN (''complete'', ''album'')') > 0) || '|' ||
+      (instr(sql, 'kind IN (''complete'', ''album'', ''selection'')') > 0) || '|' ||
       (instr(sql, '(kind = ''complete'' AND album_entries_json IS NULL)') > 0) || '|' ||
       (instr(sql, '(kind = ''album'' AND album_entries_json IS NOT NULL') > 0) || '|' ||
       (instr(sql, 'json_valid(album_entries_json)') > 0) || '|' ||
       (instr(sql, 'json_type(album_entries_json) = ''array''') > 0) || '|' ||
       (instr(sql, 'processed_media_count IS NULL OR processed_media_count >= 0') > 0) || '|' ||
       (instr(sql, 'processed_bytes IS NULL OR processed_bytes >= 0') > 0) || '|' ||
-      (instr(sql, 'execution_protocol IN (''legacy'', ''attempt-v2'')') > 0) || '|' ||
+      (instr(sql, 'execution_protocol IN (''legacy'', ''attempt-v2'', ''selection-v1'')') > 0) || '|' ||
       (instr(sql, 'execution_transition >= 0') > 0)
     WHEN 'export_media_entries' THEN
       (instr(sql, 'album_tail_position IS NULL OR album_tail_position >= 1') > 0) || ''
@@ -311,7 +311,8 @@ SELECT p.cid, p.name, p.type, p."notnull", p.dflt_value, p.pk,
     'progress_updated_at',
     'execution_protocol',
     'execution_transition',
-    'execution_started_at'
+    'execution_started_at',
+    'destination', 'source_json', 'request_digest', 'idempotency_key', 'initiating_principal', 'confirmed_at', 'hold_expires_at', 'absolute_expires_at', 'cancel_requested_at'
   )
 ORDER BY cid;
 SELECT p.cid, p.name, p.type, p."notnull", p.dflt_value, p.pk,
@@ -364,9 +365,17 @@ SELECT i.name AS name, i."unique" AS uniq, i.partial AS partial, x.sql AS sql
   FROM pragma_index_list('event_sessions') AS i
   JOIN sqlite_master AS x ON x.type = 'index' AND x.name = i.name
   WHERE i.name = 'event_sessions_manager_upload_actor'
+ORDER BY name;
+SELECT name, sql FROM sqlite_master WHERE name IN (
+  'photo_export_admission', 'photo_export_deliveries', 'photo_export_idempotency', 'photo_export_delivery_leases'
+)
+UNION ALL
+SELECT 'photo_export_admission_row' AS name, json_object(
+  'singleton', singleton, 'enabled', enabled, 'worker_version_id', worker_version_id, 'admitted_at', admitted_at
+) AS sql FROM photo_export_admission
 ORDER BY name;`;
 
-const INVARIANT_STATEMENT_COUNT = 30;
+const INVARIANT_STATEMENT_COUNT = 31;
 
 /**
  * Pinned, not derived.
@@ -387,16 +396,19 @@ const INVARIANT_STATEMENT_COUNT = 30;
  * account upload actor and database-owned Album-era generation.
  * Twenty-two with `0022_event_cover_preset_asset_v2.sql`, which admits only
  * immutable preset asset versions 1 and 2 without widening other cover guards.
+ * Twenty-three with `0023_photo_export_selection.sql`, which preserves legacy
+ * exports and adds disabled selection admission and device delivery leases.
  * Count and terminal schema assertions move together here.
  */
-const EXPECTED_MIGRATION_COUNT = 22;
+const EXPECTED_MIGRATION_COUNT = 23;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
  * existing invariant bodies, all fifteen 0015 bodies, the twelve 0019 recovery
  * and source-hold bodies, the nine 0020 execution/progress/admission bodies,
  * the eight 0021 actor/Album bodies, and the two 0022 cover bodies cannot drift
- * behind a name-only check.
+ * behind a name-only check. Selection protocol and lease guards from 0023
+ * are pinned alongside the preserved legacy guards.
  *
  * Two of these names are older than their bodies: 0019 replaces
  * `media_object_write_tombstone_guard_update` and `media_stored_legacy_guard_update`
@@ -425,10 +437,10 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   export_jobs_execution_update: '8d460c89a2f9f6d9af28d39d200a67ac00a83c03fd43d392754a8bf6f37ada97',
   export_jobs_progress_insert: '19cb1439bf8e779be4ec89209b3156e7534c39d5253dfbcab3c73f886c38dc21',
   export_jobs_progress_update: '699fbe58e3797ec7e161363adc31bd029dae3ebe0133ceb72124c3146dd2d187',
-  export_jobs_protocol_admission_insert: 'c3ab52e3135af073784434b39c6515b92a14dafc1a2b7e2bb4133e39f80efdf3',
-  export_jobs_protocol_admission_update: '77ad4f4c61686a92a95c9e5239e589dad55e8b42f2e6a92474bb1db9cd79449b',
-  export_jobs_retry_source_fence: '21a9d82803679053a9c192e256c6c52166aaf128917179ad092bbe132d55a633',
-  export_jobs_running_source_fence: 'aefa6ab749858b23d03dd9b0b4a5864b46d98e41f405762471e9fd678cd8be9d',
+  export_jobs_protocol_admission_insert: '0e5d79386e224f64ada935b72adda59e64de314a61529bf3aca81be4e42c9a5b',
+  export_jobs_protocol_admission_update: '8d5065a6a276df491dd8d929d3293f8423ed474368c2c595b6c220d09d182de9',
+  export_jobs_retry_source_fence: '5f9496b62686641334ff6a4e8813d6b9fb4d0d9e2047a225357f53ae6e6c8b00',
+  export_jobs_running_source_fence: 'a6f3afaadf7607a14968db9016c9069055a01a4b31a5b4d5cff8b266db04b5f2',
   export_media_entry_suppressed_source_insert: 'c14114f4af846a5423c1d44f3e7d0c960f38558750908ba9ccc4d69076a7bdcc',
   export_protocol_admission_no_delete: '270cdaa568501c06d2022499fe0c7826322a02c47b25bf7bd82782a89736c6a3',
   export_protocol_admission_no_insert: 'e643ec41e0dc6c029d67cfcb89c51c544f842a92615573d0a0946f1f24aed7ed',
@@ -460,6 +472,19 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   media_stored_legacy_guard_update: '1894aac1a305d5c42f633d676cccb75bf6aaec48dc433fb34c1b800240fb5c16',
   media_trash_pair_insert: 'c8fa277cd7f21221d9e9b7e0e090957173cf2280c2f6fc2ebf1e61bc0754a2b3',
   media_trash_pair_update: '934c187edbcb7df13af7c4a0b1e9c6249f65ad056dccb080da9fe9ad4f703bd2',
+  photo_export_admission_no_delete: '12d8854c9c6b90b1685b8f86a7dbc5cb601a116b951378e183aea1dc72b4fa6c',
+  photo_export_admission_no_insert: 'c2fb45db041025f6724aff78e6f1af8068f8a14ee6148ac7c435557087cc78e6',
+  photo_export_admission_update: '85c17b68715b2ebfd085211dd71439253506806681a896f187b2366fea8995ec',
+  photo_export_delivery_delete: '9b488db72fff63b77fd19c22fee1b50c1819ad261ac94b3b776f51900a739e55',
+  photo_export_delivery_insert: '04e856665b7342130ac79bdfdc00edce3d8402ab4dfca03110ee8d05852e4483',
+  photo_export_delivery_update: 'fb9d82445ab7485b4ec887530b62fba1dc40913226615d9dd7e65bb962a4f219',
+  photo_export_entry_delete: '98f834d85d5b591e7f76799d1b2cd8f5807b19498bd02e70df2beaba63230c3e',
+  photo_export_entry_insert: 'eefb8c212049ef494a59bdbf028c78bd14cb55606f0771623cf90ed2aef1cfd9',
+  photo_export_entry_update: 'af89fef7b40001a8787aa71656f12b26d4d21db5a952ee41ae3997ac67f9b183',
+  photo_export_execution_insert: '7292844bba0f94a4d8458618ac3dae111ffd7386db90b610eb3d47b7e4e55dce',
+  photo_export_execution_update: 'e15427ff64d0e98eb0178ce60d84a06156da0b419ce77a20b00277d69392e087',
+  photo_export_guestbook_insert: '0c3d29ebb7923bd38430c4f74644645ce7cd1dc6bc605f706509f89300a74f8c',
+  photo_export_guestbook_update: 'd65e8be39f08474d431471cb07cbeca708ffd05491ce484f803f195cb8fbe073',
 };
 
 const EXPECTED_COVER_TABLES = [
@@ -611,6 +636,7 @@ const EXPECTED_GUESTBOOK_COLUMNS: Record<string, readonly string[]> = {
     // 0020, appended so every earlier ordinal is unmoved.
     'processed_media_count', 'processed_bytes', 'progress_updated_at',
     'execution_protocol', 'execution_transition', 'execution_started_at',
+    'destination', 'source_json', 'request_digest', 'idempotency_key', 'initiating_principal', 'confirmed_at', 'hold_expires_at', 'absolute_expires_at', 'cancel_requested_at',
   ],
   export_media_entries: [
     'export_job_id', 'media_id', 'object_key', 'object_bucket_generation', 'original_filename',
@@ -675,6 +701,7 @@ const EXPECTED_GUESTBOOK_INDEXES = [
   'export_guestbook_entries.sqlite_autoindex_export_guestbook_entries_1 unique=1 partial=0',
   'export_jobs.export_jobs_expiry unique=0 partial=0',
   'export_jobs.export_jobs_one_active_per_event unique=1 partial=1',
+  'export_jobs.photo_export_idempotency unique=1 partial=1',
   'export_jobs.sqlite_autoindex_export_jobs_1 unique=1 partial=0',
   'export_media_entries.export_album_media_position unique=1 partial=1',
   'export_media_entries.export_media_entries_order unique=0 partial=0',
@@ -793,19 +820,28 @@ const EXPECTED_RECOVERY_INDEX_SQL: Record<string, string> = {
 };
 
 const EXPECTED_EXPORT_PROGRESS_COLUMNS = [
-  '30 processed_media_count INTEGER notnull=0 default=NULL pk=0',
-  '31 processed_bytes INTEGER notnull=0 default=NULL pk=0',
-  '32 progress_updated_at TEXT notnull=0 default=NULL pk=0',
+  "30 processed_media_count INTEGER notnull=0 default=NULL pk=0",
+  "31 processed_bytes INTEGER notnull=0 default=NULL pk=0",
+  "32 progress_updated_at TEXT notnull=0 default=NULL pk=0",
   "33 execution_protocol TEXT notnull=1 default='legacy' pk=0",
-  '34 execution_transition INTEGER notnull=1 default=0 pk=0',
-  '35 execution_started_at TEXT notnull=0 default=NULL pk=0',
+  "34 execution_transition INTEGER notnull=1 default=0 pk=0",
+  "35 execution_started_at TEXT notnull=0 default=NULL pk=0",
+  "36 destination TEXT notnull=1 default='archive' pk=0",
+  "37 source_json TEXT notnull=0 default=NULL pk=0",
+  "38 request_digest TEXT notnull=0 default=NULL pk=0",
+  "39 idempotency_key TEXT notnull=0 default=NULL pk=0",
+  "40 initiating_principal TEXT notnull=0 default=NULL pk=0",
+  "41 confirmed_at TEXT notnull=0 default=NULL pk=0",
+  "42 hold_expires_at TEXT notnull=0 default=NULL pk=0",
+  "43 absolute_expires_at TEXT notnull=0 default=NULL pk=0",
+  "44 cancel_requested_at TEXT notnull=0 default=NULL pk=0"
 ];
 
-// Exact normalized sqlite_master SQL after 0001-0020. Column pragmas prove
+// Exact normalized sqlite_master SQL after 0001-0023. Column pragmas prove
 // types/defaults; this digest additionally refuses weakened or extra CHECK
 // expressions that would retain every required substring.
 const EXPECTED_EXPORT_JOBS_TABLE_SQL_SHA256 =
-  '925d170970a421f21205b5cda86ff15d4da9fb1c63ac2934f041273ce39c2c30';
+  '97db0193d33a2f24115206a7d0f5370326b2c06a6cae089276cabcc7af563898';
 
 const EXPECTED_EXPORT_PROTOCOL_ADMISSION_COLUMNS = [
   '0 singleton INTEGER notnull=0 default=NULL pk=1',
@@ -1563,6 +1599,24 @@ function assertRecoveryIndexes(values: unknown[]): void {
   }
 }
 
+const EXPECTED_PHOTO_EXPORT_SCHEMA: Record<string, string> = {
+  "photo_export_admission": "d0d522040896f6fa8ed00ed8e33e27a89e7982ca7627239a2b69e7aa1eda404e",
+  "photo_export_admission_row": "51f6bcbbb32dacb9d32fa5ae8ea5f77ef2eda76934ec4d89ceb90c90045bc81d",
+  "photo_export_deliveries": "b337e9c64e8c682018dc1f88f4f31afd14d0fa1052691cd43ec0daf7e40dfec8",
+  "photo_export_delivery_leases": "9e662c1460ee2ec7e7c88ec3a349715ff78fad3d5bd30532d5e7f05109b03c7e",
+  "photo_export_idempotency": "241f9ba3507b9aa87d0de91deec12cf5746264b5a26eb3225ea1cf6b323471a7"
+};
+
+function assertPhotoExportSchema(values: unknown[]): void {
+  const rows = values.map((value, index) => textField(value, ['name', 'sql'], 'Photo export schema ' + index));
+  assertExactList(rows.map(row => row.name!), Object.keys(EXPECTED_PHOTO_EXPORT_SCHEMA).sort(), 'Photo export schema');
+  for (const row of rows) {
+    if (sha256(row.sql!.replace(/\s+/gu, ' ').trim()) !== EXPECTED_PHOTO_EXPORT_SCHEMA[row.name!]) {
+      throw new Error(row.name + ' photo export schema has drifted.');
+    }
+  }
+}
+
 function assertExportProgressColumns(values: unknown[]): void {
   const tableSql = new Set<string>();
   assertExactList(
@@ -1768,6 +1822,7 @@ export function parseWranglerInvariantOutput(
   assertManagerUploadAlbumEraColumns(results[27]!);
   assertManagerUploadAlbumEraForeignKeys(results[28]!);
   assertManagerUploadAlbumEraIndexes(results[29]!);
+  assertPhotoExportSchema(results[30]!);
 
   // `terminalSchema` deliberately keeps its three keys. `exactRecord` rejects
   // unknown fields, the literal recurs in four test files, and

@@ -1,4 +1,5 @@
-import type { ExportKind, ManagerExportErrorCode } from '../../shared/contracts';
+import type { LegacyArchiveExportKind, ManagerExportErrorCode } from '../../shared/contracts';
+export type { PhotoExportActiveConflict, PhotoExportCapabilities, PhotoExportEntryView, PhotoExportView } from '../../shared/photo-exports';
 
 export type {
   AlbumRetainedSlotView,
@@ -72,7 +73,7 @@ export interface MessageView {
 
 export interface ExportView {
   id: string;
-  kind: ExportKind;
+  kind: LegacyArchiveExportKind;
   state: 'queued' | 'running' | 'ready' | 'failed' | 'expired';
   snapshotAt: string;
   createdAt: string;

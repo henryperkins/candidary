@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
 
 import type { GuestEventView, RsvpHouseholdView } from '../../shared/contracts';
 import {
@@ -145,6 +146,68 @@ test('the printed entry opens RSVP before the event and photos on the day', asyn
 
   const documentSize = await measureDocument(page);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
+});
+
+test('RSVP focus follows explicit guest lookup, validation, submit, and change transitions', async ({ page }, testInfo) => {
+  await stubGuestRoutes(page, {
+    event: RSVP_PRIMARY,
+    household: RSVP_HOUSEHOLD_FIXTURE,
+    rsvpSession: false,
+  });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+
+  await page.getByLabel('Full name').fill('Taylor Morgan');
+  await page.getByRole('button', { name: 'Find my invitation' }).click();
+  const formHeading = page.getByRole('heading', { name: 'Your household RSVP' });
+  await expect(formHeading).toBeFocused();
+
+  await page.getByRole('button', { name: 'Submit RSVP' }).click();
+  const firstInvalid = page.getByRole('group', { name: 'Taylor Morgan', exact: true })
+    .getByRole('radio', { name: 'Attending', exact: true });
+  await expect(firstInvalid).toBeFocused();
+  await expect(page.locator('.rsvp-error').first()).toBeVisible();
+
+  const [taylor, alex] = RSVP_HOUSEHOLD_FIXTURE.invitees;
+  await page.getByRole('group', { name: taylor!.displayName!, exact: true })
+    .getByRole('radio', { name: 'Attending', exact: true }).check();
+  await page.getByRole('group', { name: alex!.displayName!, exact: true })
+    .getByRole('radio', { name: 'Not attending', exact: true }).check();
+  await page.getByRole('group', { name: 'Plus one 1', exact: true })
+    .getByRole('radio', { name: 'Not attending', exact: true }).check();
+  await page.getByRole('button', { name: 'Submit RSVP' }).click();
+
+  const receiptHeading = page.getByRole('heading', { name: "You're all set" });
+  await expect(receiptHeading).toBeFocused();
+  await mkdir('output/playwright/rsvp-focus', { recursive: true });
+  await page.screenshot({
+    path: `output/playwright/rsvp-focus/guest-receipt-${testInfo.project.name}.png`,
+  });
+
+  await page.getByRole('button', { name: 'Change RSVP' }).click();
+  await expect(formHeading).toBeFocused();
+});
+
+test('RSVP focus leaves an external control focused during passive session restoration', async ({ page }) => {
+  const household = respondedHousehold();
+  let releaseHousehold!: () => void;
+  const householdGate = new Promise<void>((resolve) => { releaseHousehold = resolve; });
+  await stubGuestRoutes(page, { event: RSVP_PRIMARY, household });
+  await page.route(`**/api/event/${EVENT_FIXTURE.slug}/rsvp/household`, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    await householdGate;
+    await route.fulfill({
+      json: { data: { household }, requestId: 'rsvp-focus-restored-session' },
+    });
+  });
+  await page.goto(`/event/${EVENT_FIXTURE.slug}`);
+
+  const externalControl = page.locator('summary').filter({ hasText: 'Shared gallery' });
+  await externalControl.focus();
+  await expect(externalControl).toBeFocused();
+  releaseHousehold();
+
+  await expect(page.getByRole('heading', { name: "You're all set" })).toBeVisible();
+  await expect(externalControl).toBeFocused();
 });
 
 test('the same printed entry reaches the photo flow with RSVP behind a disclosure', async ({ page }) => {

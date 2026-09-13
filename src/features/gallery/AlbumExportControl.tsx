@@ -1,5 +1,5 @@
 import { Download } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
@@ -27,6 +27,9 @@ interface AlbumExportControlProps {
   /** Retained while call sites move to Manager's one live owner; controls render no live nodes. */
   live?: boolean;
   onAnnouncement?(message: string): void;
+  actionArea?: ReactNode;
+  actionAreaOwnsInitialAction?: boolean;
+  chooser?: ReactNode;
 }
 
 /**
@@ -45,6 +48,9 @@ export function AlbumExportControl({
   onDownload,
   onRetry,
   onAnnouncement,
+  actionArea,
+  actionAreaOwnsInitialAction = false,
+  chooser,
 }: AlbumExportControlProps) {
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
   const waitMessage = exportWaitMessage(activeJob, job?.id);
@@ -68,13 +74,15 @@ export function AlbumExportControl({
   );
 
   return <div className="gallery-export album-export">
+    {actionArea}
+    {chooser}
     {job === undefined
       ? <>
           <p className="gallery-export__copy">
             {currentCountCopy} This is the Album only — Download all in Library stays the complete
             archive of every delivered original.
           </p>
-          <button
+          {!chooser && !actionAreaOwnsInitialAction && <button
             type="button"
             className="button button--primary"
             disabled={prepareDisabled}
@@ -82,7 +90,7 @@ export function AlbumExportControl({
           >
             <Download aria-hidden="true" />
             {pendingAction === 'prepare' ? 'Preparing album download…' : 'Download album photos'}
-          </button>
+          </button>}
           {prepareReason === null ? null : <p className="gallery-export__copy">{prepareReason}</p>}
         </>
       : <div className="export-state">
@@ -134,7 +142,7 @@ export function AlbumExportControl({
                 {pendingAction === 'retry' ? 'Retrying export…' : 'Retry this prepared export'}
               </button>
             : null}
-          {isTerminalExport(job)
+          {!chooser && isTerminalExport(job)
             ? <button
                 type="button"
                 className="button button--secondary"
