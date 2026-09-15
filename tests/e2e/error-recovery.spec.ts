@@ -304,7 +304,7 @@ async function openGallery(page: Page) {
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 }
 
 async function openSharedGallery(page: Page) {
@@ -427,7 +427,7 @@ test('a refused export request keeps the gallery and the control that asked for 
 
   const notice = page.getByRole('alert');
   await expect(notice).toContainText(MUTATION_REFUSED.message);
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
   // The control that asked is still there, still able to ask again, rather than a dead section.
   await expect(control).toBeEnabled();
   await expectContained(page);

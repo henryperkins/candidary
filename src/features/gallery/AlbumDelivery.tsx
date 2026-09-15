@@ -3,11 +3,12 @@ import { useRef, useState, type ReactNode } from 'react';
 
 import type { ExportDownloadView, ExportView } from '../../app/types';
 import { AlbumExportControl } from './AlbumExportControl';
-import { exportWaitMessage, hasTrustedEmptySource, type ExportCurrentSource } from './export-control-status';
+import { exportWaitMessage, hasTrustedEmptySource, useExportDisplayJob, type ExportCurrentSource } from './export-control-status';
 
 interface AlbumDeliveryProps {
   heading: ReactNode;
   eventTimezone: string;
+  managementExpiresAt?: string | null;
   currentSource: ExportCurrentSource;
   job?: ExportView;
   activeJob?: ExportView;
@@ -21,8 +22,9 @@ interface AlbumDeliveryProps {
   chooser?: ReactNode;
 }
 
-export function AlbumDelivery({ heading, eventTimezone, currentSource, job, activeJob, download,
+export function AlbumDelivery({ heading, eventTimezone, managementExpiresAt, currentSource, job: providedJob, activeJob, download,
   blockedReason, onPrepare, onDownload, onRetry, onAnnouncement, actionArea, chooser }: AlbumDeliveryProps) {
+  const job = useExportDisplayJob(providedJob);
   const [panel, setPanel] = useState<'connections' | 'download' | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +99,7 @@ export function AlbumDelivery({ heading, eventTimezone, currentSource, job, acti
       {preparing && <p role="status">Preparing your album in its saved order…</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       <AlbumExportControl eventTimezone={eventTimezone} currentSource={currentSource}
+        managementExpiresAt={managementExpiresAt}
         job={job} activeJob={activeJob} download={download} prepareBlockedReason={blockedReason}
         onPrepare={onPrepare} onDownload={onDownload} onRetry={onRetry} onAnnouncement={onAnnouncement}
         showPrepareAction={false} actionArea={actionArea} chooser={chooser} />

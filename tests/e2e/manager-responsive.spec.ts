@@ -244,7 +244,7 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
     Number.parseFloat(getComputedStyle(element).scrollMarginTop));
 
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
   const managerNav = page.locator('.manager-nav');
   const controlRow = page.locator('.gallery-control-row');
   const mosaicControl = page.locator('.gallery-mosaic__open').last();
@@ -363,46 +363,27 @@ test('Intake photos use a compact mobile crop without shrinking card actions', a
   }
 });
 
-test('Library search integrates its submit icon on mobile and keeps its desktop label', async ({ page }) => {
+test('Library search is immediately available with an inset submit control at every width', async ({ page }) => {
   await openManager(page);
-  await page.setViewportSize({ width: 390, height: 844 });
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
-
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
   const searchForm = page.getByRole('search');
   const input = searchForm.getByRole('textbox', { name: 'Find photos' });
   const submit = searchForm.getByRole('button', { name: 'Search' });
-  const label = submit.locator('.gallery-search__submit-label');
-  // Below 761 the field folds behind its own control at the head of the toolbar; opening it is
-  // the one tap the fold costs, so the field takes focus at once.
-  const reveal = page.getByRole('button', { name: 'Search photos' });
-  await expect(reveal).toHaveAttribute('aria-expanded', 'false');
-  await expect(input).toBeHidden();
-  await reveal.click();
-  await expect(reveal).toHaveAttribute('aria-expanded', 'true');
-  await expect(input).toBeFocused();
-  const [mobileInput, mobileSubmit] = await Promise.all([input.boundingBox(), submit.boundingBox()]);
-  if (!mobileInput || !mobileSubmit) throw new Error('Mobile search requires input and submit bounds.');
-  expect(mobileSubmit.x, 'mobile Search begins inside the field').toBeGreaterThanOrEqual(mobileInput.x);
-  expect(mobileSubmit.x + mobileSubmit.width, 'mobile Search ends inside the field')
-    .toBeLessThanOrEqual(mobileInput.x + mobileInput.width + GEOMETRY_TOLERANCE);
-  expect(mobileSubmit.y, 'mobile Search begins inside the field').toBeGreaterThanOrEqual(mobileInput.y);
-  expect(mobileSubmit.y + mobileSubmit.height, 'mobile Search ends inside the field')
-    .toBeLessThanOrEqual(mobileInput.y + mobileInput.height + GEOMETRY_TOLERANCE);
-  expect(mobileSubmit.width, 'mobile Search touch width').toBeGreaterThanOrEqual(TOUCH_MINIMUM);
-  expect(mobileSubmit.height, 'mobile Search touch height').toBeGreaterThanOrEqual(TOUCH_MINIMUM);
-  await expect(label).toHaveCount(1);
-  await expect(label).toBeHidden();
-
-  await page.setViewportSize({ width: 761, height: 900 });
-  // The field is always in flow from 761, so the control that reveals it is not drawn.
-  await expect(reveal).toBeHidden();
-  const [desktopInput, desktopSubmit] = await Promise.all([input.boundingBox(), submit.boundingBox()]);
-  if (!desktopInput || !desktopSubmit) throw new Error('Desktop search requires input and submit bounds.');
-  expect(desktopSubmit.x, 'desktop Search follows the field')
-    .toBeGreaterThanOrEqual(desktopInput.x + desktopInput.width);
-  await expect(label).toBeVisible();
-  await expectContained(page, 761);
+  for (const width of [320, 390, 761, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(input).toBeVisible();
+    const [field, control] = await Promise.all([input.boundingBox(), submit.boundingBox()]);
+    if (!field || !control) throw new Error('Search requires input and submit bounds.');
+    expect(control.x).toBeGreaterThanOrEqual(field.x - GEOMETRY_TOLERANCE);
+    expect(control.x + control.width).toBeLessThanOrEqual(field.x + field.width + GEOMETRY_TOLERANCE);
+    expect(control.y).toBeGreaterThanOrEqual(field.y - GEOMETRY_TOLERANCE);
+    expect(control.y + control.height).toBeLessThanOrEqual(field.y + field.height + GEOMETRY_TOLERANCE);
+    expect(control.width).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+    expect(control.height).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
+    await expect(submit.locator('.gallery-search__submit-label')).toBeHidden();
+    await expectContained(page, width);
+  }
 });
 
 test('a new Album section enters the mobile viewport without focus-induced scrolling', async ({ page }) => {
@@ -837,7 +818,7 @@ test('Library first photo intersects the initial 390 by 844 viewport', async ({ 
   });
   await page.goto(managerUrl);
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 
   const firstPhoto = page.locator('.gallery-mosaic__item').first();
   await expect(firstPhoto).toBeVisible();
@@ -967,74 +948,39 @@ test('Library first photo intersects the initial 390 by 844 viewport', async ({ 
   await expectContained(page, 390);
 });
 
-test('Library mosaic keeps one 2 by 2 hero over equal square supporting tiles', async ({ page }) => {
+test('Photo Wall gives every photo equal weight with a separate immediate Album action', async ({ page }) => {
   const media = makeMedia(8);
   await stubManagerRoutes(page, {
     mediaPages: { first: { media, nextCursor: null } },
     event: { storedMediaCount: media.length },
     exports: [],
-    album: {
-      pickedMediaIds: [media[7]!.id, media[5]!.id],
-    },
-    galleryAudienceSummary: {
-      albumPhotoCount: 2,
-      albumEntryCount: 2,
-      albumLink: { active: false, sharedAt: null },
-      guestGalleryVisible: true,
-      guestGalleryPublishedCount: media.length,
-    },
+    album: { pickedMediaIds: [media[7]!.id, media[5]!.id] },
   });
-  await page.route(`**/api/media/${media[6]!.id}/preview`, (route) => route.fulfill({
-    status: 404,
-    contentType: 'application/json',
-    body: JSON.stringify({ code: 'PREVIEW_UNAVAILABLE', message: 'Preview unavailable.' }),
+  await page.route(`**/api/media/${media[6]!.id}/preview`, route => route.fulfill({
+    status: 404, contentType: 'application/json', body: JSON.stringify({ code: 'PREVIEW_UNAVAILABLE', message: 'Preview unavailable.' }),
   }));
   await page.goto(managerUrl);
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
-
-  const mosaic = page.locator('.gallery-mosaic').first();
-  const tiles = mosaic.locator('.gallery-mosaic__item');
+  const wall = page.locator('.gallery-photo-wall');
+  const tiles = wall.locator('.gallery-photo');
   await expect(tiles).toHaveCount(8);
   await expect(tiles.nth(1).getByText('Preview unavailable', { exact: true })).toBeVisible();
-  await expect(tiles.first().getByRole('button', { name: /Remove .* from Album/u })).toContainText('In Album');
-  await expect(tiles.nth(1).getByRole('button', { name: /Pick .* for the Album/u })).toContainText('Pick');
-
-  for (const width of [320, 760, 761, 1101]) {
+  await expect(tiles.first().getByRole('button', { name: /Remove .* from Album/u })).toContainText('In album');
+  await expect(tiles.nth(1).getByRole('button', { name: /^Add to album:/u })).toContainText('Add to album');
+  for (const width of [320, 760, 761, 1101, 1440]) {
     await page.setViewportSize({ width, height: 900 });
-    const expectedColumns = width <= 760 ? 2 : 4;
-    const expectedGap = width <= 760 ? 6 : 10;
-    expect(await measureGridTracks(mosaic), `Library mosaic columns at ${width}`)
-      .toHaveLength(expectedColumns);
-
-    const [gap, hero, firstSupport, fallback, lastSupport, heroPill, heroRadius] = await Promise.all([
-      mosaic.evaluate((element) => Number.parseFloat(getComputedStyle(element).columnGap)),
-      tiles.first().boundingBox(),
-      tiles.nth(1).boundingBox(),
-      tiles.nth(1).boundingBox(),
-      tiles.last().boundingBox(),
-      tiles.first().getByRole('button', { name: /Remove .* from Album/u }).boundingBox(),
-      tiles.first().getByRole('button', { name: /Remove .* from Album/u })
-        .evaluate((element) => Number.parseFloat(getComputedStyle(element).borderRadius)),
+    expect(await measureGridTracks(wall)).toHaveLength(width <= 760 ? 2 : width >= 1440 ? 4 : 3);
+    const [first, second, action] = await Promise.all([
+      tiles.first().locator('.gallery-photo__image').boundingBox(),
+      tiles.nth(1).locator('.gallery-photo__image').boundingBox(),
+      tiles.first().locator('.gallery-photo__album').boundingBox(),
     ]);
-    if (!hero || !firstSupport || !fallback || !lastSupport || !heroPill) {
-      throw new Error(`Library mosaic geometry is required at ${width}.`);
-    }
-
-    expect(gap, `Library mosaic gutter at ${width}`).toBe(expectedGap);
-    expect(Math.abs(firstSupport.width - firstSupport.height), `supporting tile stays square at ${width}`)
-      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
-    expect(Math.abs(fallback.width - fallback.height), `fallback tile stays square at ${width}`)
-      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
-    expect(Math.abs(lastSupport.width - firstSupport.width), `last tile keeps supporting weight at ${width}`)
-      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
-    expect(Math.abs(hero.width - ((firstSupport.width * 2) + expectedGap)), `hero spans two columns at ${width}`)
-      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
-    expect(Math.abs(hero.height - hero.width), `hero stays square at ${width}`)
-      .toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
-    expect(Math.abs(heroPill.y - hero.y), `hero membership pill sits at its top edge at ${width}`)
-      .toBeLessThanOrEqual(7 + GEOMETRY_TOLERANCE);
-    expect(heroRadius, `membership control uses pill geometry at ${width}`).toBeGreaterThan(100);
+    if (!first || !second || !action) throw new Error('Photo Wall bounds are required.');
+    expect(Math.abs(first.width - first.height)).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(Math.abs(second.width - second.height)).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(Math.abs(first.width - second.width)).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+    expect(action.y).toBeGreaterThanOrEqual(first.y + first.height);
+    expect(action.height).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
     await expectContained(page, width);
   }
 });
@@ -1081,7 +1027,7 @@ test('audience failure stays below the mobile Gallery sticky row', async ({ page
     await page.setViewportSize({ width, height: 844 });
     await page.goto(managerUrl);
     await destination(page, 'Gallery').click();
-    await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 
     const controlRow = page.locator('.gallery-control-row');
     const managerGallery = page.locator('.manager-gallery');
@@ -1211,7 +1157,7 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
   });
   await page.goto(managerUrl);
   await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 
   for (const width of [320, 390]) {
     await page.setViewportSize({ width, height: 844 });

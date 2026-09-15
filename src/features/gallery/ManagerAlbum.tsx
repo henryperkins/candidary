@@ -99,6 +99,7 @@ interface ManagerAlbumProps {
    * unavailable** rather than a plausible instant in the wrong place.
    */
   eventTimezone?: string;
+  managementExpiresAt?: string | null;
   onGoToLibrary(): void;
   /** Raised whenever membership changes here, so Library's `Album picks (n)` stays true. */
   onPicksChanged(): void;
@@ -927,6 +928,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   eventName,
   active,
   eventTimezone,
+  managementExpiresAt,
   onGoToLibrary,
   onPicksChanged,
   invalidateGalleryAfterMutation,
@@ -2477,6 +2479,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     <AlbumDelivery
       heading={<h3 className="album-surface-title" ref={leaveHeadingRef} tabIndex={-1}>Album</h3>}
       eventTimezone={eventTimezone ?? 'UTC'} currentSource={exportSource}
+      managementExpiresAt={managementExpiresAt}
       job={exportJob} activeJob={activeExport} download={exportDownload}
       blockedReason={photoExportWaitMessage} onPrepare={prepareAlbumExport}
       onDownload={onDownloadExport} onRetry={onRetryExport} onAnnouncement={onAnnouncement}

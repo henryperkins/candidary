@@ -357,6 +357,57 @@ function renderGallery(overrides: GalleryRenderOverrides = {}) {
   return renderGalleryWithFetch(managerFetch(overrides), overrides);
 }
 
+describe('Photo Wall immediate additions', () => {
+  it('keeps a photo unconfirmed while saving, then confirms the addition without opening the viewer', async () => {
+    const write = deferred<Response>();
+    const base = managerFetch();
+    renderGalleryWithFetch(vi.fn((input: RequestInfo | URL, init?: RequestInit) => (
+      String(input).endsWith('/media/p1/favorite') ? write.promise : base(input, init)
+    )));
+    const user = userEvent.setup();
+    const add = await screen.findByRole('button', { name: 'Add to album: First dance' });
+    await user.click(add);
+    expect(add).toBeDisabled();
+    expect(add).toHaveAttribute('aria-pressed', 'false');
+    expect(add).toHaveTextContent('Adding…');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await act(async () => write.resolve(await success({ media: { ...rows[0]!, isFavorite: true } })));
+    const saved = await screen.findByRole('button', { name: 'In album: Remove First dance from Album' });
+    expect(saved).toHaveAttribute('aria-pressed', 'true');
+    expect(saved).toHaveTextContent('In album');
+    expect(saved).toBeEnabled();
+  });
+
+  it('undoes an individual addition while preserving delivered photos and their publication state', async () => {
+    const galleryRows = rows.map(item => ({ ...item }));
+    renderGallery({ galleryRows });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add to album: First dance' }));
+    await user.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByRole('button', { name: 'Add to album: First dance' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Open First dance, from Jose' })).toBeInTheDocument();
+    expect(galleryRows[0]!.publicationStatus).toBe('unpublished');
+  });
+
+  it('retains the photo and retries an unsuccessful addition', async () => {
+    const base = managerFetch();
+    let failNext = true;
+    renderGalleryWithFetch(vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/media/p1/favorite') && failNext) {
+        failNext = false;
+        return failure();
+      }
+      return base(input, init);
+    }));
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add to album: First dance' }));
+    const error = await screen.findByRole('alert');
+    expect(screen.getByRole('button', { name: 'Add to album: First dance' })).toHaveAttribute('aria-pressed', 'false');
+    await user.click(within(error).getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: 'In album: Remove First dance from Album' })).toHaveAttribute('aria-pressed', 'true');
+  });
+});
+
 function renderWorkspaceWithUndo(workspace: ReactElement) {
   return render(<ManagerUndoProvider eventId="event-a">
     {workspace}
@@ -410,8 +461,8 @@ describe('host private gallery', () => {
     expect(origin).toHaveFocus();
     expect(document.querySelectorAll('.gallery-action > button')).toHaveLength(1);
     await user.click(origin);
-    const filter = screen.getByRole('button', { name: /Album picks/ });
-    await user.click(filter);
+    const filter = screen.getByRole('combobox', { name: 'Photos shown' });
+    await user.selectOptions(filter, 'album');
     expect(screen.queryByRole('region', { name: 'Save or share photos' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Album' })).toBeNull();
   });
@@ -453,7 +504,8 @@ describe('host private gallery', () => {
   it('names the private workspace once and leaves Download all self-explanatory', async () => {
     renderGallery();
 
-    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
     // The mode's rule is back, but folded and last: a host who wants it opens it, and until they do
     // it costs no words above the photographs.
     const disclosure = document.querySelector('.gallery-context-disclosure')!;
@@ -468,8 +520,8 @@ describe('host private gallery', () => {
   it('opens the private timeline with moments, the event total, and no moderation controls', async () => {
     const { fetchMock } = renderGallery();
 
-    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
-    expect(screen.getByText('842 delivered photos')).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+    expect(screen.getByText('842 photos')).toBeVisible();
     expect(await screen.findByText('Saturday, August 15 · 5:42–6:18 PM')).toBeVisible();
     expect(await screen.findByText('Saturday, August 15, 11:48 PM–Sunday, August 16, 12:24 AM')).toBeVisible();
     expect(screen.queryByRole('button', { name: /publish selected/i })).not.toBeInTheDocument();
@@ -481,7 +533,7 @@ describe('host private gallery', () => {
 
   it('renders the delivered photographs themselves rather than a placeholder grid', async () => {
     renderGallery();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     await waitFor(() => expect(mosaicImages()).toHaveLength(4));
     expect(mosaicImages().map((image) => image.getAttribute('src')))
@@ -489,7 +541,7 @@ describe('host private gallery', () => {
     expect(screen.queryByText('Preview unavailable')).not.toBeInTheDocument();
   });
 
-  it('shows one Album membership state and one noninteractive Guest-gallery state per Library card', async () => {
+  it('shows one immediate Album action per card and leaves publication controls in Guest gallery', async () => {
     renderGallery({
       galleryRows: [
         photo('p1', '2026-08-15T22:42:00.000Z', {
@@ -502,24 +554,24 @@ describe('host private gallery', () => {
         }),
       ],
     });
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: /^Open First dance,/ });
 
     const [picked, unpicked] = Array.from(document.querySelectorAll<HTMLElement>('.gallery-mosaic__item'));
-    expect(within(picked!).getByRole('button', { name: 'Remove First dance from Album' }))
-      .toHaveTextContent('In Album');
+    expect(within(picked!).getByRole('button', { name: 'In album: Remove First dance from Album' }))
+      .toHaveTextContent('In album');
     expect(within(picked!).queryByText('Pick')).not.toBeInTheDocument();
-    expect(within(picked!).getByText('Guest gallery · Published')).toBeVisible();
+    expect(within(picked!).queryByText('Guest gallery · Published')).not.toBeInTheDocument();
     expect(within(picked!).queryByRole('button', { name: /Guest gallery/u })).not.toBeInTheDocument();
 
-    expect(within(unpicked!).getByRole('button', { name: 'Pick p2.jpg for the Album' }))
-      .toHaveTextContent('Pick');
+    expect(within(unpicked!).getByRole('button', { name: 'Add to album: p2.jpg' }))
+      .toHaveTextContent('Add to album');
     expect(within(unpicked!).queryByText('In Album')).not.toBeInTheDocument();
-    expect(within(unpicked!).getByText('Guest gallery · Hidden')).toBeVisible();
+    expect(within(unpicked!).queryByText('Guest gallery · Hidden')).not.toBeInTheDocument();
   });
 
   it('names each tile once, on the control that opens it', async () => {
     renderGallery();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     // The photograph is decorative and the visible caption is its echo; announcing
     // the same title three times per tile is 48 tiles' worth of noise per page.
@@ -534,7 +586,7 @@ describe('host private gallery', () => {
         index === 1 ? { ...item, previewAvailable: false } : { ...item }
       )),
     });
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     expect(await screen.findByText('Preview unavailable')).toBeVisible();
     expect(mosaicImages()).toHaveLength(3);
@@ -544,7 +596,7 @@ describe('host private gallery', () => {
 
   it('falls back to the named unavailable state when a preview fails to load', async () => {
     renderGallery();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     await waitFor(() => expect(mosaicImages()).toHaveLength(4));
     fireEvent.error(mosaicImages()[0]!);
@@ -556,7 +608,7 @@ describe('host private gallery', () => {
   it('opens newest-first and refetches the stream when the host changes the order', async () => {
     const { fetchMock } = renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     const galleryOrders = () => fetchMock.mock.calls
       .map(([input]) => new URL(String(input), 'https://candidary.test'))
@@ -566,32 +618,31 @@ describe('host private gallery', () => {
     // The order is always explicit on the wire: a cursor is cut for one direction and
     // the server refuses to replay it against the other.
     expect(galleryOrders()).toEqual(['newest']);
-    expect(screen.getByRole('button', { name: 'Newest first' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: 'Earliest first' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('combobox', { name: 'Photo order' })).toHaveValue('newest');
 
-    await user.click(screen.getByRole('button', { name: 'Earliest first' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Photo order' }), 'earliest');
     await waitFor(() => expect(galleryOrders()).toEqual(['newest', 'earliest']));
-    expect(screen.getByRole('button', { name: 'Earliest first' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('combobox', { name: 'Photo order' })).toHaveValue('earliest');
 
     // Choosing the order already in force must not spend a request.
-    await user.click(screen.getByRole('button', { name: 'Earliest first' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Photo order' }), 'earliest');
     expect(galleryOrders()).toEqual(['newest', 'earliest']);
   });
 
   it('searches, clears, and shows the no-match state without losing the active query', async () => {
     renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     await user.type(screen.getByLabelText('Find photos'), 'Maya');
     await user.click(screen.getByRole('button', { name: 'Search' }));
-    expect(await screen.findByText('From Maya')).toBeVisible();
-    expect(screen.queryByText('From Jose')).not.toBeInTheDocument();
+    expect(await screen.findByText('Maya')).toBeVisible();
+    expect(screen.queryByText('Jose')).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('heading', { name: /Saturday, August 15 · 11:48 PM/ })).toHaveFocus());
 
     await user.clear(screen.getByLabelText('Find photos'));
     await user.click(screen.getByRole('button', { name: 'Search' }));
-    expect((await screen.findAllByText('From Jose'))[0]).toBeVisible();
+    expect((await screen.findAllByText('Jose'))[0]).toBeVisible();
 
     await user.type(screen.getByLabelText('Find photos'), 'missing-person');
     await user.click(screen.getByRole('button', { name: 'Search' }));
@@ -617,18 +668,18 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock);
     const user = userEvent.setup();
 
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: /^Open First dance,/ });
     await user.click(screen.getByRole('button', { name: 'Load more photos' }));
     await user.type(screen.getByLabelText('Find photos'), 'Maya');
     await user.click(screen.getByRole('button', { name: 'Search' }));
-    expect(await screen.findByText('From Maya')).toBeVisible();
+    expect(await screen.findByText('Maya')).toBeVisible();
 
     await act(async () => {
       continuation.resolve(await success({ media: [rows[1]], nextCursor: null }));
       await continuation.promise;
     });
     expect(screen.queryByText('p2.jpg')).not.toBeInTheDocument();
-    expect(screen.getByText('From Maya')).toBeVisible();
+    expect(screen.getByText('Maya')).toBeVisible();
   });
 
   it('keeps the confirmed timeline and retries the exact replacement after a later search failure', async () => {
@@ -650,14 +701,14 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock);
     const user = userEvent.setup();
 
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: /^Open First dance,/ });
     await user.type(screen.getByLabelText('Find photos'), 'Maya');
     await user.click(screen.getByRole('button', { name: 'Search' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Search is temporarily unavailable.');
-    expect(screen.getByText('First dance')).toBeVisible();
+    expect(screen.getByRole('button', { name: /^Open First dance,/ })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByText('From Maya')).toBeVisible();
+    expect(await screen.findByText('Maya')).toBeVisible();
     expect(searchAttempts).toBe(2);
   });
 
@@ -688,7 +739,7 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock);
     const user = userEvent.setup();
 
-    await screen.findByText('First retained photo');
+    await screen.findByRole('button', { name: /^Open First retained photo,/ });
     await user.type(screen.getByLabelText('Find photos'), 'Maya');
     await user.click(screen.getByRole('button', { name: 'Search' }));
 
@@ -728,10 +779,10 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock);
     const user = userEvent.setup();
 
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: /^Open First dance,/ });
     await user.click(screen.getByRole('button', { name: 'Load more photos' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('The next page is temporarily unavailable.');
-    expect(screen.getByText('First dance')).toBeVisible();
+    expect(screen.getByRole('button', { name: /^Open First dance,/ })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Try again' }));
     // Named through the control rather than a visible caption: only the hero tile carries one.
     expect(await screen.findByRole('button', { name: 'Open p2.jpg, from Jose' })).toBeVisible();
@@ -918,9 +969,9 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock, { galleryRows: [first, removed, successor] });
     const user = userEvent.setup();
 
-    await screen.findByText('First photo');
-    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
-    await user.click(await screen.findByRole('button', { name: 'Remove Removed photo from Album' }));
+    await screen.findByRole('button', { name: /^Open First photo,/ });
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Photos shown' }), 'album');
+    await user.click(await screen.findByRole('button', { name: 'In album: Remove Removed photo from Album' }));
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Open Removed photo, from Jose' }))
       .not.toBeInTheDocument());
 
@@ -1085,7 +1136,7 @@ describe('host private gallery', () => {
   it('announces the exact In Album result and patches a picked tile without a refetch', async () => {
     const { fetchMock } = renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     const galleryGets = () => fetchMock.mock.calls
       .filter(([input, init]) => {
@@ -1094,16 +1145,16 @@ describe('host private gallery', () => {
       });
     const before = galleryGets().length;
 
-    const favoriteTile = await screen.findByRole('button', { name: 'Pick First dance for the Album' });
+    const favoriteTile = await screen.findByRole('button', { name: 'Add to album: First dance' });
     await user.click(favoriteTile);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove First dance from Album' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'In album: Remove First dance from Album' }))
       .toHaveAttribute('aria-pressed', 'true'));
     await waitFor(() => expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
       .toHaveTextContent('First dance is now In Album. This does not publish it.'));
     expect(galleryGets().length).toBe(before);
 
-    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
-    expect(await screen.findByText('First dance')).toBeVisible();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Photos shown' }), 'album');
+    expect(await screen.findByRole('button', { name: /^Open First dance,/ })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Open p4.jpg, from Jose' })).toBeVisible();
   });
 
@@ -1133,11 +1184,11 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock, { galleryRows, audience: authority });
     const user = userEvent.setup();
 
-    await screen.findByText('First dance');
-    await user.click(screen.getByRole('button', { name: 'Pick First dance for the Album' }));
+    await screen.findByRole('button', { name: /^Open First dance,/ });
+    await user.click(screen.getByRole('button', { name: 'Add to album: First dance' }));
     await user.type(screen.getByLabelText('Find photos'), 'Maya');
     await user.click(screen.getByRole('button', { name: 'Search' }));
-    expect(await screen.findByText('From Maya')).toBeVisible();
+    expect(await screen.findByText('Maya')).toBeVisible();
     expect(mayaReads).toBe(1);
 
     galleryRows[0]!.isFavorite = true;
@@ -1145,7 +1196,7 @@ describe('host private gallery', () => {
 
     await waitFor(() => expect(mayaReads).toBe(2));
     expect(authority.invalidate).toHaveBeenCalledOnce();
-    expect(screen.getByText('From Maya')).toBeVisible();
+    expect(screen.getByText('Maya')).toBeVisible();
   });
 
   it('refetches the current Album-picks query after a confirmed bulk write crosses replacement', async () => {
@@ -1172,12 +1223,12 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock, { galleryRows, audience: authority });
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
     await user.click(screen.getByRole('button', { name: 'Pick for Album (1)' }));
-    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
-    expect(await screen.findByRole('heading', { name: 'No photos are In Album yet.' })).toBeVisible();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Photos shown' }), 'album');
+    expect(await screen.findByRole('heading', { name: 'Your album is waiting for its first photo.' })).toBeVisible();
     expect(favoritesReads).toBe(1);
 
     galleryRows[0]!.isFavorite = true;
@@ -1185,17 +1236,17 @@ describe('host private gallery', () => {
 
     await waitFor(() => expect(favoritesReads).toBe(2));
     expect(authority.invalidate).toHaveBeenCalledOnce();
-    expect(await screen.findByText('p1.jpg')).toBeVisible();
+    expect(await screen.findByRole('button', { name: /^Select p1\.jpg,/ })).toBeVisible();
   });
 
   it('restores the confirmed favorite state and shows a notice when a favorite write fails', async () => {
     renderGallery({ favoriteFails: true });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
-    await user.click(await screen.findByRole('button', { name: 'Pick First dance for the Album' }));
+    await user.click(await screen.findByRole('button', { name: 'Add to album: First dance' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('manager action');
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Pick First dance for the Album' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add to album: First dance' }))
       .toHaveAttribute('aria-pressed', 'false'));
   });
 
@@ -1219,7 +1270,7 @@ describe('host private gallery', () => {
     const rendered = renderGalleryWithFetch(fetchMock, { galleryRows, onGalleryInvalidated });
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
     await user.click(screen.getByRole('button', { name: 'Select p2.jpg, from Jose' }));
@@ -1261,7 +1312,7 @@ describe('host private gallery', () => {
     const rendered = renderGalleryWithFetch(fetchMock, { galleryRows, onGalleryInvalidated });
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
     await user.click(screen.getByRole('button', { name: 'Remove from Album (1)' }));
@@ -1291,7 +1342,7 @@ describe('host private gallery', () => {
     });
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
     await user.click(screen.getByRole('button', { name: 'Pick for Album (1)' }));
@@ -1321,7 +1372,7 @@ describe('host private gallery', () => {
     const rendered = renderGalleryWithFetch(fetchMock, { galleryRows });
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
     await user.click(screen.getByRole('button', { name: 'Pick for Album (1)' }));
@@ -1374,7 +1425,7 @@ describe('host private gallery', () => {
       name: 'Gallery heading',
       ids: ['p1'],
       removeId: 'p1',
-      expected: { role: 'heading' as const, name: 'Private Gallery' },
+      expected: { role: 'heading' as const, name: 'Library' },
     },
   ])('establishes the filtered-Library $name fallback before pointer Undo presentation', async ({
     ids,
@@ -1390,8 +1441,8 @@ describe('host private gallery', () => {
     });
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
-    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Photos shown' }), 'album');
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: `Select ${removeId}.jpg, from Jose` }));
     await user.click(screen.getByRole('button', { name: 'Remove from Album (1)' }));
@@ -1409,8 +1460,8 @@ describe('host private gallery', () => {
     });
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
-    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Photos shown' }), 'album');
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
     const remove = screen.getByRole('button', { name: 'Remove from Album (1)' });
@@ -1440,8 +1491,8 @@ describe('host private gallery', () => {
       renderGalleryWithFetch(fetchMock, { galleryRows });
       const user = userEvent.setup();
 
-      await screen.findByText('p1.jpg');
-      await user.click(screen.getByRole('button', { name: /^Album picks/ }));
+      await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Photos shown' }), 'album');
       await user.click(screen.getByRole('button', { name: 'Select photos' }));
       await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
       const remove = screen.getByRole('button', { name: 'Remove from Album (1)' });
@@ -1486,7 +1537,7 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock, { galleryRows });
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
     await user.click(screen.getByRole('button', { name: 'Pick for Album (1)' }));
@@ -1510,7 +1561,7 @@ describe('host private gallery', () => {
   it('opens the immersive viewer, navigates, and restores focus on close', async () => {
     renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     const origin = await screen.findByRole('button', { name: /open first dance/i });
     await user.click(origin);
@@ -1532,24 +1583,24 @@ describe('host private gallery', () => {
   it('names the viewer position as loaded while chronological pages remain', async () => {
     renderGallery({ nextCursor: 'cursor-b' });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     await user.click(await screen.findByRole('button', { name: /open first dance/i }));
     const dialog = await screen.findByRole('dialog', { name: 'First dance' });
     // 4 of 842 stored photos are loaded. A bare "of 4" beside the header's event total would read as
     // a second, smaller collection instead of one page of the first.
     expect(within(dialog).getByText('Photo 1 of 4 loaded')).toBeVisible();
-    expect(screen.getByText('842 delivered photos')).toBeVisible();
+    expect(screen.getByText('842 photos')).toBeVisible();
   });
 
   it('switches to the shared workspace on unpublished and back to the preserved private state', async () => {
     const { fetchMock, onStatusChange } = renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     await user.type(screen.getByLabelText('Find photos'), 'Maya');
     await user.click(screen.getByRole('button', { name: 'Search' }));
-    expect(await screen.findByText('From Maya')).toBeVisible();
+    expect(await screen.findByText('Maya')).toBeVisible();
     const galleryGetsBeforeSwitch = fetchMock.mock.calls.filter(([input, init]) => {
       const url = new URL(String(input), 'https://candidary.test');
       return url.pathname.endsWith('/gallery') && (init?.method ?? 'GET') === 'GET';
@@ -1568,12 +1619,12 @@ describe('host private gallery', () => {
     expect(screen.queryByRole('button', { name: /^Album picks/ })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: modeName('Library', '842') }));
-    expect(screen.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Library' })).toBeVisible();
     expect(screen.getByRole('button', { name: modeName('Library', '842') }))
       .toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByLabelText('Find photos')).toHaveValue('Maya');
-    expect(screen.getByText('From Maya')).toBeVisible();
-    expect(screen.queryByText('From Jose')).not.toBeInTheDocument();
+    expect(screen.getByText('Maya')).toBeVisible();
+    expect(screen.queryByText('Jose')).not.toBeInTheDocument();
     const galleryGetsAfterSwitch = fetchMock.mock.calls.filter(([input, init]) => {
       const url = new URL(String(input), 'https://candidary.test');
       return url.pathname.endsWith('/gallery') && (init?.method ?? 'GET') === 'GET';
@@ -1605,13 +1656,13 @@ describe('host private gallery', () => {
     renderGalleryWithFetch(fetchMock);
     const user = userEvent.setup();
 
-    await screen.findByText('First dance');
-    await user.click(screen.getByRole('button', { name: /^Album picks/ }));
+    await screen.findByRole('button', { name: /^Open First dance,/ });
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Photos shown' }), 'album');
     await screen.findByRole('button', { name: 'Load more photos' });
     await user.click(screen.getByRole('button', { name: 'Load more photos' }));
     await user.click(screen.getByRole('button', { name: /open p2/i }));
     const dialog = await screen.findByRole('dialog', { name: 'p2.jpg' });
-    const viewerFavorite = within(dialog).getByRole('button', { name: 'Remove p2.jpg from Album' });
+    const viewerFavorite = within(dialog).getByRole('button', { name: 'In Album: Remove p2.jpg from Album' });
     expect(within(dialog).queryByText('In the album')).not.toBeInTheDocument();
     expect(within(dialog).queryByText('Not in the album')).not.toBeInTheDocument();
     await user.click(viewerFavorite);
@@ -1628,7 +1679,7 @@ describe('host private gallery', () => {
   it('starts the complete export from the one Download all action', async () => {
     const { onPrepare } = renderGallery();
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     expect(screen.queryByText('What the complete download includes')).not.toBeInTheDocument();
     expect(screen.queryByText(/Every delivered photo, the photo manifest/u)).not.toBeInTheDocument();
@@ -1703,7 +1754,8 @@ describe('host private gallery', () => {
         errorCode: null,
       },
     });
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
+    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
 
     expect(screen.getByText('Ready')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Get download links' })).toBeVisible();
@@ -1723,7 +1775,8 @@ describe('host private gallery', () => {
       currentSource: { count: 0, freshness: 'fresh' },
       onPrepare,
     });
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
+    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
 
     expect(screen.getByRole('button', { name: 'Download all' })).toBeDisabled();
     expect(screen.getByText('Deliver a photo before preparing the current collection.')).toBeVisible();
@@ -1758,7 +1811,8 @@ describe('host private gallery', () => {
         errorCode: 'EXPORT_FAILED',
       },
     });
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
+    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
 
     expect(screen.getByText('Failed')).toBeVisible();
     expect(screen.getByText(/This prepared export did not finish\./u)).toBeVisible();
@@ -1798,7 +1852,8 @@ describe('host private gallery', () => {
       onPrepare,
     });
 
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
+    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
     expect(screen.getByText(/A photo in this prepared export is no longer available\. Prepare the current collection\./, {
       selector: 'span',
     })).toBeVisible();
@@ -1849,7 +1904,8 @@ describe('host private gallery', () => {
         privateGuestbook: null,
       },
     });
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
+    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
 
     // A host planning a multi-gigabyte download needs the size before they start.
     expect(screen.getByText('Frozen size: 3.0 GB · 12 guestbook entries.')).toBeVisible();
@@ -2136,10 +2192,10 @@ describe('host private gallery', () => {
       'New delivered photos appear in Live intake as event guests send them.',
     )).toBeVisible();
     expect(document.body).not.toHaveTextContent(/private deliveries/iu);
-    await user.click(await screen.findByRole('button', { name: /^Album picks/ }));
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Photos shown' }), 'album');
 
-    expect(await screen.findByRole('heading', { name: 'No photos are In Album yet.' })).toBeVisible();
-    expect(screen.getByText(/makes it In Album for every host on this event/)).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Your album is waiting for its first photo.' })).toBeVisible();
+    expect(screen.getByText(/on a photo to start/)).toBeVisible();
   });
 
   it('explains an empty hidden filter as hide, not as unpublished privacy', async () => {
@@ -2163,26 +2219,14 @@ describe('host private gallery', () => {
     expect(screen.queryByRole('heading', { name: 'No unpublished photos.' })).not.toBeInTheDocument();
   });
 
-  // Spec 6.4 allows the moment heading or the expansion control. The control is what the host
-  // pressed and it outlives the collapse, so focus stays there rather than jumping back above the
-  // mosaic and making them tab through every remaining tile to reach it again.
-  it('keeps focus on the expansion control after collapsing extra photos', async () => {
+  it('shows every loaded photo in a moment without an expansion step', async () => {
     const crowded = Array.from({ length: 9 }, (_, index) => (
       photo(`p${index + 1}`, `2026-08-15T22:${String(42 + index).padStart(2, '0')}:00.000Z`)
     ));
     renderGallery({ galleryRows: crowded });
-    const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
-
-    await user.click(screen.getByRole('button', { name: 'Show more photos' }));
-    expect(screen.getByRole('button', { name: /open p9/i })).toBeVisible();
-
-    const collapse = screen.getByRole('button', { name: 'Show fewer photos' });
-    await user.click(collapse);
-    const toggle = screen.getByRole('button', { name: 'Show more photos' });
-    expect(toggle).toHaveFocus();
-    expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByRole('button', { name: /open p9/i })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /open p9/i })).toBeVisible();
+    expect(mosaicImages()).toHaveLength(9);
+    expect(screen.queryByRole('button', { name: 'Show more photos' })).not.toBeInTheDocument();
   });
 
   it('names Select all from the complete loaded photo count', async () => {
@@ -2191,7 +2235,7 @@ describe('host private gallery', () => {
     ));
     renderGallery({ galleryRows: loaded });
     const user = userEvent.setup();
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
 
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     expect(screen.getByRole('button', { name: 'Select all 48 loaded photos' })).toBeVisible();
@@ -2206,7 +2250,7 @@ describe('host private gallery', () => {
   it('keeps Select all out of the toolbar row, in its own selection controls', async () => {
     renderGallery({ galleryRows: toolbarRows });
     const user = userEvent.setup();
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
 
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     const selectAll = screen.getByRole('button', { name: 'Select all 2 loaded photos' });
@@ -2216,65 +2260,29 @@ describe('host private gallery', () => {
     expect(selectAll.closest('.gallery-toolbar')).toBeNull();
   });
 
-  it('keeps every toolbar word in the accessible name while the visible word can stand down', async () => {
+  it('keeps filtering, ordering, and selection in task order with named controls', async () => {
     renderGallery({ galleryRows: toolbarRows });
-    await screen.findByText('p1.jpg');
-
-    const toolbar = document.querySelector('.gallery-toolbar');
-    if (!(toolbar instanceof HTMLElement)) throw new Error('The Library toolbar must render.');
-    // Below 761 the row goes icon-only: the words live in `.gallery-toolbar__word`, one neutral
-    // class worn by the order pair, the picks filter and the selection verb alike, so restyling
-    // one control cannot silently restyle the other two. The accessible names never change.
-    const newest = within(toolbar).getByRole('button', { name: 'Newest first' });
-    const earliest = within(toolbar).getByRole('button', { name: 'Earliest first' });
-    const picks = within(toolbar).getByRole('button', { name: 'Album picks (1)' });
-    const select = within(toolbar).getByRole('button', { name: 'Select photos' });
-    for (const [control, word] of [[newest, 'Newest'], [earliest, 'Earliest'], [picks, 'Album picks'], [select, 'Select photos']] as const) {
-      expect(control.querySelector('.gallery-toolbar__word')).toHaveTextContent(word);
-      expect(control.querySelector('svg')).not.toBeNull();
-    }
-    // The count is its own span so the brackets can be drawn only beside a visible word.
-    expect(picks.querySelector('.gallery-toolbar__count')).toHaveTextContent('1');
-    // Narrow by picks, order, then act: the row reads as two jobs, in the order a host works.
-    expect(Array.from(toolbar.querySelectorAll('button'), (button) => button.getAttribute('aria-label') ?? button.textContent))
-      .toEqual(['Search photos', 'Album picks (1)', 'Newest first', 'Earliest first', 'Select photos']);
+    await screen.findByRole('button', { name: /Open p1/ });
+    const toolbar = document.querySelector('.library-toolbar')!;
+    expect(within(toolbar as HTMLElement).getByRole('combobox', { name: 'Photos shown' })).toHaveValue('all');
+    expect(within(toolbar as HTMLElement).getByRole('combobox', { name: 'Photo order' })).toHaveValue('newest');
+    expect(within(toolbar as HTMLElement).getByRole('button', { name: 'Select photos' })).toBeVisible();
+    expect(Array.from(toolbar.querySelectorAll('select, button'), element => element.tagName)).toEqual(['SELECT', 'SELECT', 'BUTTON']);
   });
 
-  it('folds the search field behind its own control until a host opens it', async () => {
+  it('shows a named search field immediately with its search control inside the field', async () => {
     renderGallery({ galleryRows: toolbarRows });
-    const user = userEvent.setup();
-    await screen.findByText('p1.jpg');
-
-    const library = document.querySelector('.gallery-private');
-    if (!(library instanceof HTMLElement)) throw new Error('Library must render.');
-    const toolbar = document.querySelector('.gallery-toolbar');
-    if (!(toolbar instanceof HTMLElement)) throw new Error('The Library toolbar must render.');
-    // The reveal heads the phone toolbar; the stylesheet hides it from 761, where the field is
-    // always in flow, so its `aria-expanded` is read only where the fold exists.
-    // Named `Search photos`, not `Search`: the form's own submit already answers to that, and two
-    // controls with one name in one row is the ambiguity the word span exists to avoid.
-    const reveal = within(toolbar).getByRole('button', { name: 'Search photos' });
-    expect(reveal).toHaveClass('gallery-search__reveal');
-    expect(toolbar.firstElementChild).toBe(reveal);
-    expect(reveal).toHaveAttribute('aria-expanded', 'false');
-    expect(reveal).toHaveAttribute('aria-controls', 'gallery-search-input');
-    expect(library).toHaveAttribute('data-search', 'collapsed');
-
-    await user.click(reveal);
-    expect(reveal).toHaveAttribute('aria-expanded', 'true');
-    expect(library).toHaveAttribute('data-search', 'open');
-    // A tap before typing is the whole cost of the fold, so the field takes focus at once.
-    expect(screen.getByLabelText('Find photos')).toHaveFocus();
-
-    await user.click(reveal);
-    expect(reveal).toHaveAttribute('aria-expanded', 'false');
-    expect(library).toHaveAttribute('data-search', 'collapsed');
+    const input = screen.getByRole('textbox', { name: 'Find photos' });
+    expect(input).toBeVisible();
+    expect(input).toHaveAttribute('placeholder', 'Search photos');
+    expect(input.parentElement).toContainElement(screen.getByRole('button', { name: 'Search' }));
+    expect(screen.queryByRole('button', { name: 'Search photos' })).not.toBeInTheDocument();
   });
 
   it('keeps the tray Clear control named while its word becomes a corner glyph', async () => {
     renderGallery({ galleryRows: toolbarRows });
     const user = userEvent.setup();
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: /^Open p1\.jpg,/ });
 
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));

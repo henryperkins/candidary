@@ -9,7 +9,7 @@ async function openGallery(page: Page) {
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 }
 
 test('Library adds and removes Album picks, then its export stays visible from queued through running to ready', async ({ page }) => {
@@ -31,8 +31,8 @@ test('Library adds and removes Album picks, then its export stays visible from q
   await expect(modeContext).toContainText(
     'Delivered photos stay private to hosts. Picking changes Album membership and a live Album link; it never publishes to the Guest gallery.',
   );
-  const picksFilter = page.getByRole('button', { name: 'Album picks' });
-  await expect(picksFilter.locator('.lucide-check')).toHaveCount(1);
+  const picksFilter = page.getByRole('combobox', { name: 'Photos shown' });
+  await expect(picksFilter).toHaveValue('all');
 
   await page.getByRole('button', { name: 'Select photos' }).click();
   await page.getByRole('button', { name: 'Select this moment' }).click();
@@ -44,9 +44,9 @@ test('Library adds and removes Album picks, then its export stays visible from q
   await expect(page.getByRole('button', { name: 'Clear this moment' })).toBeEnabled();
   await tray.getByRole('button', { name: 'Pick for Album (3)' }).click();
   await expect(tray).toHaveCount(0);
-  await expect(page.getByText('In Album')).toHaveCount(3);
+  await expect(page.getByText('In album')).toHaveCount(3);
   await expect(page.getByRole('button', {
-    name: `Remove ${rows[0]!.caption} from Album`,
+    name: `In album: Remove ${rows[0]!.caption} from Album`,
   })).toBeVisible();
 
   await page.getByRole('button', { name: 'Select photos' }).click();
@@ -58,7 +58,7 @@ test('Library adds and removes Album picks, then its export stays visible from q
   })).toHaveAttribute('aria-pressed', 'true');
   await page.getByRole('region', { name: 'Album' })
     .getByRole('button', { name: 'Remove from Album (1)' }).click();
-  await expect(page.getByText('In Album')).toHaveCount(2);
+  await expect(page.getByText('In album')).toHaveCount(2);
 
   // The count moved onto its own line inside the segment, so the accessible name is `Album 2`.
   await modes.getByRole('button', { name: /^Album, 2$/u }).click();
@@ -97,7 +97,7 @@ test('Library adds and removes Album picks, then its export stays visible from q
   await expect(liveHost.getByRole('status')).toContainText('Ready');
 
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Album, 2$/u }).click();
   await expect(exportState.getByText('Ready', { exact: true })).toBeVisible();

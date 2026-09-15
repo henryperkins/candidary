@@ -2,11 +2,13 @@ import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 
 import { normalizeManagerExportErrorCode } from '../../shared/contracts';
+import { hasExpiredExportLinks } from '../../shared/export-expiry';
 import { ApiError } from '../../shared/errors';
 import { requireManager } from '../auth/manager';
 import { ExportsRepository } from '../db/exports';
 import type { ExportRecord } from '../db/types';
 import type { AppBindings, AppEnv } from '../env';
+import { exportPartDeliveryName } from '../export/paths';
 
 function manager(context: Context<AppBindings>, write = false) {
   return requireManager(context, { write });
@@ -22,7 +24,7 @@ function managerExport(job: ExportRecord) {
   return {
     id: job.id,
     kind: job.kind,
-    state: job.state,
+    state: hasExpiredExportLinks(job) ? 'expired' : job.state,
     snapshotAt: job.snapshotAt,
     createdAt: job.createdAt,
     startedAt: job.executionProtocol === 'attempt-v2'
@@ -245,7 +247,7 @@ async function ownedReadyArtifact(
   kind: ExportArtifactKind,
   partNumber?: number,
 ) {
-  await manager(context);
+  const { event } = await manager(context);
   const job = await ownedJob(context);
   if (job.destination !== 'archive') throw new ApiError('EXPORT_FAILED', 'This operation has no archive.', 409);
   if ((job.kind === 'album' || job.kind === 'selection')
@@ -281,7 +283,7 @@ async function ownedReadyArtifact(
       .find((candidate) => candidate.partNumber === partNumber);
     if (part) return {
       key: part.objectKey,
-      filename: `photos-${String(part.partNumber).padStart(3, '0')}.zip`,
+      filename: exportPartDeliveryName(event.eventDate, event.slug, part.partNumber, job.partCount),
       contentType: 'application/zip',
     };
   }
@@ -425,9 +427,20 @@ exportRoutes.get('/manage/events/:eventId/exports/:jobId', async (context) => {
 
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context) => {
   await manager(context, true);
-  const current = await ownedJob(context);
+  let current = await ownedJob(context);
   if (current.kind === 'selection') throw new ApiError('EXPORT_ALREADY_ACTIVE', 'Confirm the frozen photo selection through its photo export operation.', 409);
   const repository = new ExportsRepository(context.env.DB);
+  if (hasExpiredExportLinks(current)) {
+    // Keep the schema's Ready -> Expired -> Queued transitions. Expiry uses the
+    // same exact-attempt CAS as scheduled cleanup and does not delete objects.
+    // Retry below still owns admission, prior-attempt cleanup, and dispatch.
+    const expired = await repository.markExpired({
+      id: current.id, executionProtocol: current.executionProtocol,
+      attempt: current.attempt, executionTransition: current.executionTransition,
+      expiresAt: current.expiresAt!,
+    }, new Date().toISOString());
+    current = expired.job ?? await ownedJob(context);
+  }
   const currentParts = await repository.listParts(current.id);
   const recovering = isRecoverableQueuedRetry(current) && currentParts.length === 0;
   if (current.state !== 'failed' && current.state !== 'expired' && !recovering) {
@@ -469,7 +482,7 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/retry', async (context
 });
 
 exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (context) => {
-  await manager(context, true);
+  const { event } = await manager(context, true);
   const job = await ownedJob(context);
   if (job.destination !== 'archive') throw new ApiError('EXPORT_FAILED', 'This operation has no archive.', 409);
   if (job.state !== 'ready' || !job.expiresAt || Date.parse(job.expiresAt) <= Date.now()) {
@@ -518,7 +531,7 @@ exportRoutes.post('/manage/events/:eventId/exports/:jobId/download', async (cont
         sourceBytes: part.sourceBytes,
         url: artifactUrl(job.eventId, job.id, 'part', part.partNumber),
         expiresAt: job.expiresAt,
-        filename: `photos-${String(part.partNumber).padStart(3, '0')}.zip`,
+        filename: exportPartDeliveryName(event.eventDate, event.slug, part.partNumber, job.partCount),
       })),
       printableGuestbook: job.guestbookHtmlObjectKey
         ? { url: artifactUrl(job.eventId, job.id, 'printable-guestbook'), expiresAt: job.expiresAt, filename: 'guestbook.html' }

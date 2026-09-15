@@ -19,6 +19,7 @@ import {
   hasTrustedEmptySource,
   isTerminalExport,
   useExportAnnouncement,
+  useExportDisplayJob,
   type ExportCurrentSource,
 } from './export-control-status';
 
@@ -33,6 +34,7 @@ export function normalizeCompleteExport(job: CompleteExportInput): ExportView {
 
 interface GalleryExportControlProps {
   eventTimezone: string;
+  managementExpiresAt?: string | null;
   currentSource: ExportCurrentSource;
   now?: number;
   job?: CompleteExportInput;
@@ -78,8 +80,9 @@ export const GalleryExportControl = forwardRef<
   GalleryExportControlProps
 >(function GalleryExportControl({
   eventTimezone,
+  managementExpiresAt,
   currentSource,
-  now = Date.now(),
+  now,
   job,
   activeJob,
   download,
@@ -105,12 +108,12 @@ export const GalleryExportControl = forwardRef<
   const privateDownload = useRef<HTMLAnchorElement>(null);
   const retryPrepared = useRef<HTMLButtonElement>(null);
   const prepareCurrent = useRef<HTMLButtonElement>(null);
-  const normalizedJob = job ? normalizeCompleteExport(job) : undefined;
+  const normalizedJob = useExportDisplayJob(job ? normalizeCompleteExport(job) : undefined, now);
   const waitMessage = exportWaitMessage(activeJob, normalizedJob?.id);
   const currentSourceEmpty = hasTrustedEmptySource(currentSource);
   const liveMessage = normalizedJob === undefined
     ? pendingAction === 'prepare' ? 'Preparing the current collection…' : ''
-    : exportAnnouncementMessage(normalizedJob, 'collection', now);
+    : exportAnnouncementMessage(normalizedJob, 'collection', now ?? Date.now(), eventTimezone);
   useExportAnnouncement(liveMessage, onAnnouncement);
   const run = (action: Exclude<typeof pendingAction, null>, request: () => Promise<void>) => {
     if (pendingAction !== null) return;
@@ -217,7 +220,8 @@ export const GalleryExportControl = forwardRef<
             eventTimezone={eventTimezone}
             currentSource={currentSource}
             currentLabel="collection"
-            now={now}
+            now={now ?? Date.now()}
+            managementExpiresAt={managementExpiresAt}
           />
           {normalizedJob.state === 'ready' && !download && (
             <button
@@ -231,7 +235,7 @@ export const GalleryExportControl = forwardRef<
               {pendingAction === 'download' ? 'Getting download links…' : 'Get download links'}
             </button>
           )}
-          {download && <div className="export-links">
+          {normalizedJob.state === 'ready' && download && <div className="export-links">
             {download.parts.length > 1 && <p className="export-links__lead">
               {download.parts.length} photo parts. Collect every one — each holds a different
               set of photos.

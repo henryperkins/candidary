@@ -31,6 +31,7 @@ import {
   DATE_UNAVAILABLE,
   TIME_UNAVAILABLE,
   formatEventDate,
+  formatEventDateTime,
   formatRetentionDate,
 } from '../app/event-date-time';
 import { useDeadlineClock } from '../app/use-deadline-clock';
@@ -1240,6 +1241,11 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     intakeResource.invalidate,
   ]);
   const galleryMutationOwner = useRef(eventScope.current.generation);
+  useLayoutEffect(() => {
+    // StrictMode replays setup after the session cleanup retires its generation.
+    // Re-arm this live owner; the session cleanup still fences actual unmounts.
+    galleryMutationOwner.current = eventScope.current.generation;
+  }, []);
   const invalidateGalleryAfterMutation = useCallback(() => {
     // A retained inverse may settle after this event session unmounts. Its API
     // response belongs to that old event, but it must not start reconciliation
@@ -3116,9 +3122,12 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     );
   const librarySurface = section === 'gallery' && (galleryMode === 'library' || galleryMode === 'album');
   const uploadStatus = <span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span>;
+  const managementDeadline = formatEventDateTime(event.managementAccessExpiresAt, event.eventTimezone);
   const lifecycle = <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{purgeAfterDisplay === null
     ? TIME_UNAVAILABLE
-    : <time dateTime={event.purgeAfter}>{purgeAfterDisplay}</time>}</strong></p></div>;
+    : <time dateTime={event.purgeAfter}>{purgeAfterDisplay}</time>}</strong></p><p>Management and exports end <strong>{managementDeadline === null
+      ? TIME_UNAVAILABLE
+      : <time dateTime={event.managementAccessExpiresAt}>{managementDeadline}</time>}</strong></p></div>;
   return <>
     {createPortal(
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{galleryAnnouncement}</p>,

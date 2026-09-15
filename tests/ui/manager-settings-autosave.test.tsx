@@ -318,7 +318,7 @@ describe('manager settings autosave guards', () => {
     await user.click(nav.getByRole('button', { name: 'Gallery' }));
     await user.click(within(await screen.findByRole('region', { name: 'Your pending work is not saved' }))
       .getByRole('button', { name: 'Discard draft' }));
-    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     // The mode segments carry their counts in their accessible names now.
     await user.click(await screen.findByRole('button', { name: /^Guest gallery/u }));
     expect(within(await screen.findByRole('group', { name: 'Publication status' }))
@@ -526,7 +526,7 @@ describe('manager settings autosave guards', () => {
 
     release!();
     await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
-    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
   });
 
   it('always offers Leave now, so a stalled network cannot trap the host', async () => {

@@ -6,6 +6,8 @@ import { formatBytes } from '../../app/format';
 import type { ExportDownloadView, ExportView } from '../../app/types';
 import {
   EXPORT_STATE_LABELS,
+  ExportManagementDeadline,
+  expiredExportMessage,
   coarseExportElapsed,
   describeCurrentSource,
   exportAnnouncementMessage,
@@ -14,11 +16,13 @@ import {
   exportWaitMessage,
   hasTrustedEmptySource,
   useExportAnnouncement,
+  useExportDisplayJob,
   type ExportCurrentSource,
 } from './export-control-status';
 
 interface AlbumExportControlProps {
   eventTimezone: string;
+  managementExpiresAt?: string | null;
   currentSource: ExportCurrentSource;
   now?: number;
   job?: ExportView;
@@ -43,9 +47,10 @@ interface AlbumExportControlProps {
  */
 export function AlbumExportControl({
   eventTimezone,
+  managementExpiresAt,
   currentSource,
-  now = Date.now(),
-  job,
+  now,
+  job: providedJob,
   activeJob,
   prepareBlockedReason,
   download,
@@ -57,6 +62,7 @@ export function AlbumExportControl({
   chooser,
   showPrepareAction = true,
 }: AlbumExportControlProps) {
+  const job = useExportDisplayJob(providedJob, now);
   const [pendingAction, setPendingAction] = useState<'prepare' | 'download' | 'retry' | null>(null);
   const waitMessage = exportWaitMessage(activeJob, job?.id) ?? prepareBlockedReason ?? null;
   const currentSourceEmpty = hasTrustedEmptySource(currentSource);
@@ -67,7 +73,7 @@ export function AlbumExportControl({
   };
   const liveMessage = job === undefined
     ? pendingAction === 'prepare' ? 'Preparing the current Album…' : ''
-    : exportAnnouncementMessage(job, 'Album', now);
+    : exportAnnouncementMessage(job, 'Album', now ?? Date.now(), eventTimezone);
   useExportAnnouncement(liveMessage, onAnnouncement);
   const prepareDisabled = pendingAction !== null || waitMessage !== null || currentSourceEmpty;
   const prepareReason = waitMessage
@@ -116,10 +122,10 @@ export function AlbumExportControl({
       </span>}
       {albumChanged && <p className="album-export__changed">Your Album has changed since this ZIP was prepared.</p>}
       {job.state === 'queued' && <span>Waiting to start.</span>}
-      {job.state === 'running' && <span>{coarseExportElapsed(job.startedAt, now) ?? 'Preparing your Album ZIP…'}</span>}
+      {job.state === 'running' && <span>{coarseExportElapsed(job.startedAt, now ?? Date.now()) ?? 'Preparing your Album ZIP…'}</span>}
       {progress && <span>{progress}</span>}
       {job.state === 'failed' && <span>{exportFailureMessage(job.errorCode ?? 'EXPORT_FAILED', 'Album')}</span>}
-      {job.state === 'expired' && <span>This ZIP has expired. Retry this prepared export, or prepare a new Album ZIP.</span>}
+      {job.state === 'expired' && <span>{expiredExportMessage(job, 'Album', eventTimezone)}</span>}
       {job.state === 'ready' && download === undefined
         ? <button
             type="button"
@@ -131,7 +137,7 @@ export function AlbumExportControl({
             {pendingAction === 'download' ? 'Getting ZIP links…' : 'Show ZIP download'}
           </button>
         : null}
-      {download !== undefined
+      {job.state === 'ready' && download !== undefined
         ? <div className="export-links">
             {download.parts.length > 1
               ? <p className="export-links__lead">
@@ -152,6 +158,7 @@ export function AlbumExportControl({
       {job.state === 'ready' && expiry && <span className="album-export__expiry">
         Links expire {expiry.dateTime === null ? expiry.value : <time dateTime={expiry.dateTime}>{expiry.value}</time>}.
       </span>}
+      {!preparing && <ExportManagementDeadline expiresAt={managementExpiresAt} eventTimezone={eventTimezone} />}
       {(job.state === 'failed' || job.state === 'expired')
         && job.errorCode !== 'EXPORT_SOURCE_REMOVED'
         ? <button

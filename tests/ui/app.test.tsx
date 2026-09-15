@@ -2354,7 +2354,7 @@ describe('canonical Manager location ownership', () => {
     }]);
     render(<RouterProvider router={router} />);
 
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     expect(await screen.findByRole('region', { name: 'Complete export' })).toHaveFocus();
   });
 
@@ -3527,6 +3527,36 @@ function previewSources() {
 }
 
 describe('manager experience', () => {
+  it('refreshes Photo Wall membership after immediate Undo under StrictMode', async () => {
+    let picked = false;
+    const row = {
+      id: 'wall-photo', originalFilename: 'first-dance.jpg', caption: 'First dance', guestName: 'Maya',
+      publicationStatus: 'unpublished', previewAvailable: true, width: 1200, height: 900,
+      receivedAt: '2026-09-19T22:00:00Z', timelineAt: '2026-09-19T22:00:00Z', timelineSource: 'received',
+    };
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), 'http://localhost').pathname;
+      if (path.endsWith('/media/wall-photo/favorite')) {
+        picked = (JSON.parse(String(init?.body)) as { favorite: boolean }).favorite;
+        return json({ media: { ...row, isFavorite: picked } });
+      }
+      if (path.endsWith('/album/picks')) {
+        picked = (JSON.parse(String(init?.body)) as { picked: boolean }).picked;
+        return json({ changed: [{ ...row, isFavorite: picked }] });
+      }
+      if (path.endsWith('/gallery')) return json({ media: [{ ...row, isFavorite: picked }], nextCursor: null });
+      return base(input);
+    }));
+    render(<StrictMode><RouterProvider router={createAppRouter(['/manage/event/event-a?section=gallery'])} /></StrictMode>);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Add to album: First dance' }));
+    expect(await screen.findByRole('button', { name: 'In album: Remove First dance from Album' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: 'Undo' }));
+    await waitFor(() => expect(picked).toBe(false));
+    expect(await screen.findByRole('button', { name: 'Add to album: First dance' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('uses the event zone formatter for the Manager header, retention, and Intake schedule', async () => {
     const boundaryEvent: EventView = {
       ...MANAGED_EVENT,
@@ -4630,11 +4660,11 @@ describe('manager experience', () => {
     await user.click(galleryMode('Library'));
     await user.click(await screen.findByRole('button', { name: 'Download all' }));
     expect(await screen.findByRole('alert'), 'export').toHaveTextContent('That photo changed before your update.');
-    expect(screen.getByRole('heading', { name: 'Private Gallery' }), 'export').toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Library' }), 'export').toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Library' })).toBeVisible();
   });
 
   /**
@@ -5007,7 +5037,7 @@ describe('manager experience', () => {
     await screen.findByRole('heading', { name: 'Live intake' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
-    expect(await screen.findByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     const poll = await waitFor(() => {
       const scheduled = interval.mock.calls.filter(([, delay]) => delay === 10_000).at(-1)?.[0];
@@ -6923,7 +6953,7 @@ describe('manager experience', () => {
     await user.click(galleryNavigation);
     expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
     expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Library' })).toBeVisible();
     await user.click(await findGalleryMode('Guest gallery'));
     // The mode change settles through the Manager's own navigation, so the workspace has to be
     // waited for: reached too early, `Select photos` is Library's, which stays mounted behind

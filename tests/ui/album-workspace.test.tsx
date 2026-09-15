@@ -883,7 +883,7 @@ function renderWorkspace(fetchMock: ReturnType<typeof vi.fn>, exportOverrides: {
 }
 
 async function openAlbum(user = userEvent.setup()) {
-  await screen.findByRole('heading', { name: 'Private Gallery' });
+  await screen.findByRole('heading', { name: 'Library' });
   await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
     .getByRole('button', { name: /^Album/ }));
   return user;
@@ -1038,6 +1038,7 @@ describe('gallery modes', () => {
     controlled.fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/photo-exports/capabilities') ? success({ enabled: true, destinations: ['device', 'archive'], activeJob: null }) : original(input, init));
     renderWorkspace(controlled.fetchMock, {}, { mode: 'album' });
     const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Album settings' }));
     await user.click(await screen.findByRole('button', { name: 'Select Album photos' }));
     const tile = screen.getByRole('button', { name: 'Select p1.jpg, from Jose' });
     expect(tile.closest('li')).toHaveAttribute('draggable', 'false');
@@ -1061,6 +1062,10 @@ describe('gallery modes', () => {
     const original = controlled.fetchMock.getMockImplementation()!;
     controlled.fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/photo-exports/capabilities') ? success({ enabled: true, destinations: ['device', 'archive'], activeJob: null }) : original(input, init));
     renderWorkspace(controlled.fetchMock, {}, { mode: 'album' });
+    const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download Album' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Download Album' }));
+    await user.click(screen.getByRole('button', { name: 'Album settings' }));
     const title = await screen.findByLabelText('Album title');
     fireEvent.change(title, { target: { value: 'Our saved Album' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save / Share photos' }));
@@ -1081,12 +1086,12 @@ describe('gallery modes', () => {
     const workspace = renderWorkspace(fetchMock, {}, { mode: 'library', onModeChange });
     const user = userEvent.setup();
 
-    expect(await screen.findByText('First dance')).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Open First dance, from Jose' })).toBeVisible();
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/u }));
 
     expect(onModeChange).toHaveBeenCalledWith('album');
-    expect(screen.getByText('First dance')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Open First dance, from Jose' })).toBeVisible();
 
     workspace.rerenderMode('album');
     expect(await screen.findByRole('heading', { name: 'The Album is empty.' })).toBeVisible();
@@ -1364,7 +1369,7 @@ describe('gallery modes', () => {
     renderWorkspace(fetchMock);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Summary unavailable.');
-    expect(await screen.findByText('First dance')).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Open First dance, from Jose' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Download all' })).toBeEnabled();
     expect(state.albumReads).toBe(0);
   });
@@ -1399,7 +1404,7 @@ describe('gallery modes', () => {
     await waitFor(() => expect(audienceFacts()).toEqual(trustedFacts));
 
     await userEvent.setup().click(await screen.findByRole('button', {
-      name: 'Pick First dance for the Album',
+      name: 'Add to album: First dance',
     }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('The refreshed summary failed.');
@@ -1453,7 +1458,7 @@ describe('gallery modes', () => {
     const { fetchMock } = harness();
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     const modes = screen.getByRole('group', { name: 'Gallery mode' });
     expect(within(modes).getAllByRole('button')).toHaveLength(3);
@@ -1668,9 +1673,9 @@ describe('gallery modes', () => {
       .not.toHaveTextContent('Publishing finished.');
 
     await user.click(within(modes).getByRole('button', { name: /^Library/u }));
-    expect(await screen.findByRole('button', { name: 'Pick First dance for the Album' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Add to album: First dance' })).toBeVisible();
     expect(screen.getByText('Guest gallery · Published')).toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Pick First dance for the Album' }));
+    await user.click(screen.getByRole('button', { name: 'Add to album: First dance' }));
     await waitFor(() => expect(controlled.state.galleryRows[0]).toMatchObject({
       publicationStatus: 'published', isFavorite: true,
     }));
@@ -1862,7 +1867,7 @@ describe('audience summary invalidation boundaries', () => {
     await waitFor(() => expect(controlled.state.audienceReads).toBe(1));
 
     await userEvent.setup().click(await screen.findByRole('button', {
-      name: 'Pick First dance for the Album',
+      name: 'Add to album: First dance',
     }));
     expect(controlled.state.audienceReads).toBe(1);
     write.resolve();
@@ -1873,7 +1878,7 @@ describe('audience summary invalidation boundaries', () => {
     const controlled = harness();
     renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: 'Open First dance, from Jose' });
     await waitFor(() => expect(controlled.state.audienceReads).toBe(1));
 
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
@@ -2297,7 +2302,7 @@ describe('audience summary invalidation boundaries', () => {
     const controlled = harness({ pickErrors: ['Pick failed.'] });
     renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: 'Open First dance, from Jose' });
     await waitFor(() => expect(controlled.state.audienceReads).toBe(1));
 
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
@@ -2313,7 +2318,7 @@ describe('selecting photos into the album', () => {
     const { state, fetchMock } = harness();
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: 'Open First dance, from Jose' });
 
     expect(screen.queryByRole('region', { name: 'Album' })).not.toBeInTheDocument();
 
@@ -2358,21 +2363,21 @@ describe('selecting photos into the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: 'Open First dance, from Jose' });
 
     expect(screen.getByRole('button', {
-      name: 'Remove First dance from Album',
+      name: 'In album: Remove First dance from Album',
     })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', {
-      name: 'Pick p2.jpg for the Album',
+      name: 'Add to album: p2.jpg',
     })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.queryByText('In the album')).not.toBeInTheDocument();
     expect(screen.queryByText('Not in the album')).not.toBeInTheDocument();
-    expect(screen.getByText('In Album')).toBeVisible();
+    expect(screen.getByText('In album')).toBeVisible();
     expect(document.querySelector('.gallery-mosaic__album-badge')).toBeNull();
 
-    const picks = screen.getByRole('button', { name: 'Album picks (1)' });
-    expect(picks.querySelector('.lucide-check')).not.toBeNull();
+    const picks = screen.getByRole('combobox', { name: 'Photos shown' });
+    expect(picks).toHaveValue('all');
 
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     const first = screen.getByRole('button', { name: 'Select First dance, from Jose' });
@@ -2386,7 +2391,7 @@ describe('selecting photos into the album', () => {
       .toHaveTextContent('Selection cleared.');
   });
 
-  it('selects and clears an entire collapsed moment, including at the selection cap', async () => {
+  it('selects and clears an entire loaded moment, including at the selection cap', async () => {
     const rows = Array.from({ length: 50 }, (_, index) => photo(
       `p${index + 1}`,
       new Date(Date.parse('2026-08-15T22:42:00.000Z') + index * 1_000).toISOString(),
@@ -2394,10 +2399,10 @@ describe('selecting photos into the album', () => {
     const { fetchMock } = harness({ galleryRows: rows });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: 'Open p1.jpg, from Jose' });
 
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
-    expect(document.querySelectorAll('.gallery-mosaic__item')).toHaveLength(8);
+    expect(document.querySelectorAll('.gallery-mosaic__item')).toHaveLength(50);
     await user.click(screen.getByRole('button', { name: 'Select this moment' }));
     expect(await screen.findByRole('region', { name: 'Album' }))
       .toHaveTextContent('50 of 50 selected. Remove one to choose another.');
@@ -2412,7 +2417,7 @@ describe('selecting photos into the album', () => {
     const { fetchMock } = harness();
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: 'Open First dance, from Jose' });
 
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select First dance, from Jose' }));
@@ -2463,7 +2468,7 @@ describe('selecting photos into the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByText('First dance');
+    await screen.findByRole('button', { name: 'Open First dance, from Jose' });
 
     await user.click(screen.getByRole('button', { name: /Select photos/ }));
     await user.click(await screen.findByRole('button', { name: /^Select First dance/ }));
@@ -4320,21 +4325,21 @@ describe('the album', () => {
     const onPrepare = vi.fn(noop);
     renderWorkspace(pickedHarness.fetchMock, { onPrepare });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
-    await user.click(await screen.findByRole('button', { name: 'Prepare Album ZIP' }));
+    await user.click(await screen.findByRole('button', { name: 'Download Album' }));
     expect(onPrepare).toHaveBeenCalledOnce();
     expect(onPrepare).toHaveBeenCalledWith('album');
 
     cleanup();
     const emptyHarness = harness();
     renderWorkspace(emptyHarness.fetchMock);
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
-    expect(await screen.findByRole('button', { name: 'Prepare Album ZIP' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Download Album' })).toBeDisabled();
   });
 
   it('uses the audience summary rather than loaded Album rows to guard an empty export', async () => {
@@ -4375,14 +4380,14 @@ describe('the album', () => {
     const onPrepare = vi.fn(noop);
     renderWorkspace(controlled.fetchMock, { onPrepare });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
     await user.click(await screen.findByRole('button', { name: /^Move First dance later/ }));
     await waitFor(() => expect(controlled.state.orderWrites).toHaveLength(1));
     await user.click(screen.getByRole('button', { name: /^Move First dance later/ }));
-    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
+    await user.click(screen.getByRole('button', { name: 'Download Album' }));
     expect(onPrepare).not.toHaveBeenCalled();
 
     await act(async () => { firstSave.resolve(); });
@@ -4409,7 +4414,7 @@ describe('the album', () => {
     const onPrepare = vi.fn(noop);
     renderWorkspace(controlled.fetchMock, { onPrepare });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4417,11 +4422,11 @@ describe('the album', () => {
     const recoveryRead = controlled.state.albumReads;
     controlled.state.albumReadGates[recoveryRead] = reload.promise;
     await user.click(screen.getByRole('button', { name: /^Move First dance later/ }));
-    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
+    await user.click(screen.getByRole('button', { name: 'Download Album' }));
     await act(async () => { save.resolve(); });
     await waitFor(() => expect(controlled.state.albumReads).toBe(recoveryRead + 1));
 
-    const prepare = screen.getByRole('button', { name: 'Preparing Album ZIP…' });
+    const prepare = screen.getByRole('button', { name: 'Preparing…' });
     expect(prepare).toBeDisabled();
     await user.click(prepare);
     expect(onPrepare).not.toHaveBeenCalled();
@@ -4449,7 +4454,7 @@ describe('the album', () => {
     const onPrepare = vi.fn(noop);
     renderWorkspace(controlled.fetchMock, { onPrepare });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4497,23 +4502,26 @@ describe('the album', () => {
       processedBytes: 128, progressUpdatedAt: '2026-08-22T12:00:02.500Z',
       errorCode: state === 'failed' ? 'EXPORT_FAILED' : null,
       partCount: state === 'ready' ? 1 : 0,
-      expiresAt: state === 'ready' ? '2026-08-24T12:00:00.000Z' : null,
+      expiresAt: state === 'ready' ? new Date(Date.now() + 86_400_000).toISOString() : null,
       guestbookEntryCount: 0, guestbookSharedCount: 0, guestbookEventName: 'Maya & Theo',
       guestbookEventDate: '2026-09-19', guestbookEventTimezone: 'America/Chicago',
       guestbookPrompt: DEFAULT_GUESTBOOK_PROMPT, guestbookGalleryVisible: true,
     });
 
     renderWorkspace(harness().fetchMock, { activeJob: activeAlbum });
+    await userEvent.setup().click(await screen.findByText('Exports', { selector: 'summary' }));
     expect(await screen.findByRole('button', { name: 'Download all' })).toBeDisabled();
 
     cleanup();
     renderWorkspace(harness().fetchMock, { job: completeJob('failed'), activeJob: activeAlbum });
+    await userEvent.setup().click(await screen.findByText('Exports', { selector: 'summary' }));
     expect(await screen.findByRole('button', { name: 'Retry this prepared export' })).toBeDisabled();
     expect(screen.getByText('Album export is Running. Prepare and retry actions will be available when it finishes.'))
       .toBeVisible();
 
     cleanup();
     renderWorkspace(harness().fetchMock, { job: completeJob('ready'), activeJob: activeAlbum });
+    await userEvent.setup().click(await screen.findByText('Exports', { selector: 'summary' }));
     expect(await screen.findByRole('button', { name: 'Get download links' })).toBeEnabled();
   });
 
@@ -4543,7 +4551,7 @@ describe('the album', () => {
     };
     renderWorkspace(pickedHarness.fetchMock, { albumJob, albumDownload });
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4560,7 +4568,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4601,7 +4609,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4617,7 +4625,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4632,7 +4640,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4651,7 +4659,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
     const exportControl = (await screen.findByRole('button', { name: 'Prepare Album ZIP' }))
@@ -4669,7 +4677,7 @@ describe('the album', () => {
     });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4696,7 +4704,7 @@ describe('the album', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4728,7 +4736,7 @@ describe('the album', () => {
     });
     const rendered = renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -4772,7 +4780,7 @@ describe('the album', () => {
     const { fetchMock } = harness({ galleryRows: [photo('p1', '2026-08-15T22:42:00.000Z')] });
     renderWorkspace(fetchMock);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Private Gallery' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
 
@@ -5803,7 +5811,7 @@ describe('album review regressions', () => {
     renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
 
-    await screen.findByText('p1.jpg');
+    await screen.findByRole('button', { name: 'Open p1.jpg, from Jose' });
     await user.click(screen.getByRole('button', { name: 'Select photos' }));
     await user.click(screen.getByRole('button', { name: 'Select p1.jpg, from Jose' }));
     await user.click(screen.getByRole('button', { name: 'Pick for Album (1)' }));
@@ -6326,8 +6334,8 @@ describe('album review regressions', () => {
     });
     renderWorkspace(controlled.fetchMock);
     const user = userEvent.setup();
-    await screen.findByText('First dance');
-    await user.click(screen.getByRole('button', { name: 'Pick First dance for the Album' }));
+    await screen.findByRole('button', { name: 'Open First dance, from Jose' });
+    await user.click(screen.getByRole('button', { name: 'Add to album: First dance' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('500 photos and sections');
     expect(controlled.state.pickWrites).toHaveLength(0);
 

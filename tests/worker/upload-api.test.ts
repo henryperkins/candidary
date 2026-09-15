@@ -978,7 +978,7 @@ describe('guest media listings', () => {
 
     expect(response.status).toBe(200);
     expectPrivateToOneReader(response);
-    expect(keysOf(body.data)).toEqual(['media']);
+    expect(keysOf(body.data)).toEqual(['media', 'nextCursor']);
     expect(body.data.media).toHaveLength(1);
     expect(keysOf(body.data.media[0])).toEqual(GALLERY_MEDIA_KEYS);
     expect(body.data.media[0]).toEqual({

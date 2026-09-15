@@ -286,7 +286,7 @@ async function openGallery(page: Page) {
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 }
 
 async function expectNoOverflow(page: Page, state: string) {

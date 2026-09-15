@@ -62,6 +62,7 @@ async function expireReadyExport(jobId: string) {
 async function failedExportWithArtifacts(
   access: Awaited<ReturnType<typeof eventAccess>>,
   label: string,
+  expire = true,
 ) {
   await uploadPending(access, label, null);
   const created = await createApp().request(`/api/manage/events/${access.event.id}/exports`, {
@@ -69,6 +70,7 @@ async function failedExportWithArtifacts(
   }, testEnv);
   const job = (await created.json<any>()).data.export;
   const ready = await processExport(testEnv, job.id, new Date());
+  if (!ready || ready.state !== 'ready') throw new Error('Expected a prepared export fixture.');
   const repository = new ExportsRepository(testEnv.DB);
   const parts = await repository.listParts(job.id);
   const keys = [
@@ -77,7 +79,7 @@ async function failedExportWithArtifacts(
     ready!.guestbookHtmlObjectKey,
     ready!.guestbookCsvObjectKey,
   ].filter((key): key is string => Boolean(key));
-  const terminal = await expireReadyExport(job.id);
+  const terminal = expire ? await expireReadyExport(job.id) : ready;
   return { job: terminal, keys };
 }
 
@@ -178,6 +180,47 @@ async function seedHistoricalZeroPhotoComplete(
 
 describe('manager exports', () => {
   beforeEach(resetDatabase);
+
+  it('projects elapsed ready links as expired and retries before scheduled cleanup', async () => {
+    const access = await eventAccess();
+    const { job, keys } = await failedExportWithArtifacts(access, 'elapsed-ready', false);
+    const expiresAt = new Date(Date.now() - 1_000).toISOString();
+    await testEnv.DB.prepare("UPDATE export_jobs SET state = 'ready', expires_at = ? WHERE id = ?")
+      .bind(expiresAt, job.id).run();
+    const path = `/api/manage/events/${access.event.id}/exports`;
+    const status = await createApp().request(`${path}/${job.id}`, {
+      headers: { cookie: access.manager.cookie },
+    }, testEnv);
+    expect((await status.json<any>()).data.export).toMatchObject({ state: 'expired', expiresAt });
+    const listed = await createApp().request(path, { headers: { cookie: access.manager.cookie } }, testEnv);
+    expect((await listed.json<any>()).data.exports[0]).toMatchObject({ id: job.id, state: 'expired' });
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({ state: 'ready' });
+    const download = await createApp().request(`${path}/${job.id}/download`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(download.status).toBe(409);
+    const retried = await createApp().request(`${path}/${job.id}/retry`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(retried.status).toBe(202);
+    expect((await retried.json<any>()).data.export).toMatchObject({ state: 'queued', attempt: 2, expiresAt: null });
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).toBeNull();
+    expect(await new ExportsRepository(testEnv.DB).listParts(job.id)).toEqual([]);
+  });
+
+  it('refuses an unexpired ready retry without deleting its artifacts', async () => {
+    const access = await eventAccess();
+    const { job, keys } = await failedExportWithArtifacts(access, 'still-ready', false);
+    await testEnv.DB.prepare("UPDATE export_jobs SET state = 'ready', expires_at = ? WHERE id = ?")
+      .bind(new Date(Date.now() + 60_000).toISOString(), job.id).run();
+    const retry = await createApp().request(`/api/manage/events/${access.event.id}/exports/${job.id}/retry`, {
+      method: 'POST', headers: writeHeaders(access.manager), body: '{}',
+    }, testEnv);
+    expect(retry.status).toBe(409);
+    await expect(new ExportsRepository(testEnv.DB).retry(job.id)).rejects.toMatchObject({ code: 'EXPORT_ALREADY_ACTIVE' });
+    expect(await new ExportsRepository(testEnv.DB).getById(job.id)).toMatchObject({ state: 'ready', attempt: 1 });
+    for (const key of keys) expect(await testEnv.MEDIA_BUCKET.head(key)).not.toBeNull();
+  });
 
   it('pauses complete, album, and retry admission without mutation, dispatch, or deletion', async () => {
     await resetDatabaseWithExportProtocolClosed();
@@ -875,11 +918,15 @@ describe('manager exports', () => {
     const firstObject = await testEnv.MEDIA_BUCKET.get(parts[0]!.objectKey);
     const firstArchive = unzipSync(new Uint8Array(await firstObject!.arrayBuffer()));
     expect(Object.keys(firstArchive)).toEqual(['photos/001-exportable-a.png', 'media.csv']);
+    const secondObject = await testEnv.MEDIA_BUCKET.get(parts[1]!.objectKey);
+    const secondArchive = unzipSync(new Uint8Array(await secondObject!.arrayBuffer()));
+    expect(Object.keys(secondArchive)).toEqual(['photos/002-exportable-b.png', 'media.csv']);
     expect(strFromU8(firstArchive['media.csv']!)).toContain('unpublished');
     const manifestObject = await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!);
     const manifest = await manifestObject!.text();
     expect(manifest).toContain('photos-001.zip');
     expect(manifest).toContain('photos-002.zip');
+    expect(manifest).toContain('2,photos-002.zip,2,photos/002-exportable-b.png,');
     expect(manifest).toContain('Sunset toast');
     expect(ready!.guestbookHtmlObjectKey).toContain('/attempt-1/guestbook.html');
     expect(ready!.guestbookCsvObjectKey).toContain('/attempt-1/guestbook-private.csv');
@@ -894,6 +941,8 @@ describe('manager exports', () => {
     const downloadData = (await download.json<any>()).data;
     expect(downloadData.manifest.url).toContain('/artifact/manifest');
     expect(downloadData.parts).toHaveLength(2);
+    expect(downloadData.parts[0].filename)
+      .toBe(`candidary-${access.event.eventDate}-${access.event.slug}-photos-001-of-002.zip`);
     expect(downloadData.parts.every((part: any) => part.url.includes('/artifact/part/'))).toBe(true);
     expect(downloadData.printableGuestbook.filename).toBe('guestbook.html');
     expect(downloadData.privateGuestbook.filename).toBe('guestbook-private.csv');
@@ -910,6 +959,7 @@ describe('manager exports', () => {
     expect(artifact.headers.get('content-range')).toMatch(/^bytes 0-9\//u);
     expect(artifact.headers.get('content-length')).toBe('10');
     expect(artifact.headers.get('content-disposition')).toContain('attachment');
+    expect(artifact.headers.get('content-disposition')).toContain(downloadData.parts[0].filename);
     expect(artifact.headers.get('cache-control')).toBe('private, no-store');
     expect(artifact.headers.get('x-content-type-options')).toBe('nosniff');
     expect((await artifact.arrayBuffer()).byteLength).toBe(10);
@@ -1742,9 +1792,13 @@ describe('manager exports', () => {
     });
   });
 
-  it('converges concurrent failed-job retries on one deterministic next attempt', async () => {
+  it.each(['failed', 'elapsed-ready'] as const)('converges concurrent %s retries on one deterministic next attempt', async (state) => {
     const access = await eventAccess();
-    const { job, keys } = await failedExportWithArtifacts(access, 'retry-concurrent');
+    const { job, keys } = await failedExportWithArtifacts(access, 'retry-concurrent', state !== 'elapsed-ready');
+    if (state === 'elapsed-ready') {
+      await testEnv.DB.prepare("UPDATE export_jobs SET state = 'ready', expires_at = ? WHERE id = ?")
+        .bind(new Date(Date.now() - 1_000).toISOString(), job.id).run();
+    }
     let waiting = 0;
     let release!: () => void;
     const bothAtTransition = new Promise<void>((resolve) => { release = resolve; });
@@ -1888,8 +1942,8 @@ describe('manager exports', () => {
     }
     expect(archivedNames).toEqual([
       'photos/001-album-ordered-third.png',
-      'photos/001-album-ordered-first.png',
-      'photos/001-album-ordered-second.png',
+      'photos/002-album-ordered-first.png',
+      'photos/003-album-ordered-second.png',
     ]);
     const firstManifest = await (await testEnv.MEDIA_BUCKET.get(ready!.manifestObjectKey!))!.text();
     expect([...firstManifest.matchAll(/,(album-ordered-(?:third|first|second)\.png),/gu)]

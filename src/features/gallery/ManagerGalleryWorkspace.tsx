@@ -9,7 +9,7 @@ import {
 } from 'react';
 
 import type { ExportDownloadView, ExportView, MediaView } from '../../app/types';
-import { api } from '../../app/api';
+import { api, ClientApiError } from '../../app/api';
 import type { GalleryMode } from '../../app/manager-location';
 import type { ManagerMediaPage } from '../../app/types';
 import { describeLoadFailure, ErrorState } from '../../components/States';
@@ -324,6 +324,8 @@ ManagerGalleryWorkspaceProps
   // row PATCHes can settle in either order, and a successful sibling must not
   // erase the failed row's exact retry closure.
   const sharedWriteOperation = useRef(0);
+  const sharedPendingWrites = useRef(new Map<string, 'publish' | 'hide'>());
+  const [sharedPendingPublications, setSharedPendingPublications] = useState(new Map<string, 'publish' | 'hide'>());
   const sharedWriteFailureOwner = useRef<number | null>(null);
   const sharedContinuationOperation = useRef(0);
   const sharedContinuationFailureOwner = useRef<number | null>(null);
@@ -501,6 +503,12 @@ ManagerGalleryWorkspaceProps
     const requestedEventId = retryEventId ?? eventId;
     const queryKey = retryQueryKey ?? sharedQueryKey;
     if (!ownsSharedWorkspace(requestedEventId)) return;
+    // A ref closes the gap before React commits the disabled button, including
+    // repeated presses of the failure panel's retry action.
+    const pendingKey = `${requestedEventId}:${item.id}`;
+    if (sharedPendingWrites.current.has(pendingKey)) return;
+    sharedPendingWrites.current.set(pendingKey, action);
+    setSharedPendingPublications(new Map(sharedPendingWrites.current));
     const title = galleryPhotoTitle(item);
     const progressive = action === 'publish' ? 'Publishing' : 'Hiding';
     setAnnouncement(`${progressive} ${title}…`);
@@ -525,6 +533,21 @@ ManagerGalleryWorkspaceProps
     } catch (caught) {
       if (!ownsSharedWorkspace(requestedEventId)) return;
       const failure = describeLoadFailure(caught, 'manager', 'The publication change could not be completed.');
+      if (caught instanceof ClientApiError && caught.code === 'MEDIA_STATE_CONFLICT') {
+        sharedWriteFailureOwner.current = owner;
+        setSharedWriteFailure({
+          ...failure,
+          message: 'This photo changed before your update finished.',
+          recoveryHint: 'Review its current status before trying again.',
+          retryable: false,
+        });
+        setRetrySharedWrite(null);
+        currentSharedInvalidate.current();
+        invalidateAudienceSummary();
+        invalidateLibrary();
+        setAnnouncement('This photo changed. Refreshing its publication status.');
+        return;
+      }
       setAnnouncement(`${progressive} ${title} could not be completed.`);
       if (failure.kind === 'retry') {
         sharedWriteFailureOwner.current = owner;
@@ -540,6 +563,9 @@ ManagerGalleryWorkspaceProps
         clearSharedWriteFailure(owner);
         onResourceEscalate?.(failure);
       }
+    } finally {
+      sharedPendingWrites.current.delete(pendingKey);
+      if (sharedActive.current) setSharedPendingPublications(new Map(sharedPendingWrites.current));
     }
   }, [clearSharedWriteFailure, eventId, invalidateAudienceSummary, invalidateLibrary, onResourceEscalate, ownsSharedWorkspace, sharedQueryKey, updateCapturedSharedPage]);
 
@@ -761,7 +787,10 @@ ManagerGalleryWorkspaceProps
       discardPendingAlbumChanges,
       retireAlbumLeavePreparation,
       restoreAlbumLeaveFocus,
-      focusCompleteExport: () => completeExportRef.current?.focusIntendedAction(),
+      focusCompleteExport: () => {
+        setLibraryToolsOpen(true);
+        completeExportRef.current?.focusIntendedAction();
+      },
       retireCompleteExportFocus: () => completeExportRef.current?.cancelIntendedAction(),
       setGuestGalleryFilter: (filter) => {
         const request: GuestGallerySettingsRequest = { filter, focus: false };
@@ -861,6 +890,7 @@ ManagerGalleryWorkspaceProps
   // CSS changes the host from heading chrome to the phone dock; the owning mode always portals its
   // one applicable control here, preserving that control's ref, pending state, and focus.
   const [actionDock, setActionDock] = useState<HTMLDivElement | null>(null);
+  const [libraryToolsOpen, setLibraryToolsOpen] = useState(false);
 
   const rootRef = useRef<HTMLElement>(null);
   useGalleryDock(rootRef);
@@ -879,11 +909,43 @@ ManagerGalleryWorkspaceProps
     }
   };
 
+  const libraryExportContent = <div className="gallery-header" hidden={mode !== 'library'}>
+    {exports.failure && <ErrorState message={exports.failure.message} recoveryHint={exports.failure.recoveryHint} onRetry={exports.onRetryLoad} />}
+    <GalleryExportControl
+      ref={completeExportRef}
+      job={exports.job}
+      activeJob={exports.activeJob}
+      download={exports.download}
+      resourceStatus={exports.status}
+      eventTimezone={event.eventTimezone}
+      managementExpiresAt={event.managementAccessExpiresAt}
+      currentSource={exports.currentSource}
+      onPrepare={exports.onPrepare}
+      onDownload={exports.onDownload}
+      onRetry={exports.onRetry}
+      live={false}
+      actionDock={mode === 'library' ? actionDock : null}
+      actionArea={dock => photoEntry('library', dock)}
+      actionAreaOwnsInitialAction={photoExports.capabilities?.enabled === true}
+      chooser={photoChooser('library')}
+    />
+  </div>;
+
   return <section className="manager-gallery" data-mode={mode} ref={rootRef} aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading">
-      <h2 id="gallery-workspace-title">{mode === 'library' ? 'Private Gallery' : 'Gallery'}</h2>
-      <p className="gallery-total">{event.storedMediaCount.toLocaleString()} delivered photos</p>
-      <div className="gallery-action" ref={setActionDock} />
+      <h2 id="gallery-workspace-title">{mode === 'library' ? 'Library' : 'Gallery'}</h2>
+      <p className="gallery-total">{event.storedMediaCount.toLocaleString()} {event.storedMediaCount === 1 ? 'photo' : 'photos'}</p>
+      <details
+        className="gallery-export-tools"
+        open={mode !== 'library' || libraryToolsOpen || photoExportTarget?.mode === 'library' || !!exports.failure}
+        onToggle={event => { if (mode === 'library') setLibraryToolsOpen(event.currentTarget.open); }}
+      >
+        <summary hidden={mode !== 'library'}>Exports</summary>
+        <div className="gallery-export-tools__body">
+          <div className="gallery-action" ref={setActionDock} />
+          {libraryExportContent}
+        </div>
+      </details>
     </div>
     <div className="gallery-control-row">
       <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
@@ -915,7 +977,7 @@ ManagerGalleryWorkspaceProps
         audiences, and a host has to be able to read either without opening the mode it belongs to.
         Below 761 the switch above already carries the Album count and the Guest gallery state, so
         those two restate it and stand down; the Album link is the one fact the switch cannot say. */}
-    {audienceSummary && <dl className="gallery-audience">
+    {audienceSummary && <dl className="gallery-audience" hidden={mode === 'library'}>
       <div className="gallery-audience__fact gallery-audience__fact--restated">
         <dt>Album</dt>
         <dd>{audienceSummary.albumPhotoCount} {audienceSummary.albumPhotoCount === 1 ? 'photo' : 'photos'}</dd>
@@ -938,30 +1000,6 @@ ManagerGalleryWorkspaceProps
       onRetry={() => void audience.reload()}
     />}
     <div className="gallery-private-mode" hidden={mode !== 'library'}>
-      <div className="gallery-header">
-        {exports.failure && <ErrorState
-          message={exports.failure.message}
-          recoveryHint={exports.failure.recoveryHint}
-          onRetry={exports.onRetryLoad}
-        />}
-        <GalleryExportControl
-          ref={completeExportRef}
-          job={exports.job}
-          activeJob={exports.activeJob}
-          download={exports.download}
-          resourceStatus={exports.status}
-          eventTimezone={event.eventTimezone}
-          currentSource={exports.currentSource}
-          onPrepare={exports.onPrepare}
-          onDownload={exports.onDownload}
-          onRetry={exports.onRetry}
-          live={false}
-          actionDock={mode === 'library' ? actionDock : null}
-          actionArea={dock => photoEntry('library', dock)}
-          actionAreaOwnsInitialAction={photoExports.capabilities?.enabled === true}
-          chooser={photoChooser('library')}
-        />
-      </div>
       <ManagerPrivateGallery
         ref={privateGalleryRef}
         key={`library:${galleryMutationEpoch}:${libraryEpoch}`}
@@ -992,6 +1030,7 @@ ManagerGalleryWorkspaceProps
         eventName={event.name}
         active={mode === 'album'}
         eventTimezone={event.eventTimezone}
+        managementExpiresAt={event.managementAccessExpiresAt}
         onGoToLibrary={() => onModeChange('library')}
         onOpenRecentlyDeleted={shared.onOpenRecentlyDeleted}
         invalidateGalleryAfterMutation={invalidateGalleryAfterMutation}
@@ -1030,6 +1069,14 @@ ManagerGalleryWorkspaceProps
         recoveryHint={sharedWriteFailure.recoveryHint}
         onRetry={retrySharedWrite ?? undefined}
       />}
+      {sharedWriteFailure && !sharedWriteFailure.retryable && <button
+        type="button"
+        className="text-button"
+        onClick={() => {
+          sharedGalleryRef.current?.focusStatusFilter();
+          if (sharedWriteFailureOwner.current !== null) clearSharedWriteFailure(sharedWriteFailureOwner.current);
+        }}
+      >Dismiss notice</button>}
       {sharedContinuationFailure && <ErrorState
         message={sharedContinuationFailure.message}
         recoveryHint={sharedContinuationFailure.recoveryHint}
@@ -1044,6 +1091,11 @@ ManagerGalleryWorkspaceProps
         ref={sharedGalleryRef}
         guestGalleryVisible={guestGalleryVisible}
         media={sharedPage?.media ?? []}
+        loading={sharedAnchorPending}
+        hasLoaded={sharedPage !== null}
+        pendingPublications={new Map([...sharedPendingPublications]
+          .filter(([key]) => key.startsWith(`${eventId}:`))
+          .map(([key, action]) => [key.slice(eventId.length + 1), action]))}
         status={sharedStatus}
         selected={sharedSelected}
         selectionAtLimit={sharedSelected.length >= MANAGER_BULK_SELECTION_MAX}

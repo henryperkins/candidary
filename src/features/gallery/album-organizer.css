@@ -86,9 +86,6 @@
 .manager-gallery[data-mode="album"] > .workspace-heading { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .manager-gallery[data-mode="album"] .gallery-audience { display: none; }
 .manager-gallery[data-mode="album"] .gallery-control-row { margin: 0 0 20px; justify-content: stretch; }
-.manager-gallery[data-mode="album"] .gallery-mode-switch { display: grid; width: 100%; padding: 3px; }
-.manager-gallery[data-mode="album"] .gallery-mode-switch button { display: inline-flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 6px; min-height: 44px; padding: 8px 5px; }
-.manager-gallery[data-mode="album"] .gallery-mode-switch__count { display: inline; font-size: inherit; }
 @media (max-width: 760px) {
   .album-delivery__header { gap: 12px; }
   .album-delivery__actions { width: 100%; display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); }

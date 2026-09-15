@@ -9,15 +9,17 @@ import { PUBLICATION_LABELS } from './ManagerSharedGallery';
 export const COMPACT_MOSAIC_LIMIT = 8;
 
 interface GalleryTileProps {
+  wall?: boolean;
   photo: ManagerGalleryMediaView;
   position: number;
   hero: boolean;
   eager: boolean;
   favoritePending: boolean;
+  mutationLocked?: boolean;
   selecting: boolean;
   selected: boolean;
   onOpen(photo: ManagerGalleryMediaView, origin: HTMLElement): void;
-  onFavorite(photo: ManagerGalleryMediaView): void;
+  onFavorite(photo: ManagerGalleryMediaView, origin?: HTMLElement, input?: 'keyboard' | 'pointer'): void;
   onToggleSelected(photo: ManagerGalleryMediaView): void;
 }
 
@@ -34,11 +36,13 @@ interface GalleryTileProps {
  * membership on one tile is how a host ends up adding the photo they meant to select.
  */
 function GalleryTile({
+  wall = false,
   photo,
   position,
   hero,
   eager,
   favoritePending,
+  mutationLocked = false,
   selecting,
   selected,
   onOpen,
@@ -47,6 +51,41 @@ function GalleryTile({
 }: GalleryTileProps) {
   const [failed, setFailed] = useState(false);
   const title = galleryPhotoTitle(photo);
+  if (wall) return <article
+    className={`gallery-photo gallery-mosaic__item${selected ? ' is-selected' : ''}`}
+    data-photo-id={photo.id}
+    data-gallery-anchor-id={photo.id}
+  >
+    <div className="gallery-photo__image">
+      {photo.previewAvailable && !failed
+        ? <img src={mediaPreview(photo.id)} alt="" width={photo.width ?? undefined} height={photo.height ?? undefined}
+            loading={eager && position <= 4 ? 'eager' : 'lazy'} decoding="async"
+            onError={() => setFailed(true)} />
+        : <div className="gallery-mosaic__placeholder"><ImageOff aria-hidden="true" /><span>Preview unavailable</span></div>}
+      <button
+        type="button"
+        className={`gallery-mosaic__open${selecting ? ' gallery-mosaic__select' : ''}`}
+        aria-label={selecting ? `${selected ? 'Deselect' : 'Select'} ${title}, from ${photo.guestName}` : `Open ${title}, from ${photo.guestName}`}
+        aria-pressed={selecting ? selected : undefined}
+        onClick={event => selecting ? onToggleSelected(photo) : onOpen(photo, event.currentTarget)}
+      >{selecting && <span className="gallery-mosaic__checkbox" aria-hidden="true">{selected && <Check />}</span>}</button>
+    </div>
+    <p className="gallery-photo__contributor" title={photo.guestName}>{photo.guestName}</p>
+    {!selecting && <button
+      type="button"
+      className="gallery-photo__album"
+      aria-pressed={photo.isFavorite}
+      aria-label={favoritePending
+        ? `${photo.isFavorite ? 'Removing' : 'Adding'} ${title} ${photo.isFavorite ? 'from' : 'to'} Album`
+        : photo.isFavorite ? `In album: Remove ${title} from Album` : `Add to album: ${title}`}
+      disabled={favoritePending || mutationLocked}
+      onClick={event => onFavorite(photo, event.currentTarget, event.detail === 0 ? 'keyboard' : 'pointer')}
+    >
+      {photo.isFavorite ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" />}
+      <span>{favoritePending ? photo.isFavorite ? 'Removing…' : 'Adding…' : photo.isFavorite ? 'In album' : 'Add to album'}</span>
+    </button>}
+    {selecting && <span className="gallery-photo__selection-state">{selected ? 'Selected' : photo.isFavorite ? 'In album' : 'Not selected'}</span>}
+  </article>;
   return <div
     className={`gallery-mosaic__item${hero ? ' gallery-mosaic__item--hero' : ''}${selected ? ' is-selected' : ''}`}
     data-photo-id={photo.id}
@@ -101,7 +140,7 @@ function GalleryTile({
             className="gallery-mosaic__favorite"
             aria-pressed={photo.isFavorite}
             aria-label={photo.isFavorite
-              ? `Remove ${title} from Album`
+              ? `In Album: Remove ${title} from Album`
               : `Pick ${title} for the Album`}
             disabled={favoritePending}
             onClick={() => onFavorite(photo)}
@@ -124,23 +163,27 @@ function GalleryTile({
 }
 
 interface GalleryMomentProps {
+  wall?: boolean;
   moment: MomentModel;
   timeZone: string;
   eager: boolean;
   favoritePendingIds: ReadonlySet<string>;
+  mutationLocked?: boolean;
   selecting: boolean;
   selectedIds: ReadonlySet<string>;
   onOpen(photo: ManagerGalleryMediaView, origin: HTMLElement): void;
-  onFavorite(photo: ManagerGalleryMediaView): void;
+  onFavorite(photo: ManagerGalleryMediaView, origin?: HTMLElement, input?: 'keyboard' | 'pointer'): void;
   onToggleSelected(photo: ManagerGalleryMediaView): void;
   onSelectMoment(photos: readonly ManagerGalleryMediaView[]): void;
 }
 
 export function GalleryMoment({
+  wall = false,
   moment,
   timeZone,
   eager,
   favoritePendingIds,
+  mutationLocked,
   selecting,
   selectedIds,
   onOpen,
@@ -149,7 +192,7 @@ export function GalleryMoment({
   onSelectMoment,
 }: GalleryMomentProps) {
   const [expanded, setExpanded] = useState(false);
-  const photos = expanded ? moment.photos : moment.photos.slice(0, COMPACT_MOSAIC_LIMIT);
+  const photos = wall || expanded ? moment.photos : moment.photos.slice(0, COMPACT_MOSAIC_LIMIT);
   const wholeMomentSelected = moment.photos.every((photo) => selectedIds.has(photo.id));
 
   return <section className="gallery-moment" aria-labelledby={`moment-heading-${moment.key}`}>
@@ -169,12 +212,14 @@ export function GalleryMoment({
     <div className="gallery-mosaic" id={`moment-photos-${moment.key}`}>
       {photos.map((photo, index) => (
         <GalleryTile
+          wall={wall}
           key={photo.id}
           photo={photo}
           position={index + 1}
           hero={eager && index === 0}
           eager={eager}
           favoritePending={favoritePendingIds.has(photo.id)}
+          mutationLocked={mutationLocked}
           selecting={selecting}
           selected={selectedIds.has(photo.id)}
           onOpen={onOpen}
@@ -186,7 +231,7 @@ export function GalleryMoment({
     {/* Spec 6.4 accepts the moment heading or the expansion control. The control is the one that
         survives the collapse, so focus stays on it: sending focus back up to the heading would make
         the host tab through every remaining tile again to reach the button they just pressed. */}
-    {moment.photos.length > COMPACT_MOSAIC_LIMIT && (
+    {!wall && moment.photos.length > COMPACT_MOSAIC_LIMIT && (
       <button
         type="button"
         className="gallery-moment__toggle"

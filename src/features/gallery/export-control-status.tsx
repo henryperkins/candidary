@@ -1,9 +1,32 @@
 import { useEffect, type ReactElement } from 'react';
 
 import type { ManagerExportErrorCode } from '../../../shared/contracts';
-import { eventDateTimeDisplay } from '../../app/event-date-time';
+import { hasExpiredExportLinks } from '../../../shared/export-expiry';
+import { eventDateTimeDisplay, formatEventDateTime } from '../../app/event-date-time';
 import { formatBytes } from '../../app/format';
 import type { ExportView } from '../../app/types';
+import { useDeadlineClock } from '../../app/use-deadline-clock';
+
+/** Keep a retained download consistent with the artifact route while its panel stays open. */
+export function useExportDisplayJob(job: ExportView | undefined, now?: number): ExportView | undefined {
+  const deadlineNow = useDeadlineClock(job?.state === 'ready' && job.expiresAt ? [job.expiresAt] : []);
+  return job && hasExpiredExportLinks(job, now ?? deadlineNow) ? { ...job, state: 'expired' } : job;
+}
+
+export function ExportManagementDeadline({ expiresAt, eventTimezone }: {
+  expiresAt?: string | null;
+  eventTimezone: string;
+}): ReactElement | null {
+  if (!expiresAt) return null;
+  const deadline = eventDateTimeDisplay(expiresAt, eventTimezone);
+  return <span>Management and exports end {deadline.dateTime === null
+    ? deadline.value : <time dateTime={deadline.dateTime}>{deadline.value}</time>}.</span>;
+}
+
+export function expiredExportMessage(job: ExportView, currentLabel: ExportCurrentSourceLabel, eventTimezone?: string): string {
+  const when = job.expiresAt && eventTimezone ? formatEventDateTime(job.expiresAt, eventTimezone) : null;
+  return `The download links expired${when ? ` ${when}` : ''}. Retry this prepared export, or prepare the current ${currentLabel}.`;
+}
 
 /** Exhaustive visible and announced labels shared by both export surfaces. */
 export const EXPORT_STATE_LABELS: Record<ExportView['state'], string> = {
@@ -112,6 +135,7 @@ function exportStateMessage(
   job: ExportView,
   currentLabel: ExportCurrentSourceLabel,
   now: number,
+  eventTimezone?: string,
 ): string {
   switch (job.state) {
     case 'queued':
@@ -123,7 +147,7 @@ function exportStateMessage(
     case 'failed':
       return exportFailureMessage(job.errorCode ?? 'EXPORT_FAILED', currentLabel);
     case 'expired':
-      return `The download links expired. Retry this prepared export, or prepare the current ${currentLabel}.`;
+      return expiredExportMessage(job, currentLabel, eventTimezone);
   }
 }
 
@@ -144,11 +168,12 @@ export function exportAnnouncementMessage(
   job: ExportView,
   currentLabel: ExportCurrentSourceLabel,
   now: number,
+  eventTimezone?: string,
 ): string {
   const progress = exportProgressMessage(job);
   return [
     EXPORT_STATE_LABELS[job.state],
-    exportStateMessage(job, currentLabel, now),
+    exportStateMessage(job, currentLabel, now, eventTimezone),
     progress,
   ].filter((part): part is string => part !== null).join(' ');
 }
@@ -170,16 +195,18 @@ export function ExportJobStatus({
   currentSource,
   currentLabel,
   now,
+  managementExpiresAt,
 }: {
   job: ExportView;
   eventTimezone: string;
   currentSource: ExportCurrentSource;
   currentLabel: ExportCurrentSourceLabel;
   now: number;
+  managementExpiresAt?: string | null;
 }): ReactElement {
   const prepared = eventDateTimeDisplay(job.snapshotAt, eventTimezone);
   const progress = exportProgressMessage(job);
-  const stateMessage = exportStateMessage(job, currentLabel, now);
+  const stateMessage = exportStateMessage(job, currentLabel, now, eventTimezone);
   const guestbookCount = job.guestbookEntryCount ?? 0;
   const guestbook = job.kind === 'complete'
     ? ` · ${guestbookCount.toLocaleString()} guestbook ${guestbookCount === 1 ? 'entry' : 'entries'}`
@@ -199,5 +226,6 @@ export function ExportJobStatus({
     {isTerminalExport(job)
       ? <span>{describeCurrentSource(currentSource, job.mediaCount, currentLabel)}</span>
       : null}
+    {isTerminalExport(job) && <ExportManagementDeadline expiresAt={managementExpiresAt} eventTimezone={eventTimezone} />}
   </>;
 }

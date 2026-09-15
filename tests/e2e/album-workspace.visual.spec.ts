@@ -69,7 +69,7 @@ async function stubAlbumWorkspace(page: Page, { saved = false, shareActive = fal
 async function openGallery(page: Page) {
   await page.goto(galleryUrl);
   await expect(page).toHaveURL(galleryUrl);
-  await expect(page.getByRole('heading', { name: 'Private Gallery' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
   await expect(page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }))
     .toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('group', { name: 'Gallery mode' })

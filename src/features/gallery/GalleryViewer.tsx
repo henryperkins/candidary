@@ -264,7 +264,7 @@ export function GalleryViewer({
         className="gallery-viewer__favorite"
         aria-pressed={photo.isFavorite}
         aria-label={photo.isFavorite
-          ? `Remove ${title} from Album`
+          ? `In Album: Remove ${title} from Album`
           : `Pick ${title} for the Album`}
         disabled={favoritePendingIds.has(photo.id)}
         onClick={() => onFavorite(photo)}

@@ -3,6 +3,7 @@ import { forwardRef, useImperativeHandle, useRef, useState, type Dispatch, type 
 import { createPortal } from 'react-dom';
 
 import { mediaPreview } from '../../app/api';
+import { LoadingState } from '../../components/States';
 import type { MediaView } from '../../app/types';
 import type { PublicationStatus } from '../../../shared/contracts';
 import { galleryPhotoTitle } from './gallery-timeline';
@@ -13,6 +14,7 @@ import {
 import { GUEST_TRAY_NOTE, SelectionTray } from './SelectionTray';
 import type { GalleryAnchor, PublicationFilter } from '../../app/manager-history-state';
 import { captureRenderedGalleryAnchor, restoreRenderedGalleryAnchor } from './gallery-anchor';
+import './guest-gallery.css';
 
 export type GallerySharedStatus = PublicationFilter;
 
@@ -53,6 +55,9 @@ const SHARED_EMPTY_COPY: Record<GallerySharedStatus, { title: string; body: stri
 interface ManagerSharedGalleryProps {
   guestGalleryVisible: boolean;
   media: MediaView[];
+  loading?: boolean;
+  hasLoaded?: boolean;
+  pendingPublications?: ReadonlyMap<string, 'publish' | 'hide'>;
   status: GallerySharedStatus;
   selected: string[];
   selectionAtLimit: boolean;
@@ -75,6 +80,7 @@ export interface ManagerSharedGalleryHandle {
   captureAnchor(effectiveVisibleTop: number): GalleryAnchor | null;
   restoreAnchor(anchor: GalleryAnchor, effectiveVisibleTop: number): 'item' | 'fallback';
   focusSettingsAction(): void;
+  focusStatusFilter(): void;
 }
 
 function SharedPhotoPreview({ item, title }: { item: MediaView; title: string }) {
@@ -102,6 +108,9 @@ function SharedPhotoPreview({ item, title }: { item: MediaView; title: string })
 export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, ManagerSharedGalleryProps>(function ManagerSharedGallery({
   guestGalleryVisible,
   media,
+  loading = false,
+  hasLoaded = true,
+  pendingPublications,
   status,
   selected,
   selectionAtLimit,
@@ -133,6 +142,7 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
       effectiveVisibleTop,
     ),
     focusSettingsAction: () => settingsActionRef.current?.focus(),
+    focusStatusFilter: () => rootRef.current?.querySelector<HTMLButtonElement>('.filter-tabs [aria-pressed="true"]')?.focus(),
   }), []);
 
   function changeStatus(next: GallerySharedStatus) {
@@ -159,7 +169,7 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
   }
 
   async function runBulk(action: 'publish' | 'hide') {
-    if (activeBulk !== null || selected.length === 0) return;
+    if (activeBulk !== null || selected.length === 0 || pendingPublications?.size) return;
     const count = selected.length;
     const progressive = action === 'publish' ? 'Publishing' : 'Hiding';
     setActiveBulk(action);
@@ -246,12 +256,15 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
     {!guestGalleryVisible && (actionDock
       ? createPortal(settingsAction, actionDock)
       : <div className="manager-notice">{settingsAction}</div>)}
-    {media.length === 0
+    {loading
+      ? <LoadingState label="Loading Guest gallery…" />
+      : !hasLoaded ? null : media.length === 0
       ? <div className="empty-state"><ImageIcon aria-hidden="true" /><h3>{empty.title}</h3><p>{empty.body}</p></div>
       : <>
           <div className="moderation-grid intake-grid">
             {media.map((item) => {
               const isSelected = selected.includes(item.id);
+              const pending = pendingPublications?.get(item.id);
               const selectionUnavailable = !isSelected && selectionAtLimit;
               // The card names the photo the way the private timeline does. Its controls keep naming
               // the file, because Live intake's identical cards act on files — download, delete — and
@@ -260,6 +273,7 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
               return <article
                 className={isSelected ? 'selected' : ''}
                 data-gallery-anchor-id={item.id}
+                aria-busy={pending !== undefined}
                 key={item.id}
               >
                 <div className="intake-photo">
@@ -268,7 +282,7 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
                     aria-label={`Select ${title}`}
                     aria-describedby={selectionUnavailable ? 'bulk-selection-status' : undefined}
                     checked={isSelected}
-                    disabled={selectionUnavailable}
+                    disabled={selectionUnavailable || pending !== undefined || activeBulk !== null}
                     onChange={() => commitSelection({ type: 'toggle', id: item.id, label: title })}
                   /></label>}
                   <SharedPhotoPreview item={item} title={title} />
@@ -284,17 +298,19 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
                       <button
                         type="button"
                         className="button button--approve"
-                        aria-label={`Publish ${item.originalFilename}`}
+                        aria-label={`${pending === 'publish' ? 'Publishing' : 'Publish'} ${item.originalFilename}`}
+                        disabled={pending !== undefined || activeBulk !== null}
                         onClick={() => void onChangePublication(item, 'publish')}
-                      ><Eye aria-hidden="true" /> Publish</button>
+                      ><Eye aria-hidden="true" /> {pending === 'publish' ? 'Publishing…' : 'Publish'}</button>
                     )}
                     {item.publicationStatus !== 'hidden' && (
                       <button
                         type="button"
                         className={`button ${item.publicationStatus === 'published' ? 'button--primary' : 'button--secondary'} gallery-shared__hide`}
-                        aria-label={`Hide ${item.originalFilename}`}
+                        aria-label={`${pending === 'hide' ? 'Hiding' : 'Hide'} ${item.originalFilename}`}
+                        disabled={pending !== undefined || activeBulk !== null}
                         onClick={() => void onChangePublication(item, 'hide')}
-                      ><EyeOff aria-hidden="true" /> Hide</button>
+                      ><EyeOff aria-hidden="true" /> {pending === 'hide' ? 'Hiding…' : 'Hide'}</button>
                     )}
                   </div>
                 </div>
@@ -313,6 +329,8 @@ export const ManagerSharedGallery = forwardRef<ManagerSharedGalleryHandle, Manag
     {selected.length > 0 && <SelectionTray
       count={selected.length}
       busy={activeBulk !== null}
+      mutationLocked={Boolean(pendingPublications?.size)}
+      editingDisabledReason={pendingPublications?.size ? 'Wait for the photo update to finish.' : undefined}
       label="Guest gallery"
       primary={hideLeads ? hideAction : publishAction}
       secondary={hideLeads ? publishAction : hideAction}

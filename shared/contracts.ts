@@ -360,6 +360,11 @@ export interface GuestGalleryMediaView {
   previewAvailable: boolean;
 }
 
+export interface GuestGalleryPage {
+  media: GuestGalleryMediaView[];
+  nextCursor: string | null;
+}
+
 /**
  * A guest's own contribution. They may see the filename they sent and how far
  * the transfer got, because both are theirs; `deleted` is absent because a

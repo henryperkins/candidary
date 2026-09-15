@@ -7,6 +7,7 @@ import {
 } from '../db/exports';
 import type { ExportRecord } from '../db/types';
 import { GuestbookRepository } from '../db/guestbook';
+import { EventsRepository } from '../db/events';
 import { PhotoExportsRepository } from '../db/photo-exports';
 import { MediaObjectWriteTombstoneRepository } from '../db/media-write-tombstones';
 import { buildExportManifest } from '../export/csv';
@@ -14,7 +15,7 @@ import { resolveFrozenAlbumOrder } from '../export/album-order';
 import { buildGuestbookPrivateCsv, type GuestbookPhotoArchiveLocation } from '../export/guestbook-csv';
 import { buildGuestbookHtml } from '../export/guestbook-html';
 import { partitionExportSnapshot } from '../export/partition';
-import { exportPartName, exportPath } from '../export/paths';
+import { exportPartDeliveryName, exportPartName, exportPath, exportPathWidth } from '../export/paths';
 import { buildExportZipStream } from '../export/zip-stream';
 import { multipartPut } from '../storage/multipart';
 
@@ -178,6 +179,9 @@ export async function processExport(
       : await immutableMediaEntries(exports, job.id);
     if (snapshot.length !== job.mediaCount) throw new Error('EXPORT_SNAPSHOT_CHANGED');
     const partitions = partitionExportSnapshot(snapshot, maxPartBytes);
+    const pathWidth = exportPathWidth(snapshot.length);
+    const event = await new EventsRepository(env.DB).getById(job.eventId);
+    if (!event) throw new Error('EXPORT_EVENT_DELETED');
     const storedParts: ReadyExportPart[] = [];
     const photoArchiveByMediaId = new Map<string, GuestbookPhotoArchiveLocation>();
     let processedMediaCount = 0;
@@ -206,17 +210,19 @@ export async function processExport(
         }
         if (job.kind === 'complete') part.media.forEach((media, index) => photoArchiveByMediaId.set(media.id, {
           partNumber: part.partNumber,
-          path: exportPath(media, index),
+          path: exportPath(media, processedMediaCount + index, pathWidth),
         }));
         const name = exportPartName(part.partNumber);
         const objectKey = `${baseKey}/${name}`;
         await assertActive();
         await inventoryExportWrite(objectKey);
         await assertActive();
-        await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries), {
+        await multipartPut(env.MEDIA_BUCKET, objectKey, buildExportZipStream(entries, {
+          startIndex: processedMediaCount, width: pathWidth,
+        }), {
           httpMetadata: {
             contentType: 'application/zip',
-            contentDisposition: `attachment; filename="candidary-${job.eventId}-${name}"`,
+            contentDisposition: `attachment; filename="${exportPartDeliveryName(event.eventDate, event.slug, part.partNumber, partitions.length)}"`,
           },
         });
         await assertActive();
@@ -245,7 +251,7 @@ export async function processExport(
       await assertActive();
       await inventoryExportWrite(manifestObjectKey);
       await assertActive();
-      await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions), {
+      await env.MEDIA_BUCKET.put(manifestObjectKey, buildExportManifest(partitions, pathWidth), {
         httpMetadata: {
           contentType: 'text/csv; charset=utf-8',
           contentDisposition: 'attachment; filename="candidary-export-manifest.csv"',

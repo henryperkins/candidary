@@ -8,10 +8,12 @@ import { GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE } from '../../shared/rsvp';
 import { api, mediaPreview } from '../app/api';
 import { eventThemeStyle } from '../app/event-theme-style';
 import { readGuestName, rememberGuestName } from '../app/guest-name-storage';
-import type { GuestContributionMediaView, GuestGalleryMediaView } from '../app/types';
+import type { GuestContributionMediaView } from '../app/types';
 import { Brand } from '../components/Brand';
 import { describeLoadFailure, ErrorState, LoadingState } from '../components/States';
 import type { LoadFailure } from '../components/States';
+import { GuestGalleryPhoto } from '../features/gallery/GuestGalleryPhoto';
+import { useGuestGallery } from '../features/gallery/useGuestGallery';
 import { GuestBeforeStart } from '../features/guest/GuestBeforeStart';
 import { GuestEventRefreshProvider } from '../features/guest/GuestEventRefreshContext';
 import { GuestWaiting } from '../features/guest/GuestWaiting';
@@ -29,12 +31,6 @@ import { useGuestUploadSession } from '../features/uploads/use-guest-upload-sess
    deliberate, not the dead fallback the stylesheet used to carry. */
 const DEFAULT_GUEST_THEME = resolveEventTheme(DEFAULT_EVENT_THEME_CONFIG);
 
-/* What a shared photo is called when its uploader wrote no caption. The gallery used to fall back to
-   the original filename, which is the uploader's device talking — `IMG_4471.HEIC`, or a name they
-   never meant to publish — and it was read aloud to every other guest as the image's alternative
-   text. The photograph is what is being shared; the filename never was. */
-const SHARED_PHOTO_LABEL = 'Shared photo';
-
 function guestLifecycleKey(event: GuestEventView): string {
   return JSON.stringify([
     event.phase,
@@ -42,6 +38,7 @@ function guestLifecycleKey(event: GuestEventView): string {
     event.rsvpAccess,
     event.guestReadSurfaces.available,
     event.guestReadSurfaces.reason,
+    event.galleryVisible,
     event.eventStartAt,
     event.rsvpDeadlineAt,
     event.eventTimezone,
@@ -93,10 +90,27 @@ export function GuestPhotoUpload({
 export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const { slug = '' } = useParams();
   const [event, setEvent] = useState<GuestEventView | null>(null);
-  const [gallery, setGallery] = useState<GuestGalleryMediaView[]>([]);
   const [contributions, setContributions] = useState<GuestContributionMediaView[]>([]);
   const [opened, setOpened] = useState({ gallery: false, contributions: false });
-  const [loaded, setLoaded] = useState({ gallery: false, contributions: false });
+  const [loaded, setLoaded] = useState({ contributions: false });
+  const galleryResource = useGuestGallery(slug, Boolean(
+    event?.slug === slug && event.guestReadSurfaces.available && event.galleryVisible && (fullscreen || opened.gallery),
+  ));
+  const gallery = galleryResource.media;
+  const galleryRecoveryFocus = useRef<HTMLElement>(null);
+  const galleryMoreControls = useRef<HTMLDivElement>(null);
+  const [galleryFocusTarget, setGalleryFocusTarget] = useState<string | null>(null);
+  useEffect(() => {
+    if (!galleryFocusTarget) return;
+    const photo = document.getElementById(`guest-gallery-photo-${galleryFocusTarget}`);
+    photo?.focus({ preventScroll: true });
+    photo?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  }, [galleryFocusTarget]);
+  async function loadMoreGallery() {
+    galleryMoreControls.current?.focus({ preventScroll: true });
+    const nextPhotoId = await galleryResource.loadMore();
+    if (nextPhotoId) setGalleryFocusTarget(nextPhotoId);
+  }
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [terminal, setTerminal] = useState(false);
   const [rsvpExpanded, setRsvpExpanded] = useState(false);
@@ -110,10 +124,6 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   const shownEvent = useRef<GuestEventView | null>(null);
   shownEvent.current = event;
 
-  const loadGallery = useCallback(async () => {
-    const result = await api<{ media: GuestGalleryMediaView[] }>(`/api/event/${slug}/gallery`);
-    setGallery(result.media);
-  }, [slug]);
   const loadContributions = useCallback(async () => {
     const result = await api<{ media: GuestContributionMediaView[] }>(`/api/event/${slug}/contributions`);
     setContributions(result.media);
@@ -127,16 +137,11 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
       const { event: eventView } = await api<{ event: GuestEventView; role: string }>(`/api/event/${slug}`);
       if (loadTicket.current !== ticket) return;
       setEvent(eventView);
-      if (fullscreen && eventView.guestReadSurfaces.available && eventView.galleryVisible) {
-        await loadGallery();
-        if (loadTicket.current !== ticket) return;
-        setLoaded((current) => ({ ...current, gallery: true }));
-      }
     } catch (caught) {
       if (loadTicket.current !== ticket) return;
       setFailure(describeLoadFailure(caught, 'guest', 'This event could not be loaded.'));
     }
-  }, [fullscreen, loadGallery, slug]);
+  }, [slug]);
 
   /* The lifecycle boundary refetch. It takes a ticket like every other load, so a slow answer that
      was overtaken cannot install itself, and it deliberately never touches `failure`: a background
@@ -169,13 +174,9 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
 
   function toggleExtra(kind: keyof typeof opened, isOpen: boolean) {
     setOpened((current) => ({ ...current, [kind]: isOpen }));
-    if (!isOpen || loaded[kind]) return;
-    if (kind === 'gallery' && !event?.galleryVisible) {
-      setLoaded((current) => ({ ...current, gallery: true }));
-      return;
-    }
+    if (kind === 'gallery' || !isOpen || loaded[kind]) return;
     setLoaded((current) => ({ ...current, [kind]: true }));
-    const request = kind === 'gallery' ? loadGallery() : loadContributions();
+    const request = loadContributions();
     void request.catch(() => setLoaded((current) => ({ ...current, [kind]: false })));
   }
 
@@ -193,21 +194,54 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
     recoveryHint={failure.recoveryHint}
     onRetry={failure.retryable ? () => void loadEvent() : undefined}
   /></main>;
-  if (!event) return <main className="centered-state"><Brand /><LoadingState /></main>;
+  if (!event || event.slug !== slug) return <main className="centered-state"><Brand /><LoadingState /></main>;
   const themeStyle = eventThemeStyle((event.theme ?? DEFAULT_GUEST_THEME).tokens);
+  const galleryFeedback = galleryResource.loading
+    ? <div className="guest-gallery-state"><LoadingState label="Loading shared photos…" /></div>
+    : galleryResource.failure
+      ? <div className="guest-gallery-state"><ErrorState
+          message={galleryResource.failure.message}
+          recoveryHint={galleryResource.failure.recoveryHint}
+          onRetry={galleryResource.failure.retryable ? () => {
+            galleryRecoveryFocus.current?.focus({ preventScroll: true });
+            galleryResource.retry();
+          } : undefined}
+        /></div>
+      : null;
+  const galleryMore = galleryResource.loaded && <div
+    className="guest-gallery-more"
+    ref={galleryMoreControls}
+    tabIndex={-1}
+    role="group"
+    aria-label="More shared photos"
+  >
+    {galleryResource.moreFailure
+      ? <div className="guest-gallery-state"><ErrorState
+          message={galleryResource.moreFailure.message}
+          recoveryHint={galleryResource.moreFailure.recoveryHint}
+          onRetry={galleryResource.moreFailure.retryable ? () => void loadMoreGallery() : undefined}
+        /></div>
+      : galleryResource.hasMore && <button
+          type="button"
+          className="button button--secondary"
+          disabled={galleryResource.loadingMore}
+          onClick={() => void loadMoreGallery()}
+        >{galleryResource.loadingMore ? 'Loading more photos…' : 'Load more photos'}</button>}
+    <span className="sr-only" role="status">{galleryResource.loadingMore ? 'Loading more shared photos.' : `${gallery.length} shared photos loaded${galleryResource.hasMore ? '. More are available.' : '.'}`}</span>
+  </div>;
   if (fullscreen) return <main className="fullscreen" style={themeStyle}>
     {/* The full-screen gallery is its own route and had no level-one heading at all, so a screen
         reader arrived with nothing naming the view. The name belongs to the page, not to the layout,
         so it is announced rather than drawn — the bar's approved copy is unchanged. */}
     <h1 className="sr-only">Shared gallery · {event.name}</h1>
-    <div className="fullscreen__bar"><Brand compact /><Link className="fullscreen__close" to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
+    <div className="fullscreen__bar"><Brand compact /><Link ref={(node) => { galleryRecoveryFocus.current = node; }} className="fullscreen__close" to={`/event/${slug}`} aria-label="Close full-screen gallery"><X aria-hidden="true" /></Link></div>
     {!event.guestReadSurfaces.available
       ? <p>{GUEST_READ_SURFACES_UNAVAILABLE_MESSAGE}</p>
       : !event.galleryVisible
         ? <p>The host is keeping the gallery private.</p>
-        : gallery.length
-          ? <div className="fullscreen__grid">{gallery.map((item) => <figure key={item.id}><img src={mediaPreview(item.id)} alt={item.caption || SHARED_PHOTO_LABEL} /><figcaption>{item.caption || SHARED_PHOTO_LABEL}</figcaption></figure>)}</div>
-          : <p>No shared photos yet.</p>}
+        : galleryFeedback ?? (gallery.length
+          ? <><div className="fullscreen__grid">{gallery.map((item, index) => <GuestGalleryPhoto key={item.id} photo={item} fullscreen eager={index < 3} />)}</div>{galleryMore}</>
+          : <p>No shared photos yet.</p>)}
   </main>;
 
   return <GuestEventRefreshProvider refreshEvent={recheckEvent}>
@@ -280,11 +314,11 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
         </details>}
 
         <details className="event-extra" onToggle={(toggle) => toggleExtra('gallery', toggle.currentTarget.open)}>
-          <summary><span>Shared gallery <small>{event.galleryVisible ? loaded.gallery ? `${gallery.length} shared` : 'Available' : 'Not shared yet'}</small></span><ChevronDown aria-hidden="true" /></summary>
+          <summary ref={galleryRecoveryFocus}><span>Shared gallery <small>{!event.galleryVisible ? 'Not shared yet' : galleryResource.loading ? 'Loading…' : galleryResource.failure ? 'Could not load photos' : galleryResource.loaded ? `${gallery.length}${galleryResource.hasMore ? '+' : ''} shared` : 'Available'}</small></span><ChevronDown aria-hidden="true" /></summary>
           {opened.gallery && <div className="event-extra__content">
-            {event.galleryVisible && gallery.length > 0
-              ? <><div className="secondary-actions"><Link className="text-link" to={`/event/${slug}/fullscreen`}><Expand aria-hidden="true" /> View full screen</Link></div><div className="photo-grid">{gallery.map((item) => <figure key={item.id}><img loading="lazy" src={mediaPreview(item.id)} alt={item.caption || SHARED_PHOTO_LABEL} /><figcaption><span>{item.caption || SHARED_PHOTO_LABEL}</span><small>by {item.guestName}</small></figcaption></figure>)}</div></>
-              : <div className="empty-state"><ImagePlus aria-hidden="true" /><h3>{event.galleryVisible ? 'The shared gallery is still quiet.' : 'The host is keeping the gallery private.'}</h3><p>Your delivery still goes straight to the host.</p></div>}
+            {galleryFeedback ?? (event.galleryVisible && gallery.length > 0
+              ? <><div className="secondary-actions"><Link className="text-link" to={`/event/${slug}/fullscreen`}><Expand aria-hidden="true" /> View full screen</Link></div><div className="photo-grid">{gallery.map((item) => <GuestGalleryPhoto key={item.id} photo={item} />)}</div>{galleryMore}</>
+              : <div className="empty-state"><ImagePlus aria-hidden="true" /><h3>{event.galleryVisible ? 'The shared gallery is still quiet.' : 'The host is keeping the gallery private.'}</h3><p>Your delivery still goes straight to the host.</p></div>)}
           </div>}
         </details>
 

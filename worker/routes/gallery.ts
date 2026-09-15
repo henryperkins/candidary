@@ -5,12 +5,12 @@ import { AuthService } from '../auth/service';
 import {
   MediaRepository,
   guestContributionMediaView,
-  guestGalleryMediaView,
 } from '../db/media';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
 import { assertGuestReadSurfacesAvailable } from '../http/event-view';
 import { privateJson } from '../http/private-json';
+import { decodeGuestGalleryCursor, encodeGuestGalleryCursor } from '../http/guest-gallery-cursor';
 
 export const galleryRoutes = new Hono<AppBindings>();
 
@@ -26,9 +26,16 @@ galleryRoutes.get('/event/:slug/gallery', async (context) => {
   if (!auth.event.galleryVisible && auth.session.role !== 'manager') {
     throw new ApiError('GALLERY_HIDDEN', 'The shared gallery is not visible yet.', 403);
   }
-  const media = await new MediaRepository(context.env.DB).listGallery(auth.event.id);
+  const cursor = context.req.query('cursor');
+  const page = await new MediaRepository(context.env.DB).listGallery(
+    auth.event.id,
+    cursor === undefined ? undefined : decodeGuestGalleryCursor(auth.event.id, cursor),
+  );
   return context.json({
-    data: { media: media.map(guestGalleryMediaView) },
+    data: {
+      media: page.media,
+      nextCursor: page.nextCursor ? encodeGuestGalleryCursor(auth.event.id, page.nextCursor) : null,
+    },
     requestId: context.get('requestId'),
   });
 });

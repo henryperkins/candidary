@@ -9,6 +9,7 @@ import type {
 } from '../../shared/contracts';
 import {
   ALBUM_MAX_ENTRIES,
+  GUEST_GALLERY_PAGE_SIZE,
   MANAGER_MEDIA_MAX_PAGE_SIZE,
   MANAGER_MEDIA_PAGE_SIZE,
   MEDIA_RECOVERY_CLEANUP_BATCH,
@@ -23,6 +24,7 @@ import {
 } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
 import type { GalleryCursor } from '../http/gallery-cursor';
+import type { GuestGalleryCursor } from '../http/guest-gallery-cursor';
 import type { ManagerMediaCursor } from '../http/media-cursor';
 import type { MediaRecord } from './types';
 import { MediaObjectWriteTombstoneRepository } from './media-write-tombstones';
@@ -1151,14 +1153,44 @@ export class MediaRepository {
     return result.meta.changes;
   }
 
-  async listGallery(eventId: string): Promise<MediaRecord[]> {
-    const result = await this.db.prepare(`
-      SELECT * FROM media
-      WHERE event_id = ? AND upload_state = 'stored' AND publication_status = 'published'
-        AND deleted_at IS NULL AND trashed_at IS NULL
-      ORDER BY published_at ASC, created_at ASC
-    `).bind(eventId).all<MediaRow>();
-    return result.results.map(mapMedia);
+  async listGallery(eventId: string, cursor?: GuestGalleryCursor): Promise<{
+    media: GuestGalleryMediaView[];
+    nextCursor: GuestGalleryCursor | null;
+  }> {
+    const limit = GUEST_GALLERY_PAGE_SIZE + 1;
+    type Row = Pick<MediaRow, 'id' | 'guest_name' | 'caption' | 'upload_state' | 'published_at' | 'created_at'>;
+    const read = async (predicate: string, bindings: string[], size: number) => {
+      const result = await this.db.prepare(`
+        SELECT id, guest_name, caption, upload_state, published_at, created_at FROM media
+        WHERE event_id = ? AND upload_state = 'stored' AND publication_status = 'published'
+          AND deleted_at IS NULL AND trashed_at IS NULL
+          ${predicate}
+        ORDER BY published_at ASC, created_at ASC, id ASC
+        LIMIT ?
+      `).bind(eventId, ...bindings, size).all<Row>();
+      return result.results;
+    };
+    // Keep the indexed columns bare so SQLite can seek all three key parts.
+    // Legacy NULL dates sort first; crossing their boundary needs at most two
+    // bounded seeks instead of a COALESCE expression that scans earlier rows.
+    const found = cursor?.publishedAt === null
+      ? await read('AND published_at IS NULL AND (created_at, id) > (?, ?)', [cursor.createdAt, cursor.id], limit)
+      : cursor
+        ? await read('AND (published_at, created_at, id) > (?, ?, ?)', [cursor.publishedAt, cursor.createdAt, cursor.id], limit)
+        : await read('', [], limit);
+    if (cursor?.publishedAt === null && found.length < limit) {
+      found.push(...await read('AND published_at IS NOT NULL', [], limit - found.length));
+    }
+    const rows = found.slice(0, GUEST_GALLERY_PAGE_SIZE);
+    const last = rows.at(-1);
+    return {
+      media: rows.map(row => guestGalleryMediaView({
+        id: row.id, guestName: row.guest_name, caption: row.caption, uploadState: row.upload_state,
+      })),
+      nextCursor: found.length > GUEST_GALLERY_PAGE_SIZE && last
+        ? { publishedAt: last.published_at, createdAt: last.created_at, id: last.id }
+        : null,
+    };
   }
 
   async countPublishedForGallerySummary(eventId: string): Promise<number> {

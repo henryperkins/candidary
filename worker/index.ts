@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 
-import { MAX_EXPORT_PART_SOURCE_BYTES } from '../shared/constants';
+import { MAX_EXPORT_PART_SOURCE_BYTES, MEDIA_TIMELINE_SENTINEL_REPAIR_BATCH } from '../shared/constants';
 import { createApp } from './app';
 import type { AppEnv } from './env';
 import { NotificationService } from './services/notifications';
@@ -172,6 +172,18 @@ export default {
             pending,
           }));
       const maintenance = maintainLegacyMediaObjects(env, executedAt);
+      // The bounded post-deploy repair migration 0016 promised: rows an older
+      // Worker finalized in the mixed window still carry the timeline sentinel
+      // and close the private gallery with MEDIA_STATE_CONFLICT until cleared.
+      // Bounded so a backlog drains across hourly passes; failure-isolated so a
+      // repair problem blocks nothing else on this trigger.
+      const sentinelRepair = new MediaRepository(env.DB)
+        .repairStoredTimelineSentinels(MEDIA_TIMELINE_SENTINEL_REPAIR_BATCH)
+        .catch(() => {
+          console.error(JSON.stringify({ event: 'timeline_sentinel_repair_failed' }));
+          return 0;
+        });
+      context.waitUntil(sentinelRepair);
       context.waitUntil(mediaPromotion.then(
         () => undefined,
         () => {
@@ -198,8 +210,8 @@ export default {
           console.error(JSON.stringify({ event: 'legacy_media_maintenance_failed' }));
         },
       ));
-      context.waitUntil(Promise.all([mediaPromotion, maintenance]).then(
-        async ([mediaPromotionSummary, maintenanceSummary]) => {
+      context.waitUntil(Promise.all([mediaPromotion, maintenance, sentinelRepair]).then(
+        async ([mediaPromotionSummary, maintenanceSummary, timelineSentinelsRepaired]) => {
           // Independent maintenance already guarantees liveness. This bounded
           // catch-up pass retains same-hour cleanup for aliases promotion
           // handed to permanent suppression while the first janitor ran.
@@ -212,6 +224,7 @@ export default {
             scheduledAt: scheduledAt.toISOString(),
             executedAt: executedAt.toISOString(),
             mediaPromotion: mediaPromotionSummary,
+            timelineSentinelsRepaired,
             ...maintenanceSummary,
           }));
         },

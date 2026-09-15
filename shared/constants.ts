@@ -17,6 +17,7 @@ export const UPLOAD_BATCH_SIZE = 20;
 export const MAX_EXPORT_PART_SOURCE_BYTES = 2 * 1024 * 1024 * 1024;
 export const MANAGER_MEDIA_PAGE_SIZE = 24;
 export const MANAGER_MEDIA_MAX_PAGE_SIZE = 50;
+export const GUEST_GALLERY_PAGE_SIZE = 24;
 export const MANAGER_BULK_SELECTION_MAX = 50;
 /**
  * How long a host-deleted photo stays recoverable, before the two limits that
@@ -32,6 +33,7 @@ export const MEDIA_RECOVERY_CLEANUP_BATCH = 100;
 // Host private Gallery: the one non-sentinel timeline instant per stored photo
 // and the bounded chronological page size shared by server and production client.
 export const MEDIA_TIMELINE_SENTINEL = '1970-01-01T00:00:00.000Z';
+export const MEDIA_TIMELINE_SENTINEL_REPAIR_BATCH = 500;
 export const PRIVATE_GALLERY_PAGE_SIZE = 48;
 /**
  * Which end of the day the host starts from. `newest` is the default because a host

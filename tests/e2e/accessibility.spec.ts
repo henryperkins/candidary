@@ -54,9 +54,9 @@ const NOTE = {
 const MANAGER_SECTIONS = [
   { name: 'Intake', heading: 'Live intake' },
   { name: 'RSVP', heading: 'Guest list and RSVPs' },
-  // Library is the mode the workspace opens in, and it names itself: `Private Gallery` over the
+  // Library is the mode the workspace opens in, and it names itself: `Library` over the
   // delivered photographs, `Gallery` once a mode with an audience is chosen.
-  { name: 'Gallery', heading: 'Private Gallery' },
+  { name: 'Gallery', heading: 'Library' },
   { name: 'Guestbook', heading: 'Guestbook from the day' },
   { name: 'Share', heading: 'Share your event' },
   { name: 'Settings', heading: 'Settings' },
@@ -2468,7 +2468,7 @@ test('manager Album Preview and the public Album keep their heading hierarchy ax
   await page.goto(`/manage/event/${EVENT_FIXTURE.id}`);
   await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
   await page.locator('.manager-nav nav button').filter({ hasText: 'Gallery' }).click();
-  await expect(page.getByRole('heading', { level: 2, name: 'Private Gallery', exact: true }))
+  await expect(page.getByRole('heading', { level: 2, name: 'Library', exact: true }))
     .toHaveCount(1);
   await galleryModeSegment(page, 'Album').click();
   const createAction = page.getByRole('button', { name: 'Create Album link' });

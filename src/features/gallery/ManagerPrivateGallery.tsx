@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, Check, Minus, Plus, Search, SquareDashedMousePointer, X } from 'lucide-react';
+import { Minus, Plus, Search, SquareDashedMousePointer, X } from 'lucide-react';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 import { flushSync } from 'react-dom';
 
@@ -28,6 +28,7 @@ import {
   restoreRenderedGalleryAnchor,
   type GalleryAnchorRestoreOutcome,
 } from './gallery-anchor';
+import './library-photo-wall.css';
 
 const SEARCH_MAX_CODE_POINTS = 120;
 
@@ -87,7 +88,7 @@ type GalleryRowsAction =
 
 interface GalleryNotice {
   message: string;
-  retry: 'replace' | 'append' | null;
+  retry: 'replace' | 'append' | { photo: ManagerGalleryMediaView } | null;
 }
 
 function galleryRowsReducer(state: GalleryRowsState, action: GalleryRowsAction): GalleryRowsState {
@@ -189,10 +190,6 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
 }, ref) {
   const [queryInput, setQueryInput] = useState('');
   const [query, setQuery] = useState('');
-  // Below 761 the field folds behind its own control at the head of the toolbar; from 761 the
-  // stylesheet keeps it in flow whatever this says. One state, read by `data-search` on the root.
-  const [searchOpen, setSearchOpen] = useState(false);
-  const focusSearchOnOpen = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [order, setOrder] = useState<GalleryTimelineOrder>(DEFAULT_GALLERY_TIMELINE_ORDER);
@@ -379,7 +376,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     ) return;
     handledResultsFocusEpoch.current = resultsFocusEpoch;
     if (rows.length > 0) {
-      resultsRef.current?.querySelector<HTMLElement>('h3')?.focus();
+      resultsRef.current?.querySelector<HTMLElement>('.gallery-mosaic__open, h3')?.focus();
     } else {
       emptyRef.current?.focus();
     }
@@ -393,7 +390,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
           `[data-photo-id="${request.targetId}"] .gallery-mosaic__open`,
         )
       : emptyRef.current;
-    (target ?? resultsRef.current?.querySelector<HTMLElement>('h3'))?.focus();
+    (target ?? resultsRef.current?.querySelector<HTMLElement>('.gallery-mosaic__open, h3'))?.focus();
     dispatchRows({ type: 'focus-complete', sequence: request.sequence });
   }, [rowState.focusRequest]);
 
@@ -521,8 +518,8 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     viewerOrigin.current = null;
   }
 
-  async function toggleFavorite(photo: ManagerGalleryMediaView) {
-    if (favoriteRequests.current.has(photo.id)) return;
+  async function toggleFavorite(photo: ManagerGalleryMediaView, origin?: HTMLElement, input: 'keyboard' | 'pointer' = 'pointer') {
+    if (favoriteRequests.current.has(photo.id) || !undo.canPresent) return;
     const next = !photo.isFavorite;
     if (next && albumEntryCount >= ALBUM_MAX_ENTRIES) {
       setNotice({
@@ -533,17 +530,27 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     }
     favoriteRequests.current.add(photo.id);
     setFavoritePendingIds(new Set(favoriteRequests.current));
+    undo.dismiss();
+    setNotice(null);
 
     const requestGeneration = loadGeneration.current;
     const confirmed = photo.isFavorite;
-    commitRows({ type: 'favorite', id: photo.id, favorite: next });
     try {
       const result = await api<{ media: ManagerGalleryMediaView }>(
         `/api/manage/events/${eventId}/media/${photo.id}/favorite`,
         { method: 'PUT', body: JSON.stringify({ favorite: next }) },
       );
+      if (result.media.isFavorite !== confirmed) {
+        undo.present({
+          eventId,
+          message: next ? 'Added to album.' : 'Removed from album.',
+          durationMs: UNDO_WINDOW_MS,
+          input,
+          run: createAlbumPicksInverse(eventId, [photo.id], confirmed, invalidateGalleryAfterMutation),
+        }, { fallback: origin ?? rootRef.current });
+      }
       if (requestGeneration !== loadGeneration.current) {
-        // The write is authoritative even when its optimistic row belonged to a query
+        // The write is authoritative even when its original row belonged to a query
         // that has since been replaced. Do not project that old row into the new query;
         // invalidate the shared audience summary and refetch the query on screen.
         onPicksChanged();
@@ -574,7 +581,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       commitRows({ type: 'favorite', id: photo.id, favorite: confirmed });
       setNotice({
         message: errorMessage(caught, 'The manager action could not be completed.'),
-        retry: null,
+        retry: { photo: { ...photo, isFavorite: confirmed } },
       });
     } finally {
       favoriteRequests.current.delete(photo.id);
@@ -617,18 +624,6 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     setQuery(trimmed);
     if (trimmed === query) setRetryEpoch((current) => current + 1);
   }
-
-  /** A tap before typing is the whole cost of the fold, so the field takes focus as it opens. */
-  function toggleSearch() {
-    focusSearchOnOpen.current = !searchOpen;
-    setSearchOpen(!searchOpen);
-  }
-
-  useLayoutEffect(() => {
-    if (!searchOpen || !focusSearchOnOpen.current) return;
-    focusSearchOnOpen.current = false;
-    searchInputRef.current?.focus();
-  }, [searchOpen]);
 
   function clearSearch() {
     setQueryInput('');
@@ -891,6 +886,10 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
 
   function retryNotice() {
     if (!notice?.retry) return;
+    if (typeof notice.retry === 'object') {
+      void toggleFavorite(notice.retry.photo);
+      return;
+    }
     if (notice.retry === 'append') {
       void loadMore();
       return;
@@ -922,9 +921,9 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       </div>;
     } else if (favoritesOnly) {
       content = <div className="empty-state">
-        <h3 ref={emptyRef} tabIndex={-1}>No photos are In Album yet.</h3>
+        <h3 ref={emptyRef} tabIndex={-1}>Your album is waiting for its first photo.</h3>
         <p>
-          Choosing <strong>Pick</strong> on a photo makes it In Album for every host on this event.
+          Choose <strong>Add to album</strong> on a photo to start.
           It does not publish to the Guest gallery.
         </p>
         <button type="button" className="button button--secondary" onClick={toggleFavorites}>Show every photo</button>
@@ -938,17 +937,19 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   } else {
     content = <div ref={resultsRef}>
       <GalleryTimeline
+        wall
         key={`${query}\u0000${favoritesOnly ? 'favorites' : 'all'}\u0000${order}`}
         photos={rows}
         timeZone={event.eventTimezone}
         hasMore={cursor !== null}
         loadingMore={loadingMore}
         favoritePendingIds={favoritePendingIds}
+        mutationLocked={!undo.canPresent}
         selecting={selecting}
         selectedIds={onPhotoExport ? new Set(rows.filter(photo => isPhotoSelected(photoSelection, photo.id)).map(photo => photo.id)) : selectedIds}
         onLoadMore={() => void loadMore()}
         onOpen={openViewer}
-        onFavorite={(photo) => void toggleFavorite(photo)}
+        onFavorite={(photo, origin, input) => void toggleFavorite(photo, origin, input)}
         onToggleSelected={toggleSelected}
         onSelectMoment={toggleMoment}
       />
@@ -959,15 +960,16 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     ? null
     : rows.findIndex((photo) => photo.id === viewerPhotoId);
 
-  return <div ref={rootRef} className="gallery-private" data-search={searchOpen ? 'open' : 'collapsed'}>
+  return <div ref={rootRef} className="gallery-private gallery-private--wall">
     <form className="gallery-search" role="search" onSubmit={submitSearch}>
-      <label htmlFor="gallery-search-input">Find photos</label>
+      <label className="sr-only" htmlFor="gallery-search-input">Find photos</label>
       <div className="gallery-search__field">
         <input
           id="gallery-search-input"
           ref={searchInputRef}
           value={queryInput}
-          placeholder="Contributor, caption, or filename"
+          placeholder="Search photos"
+          aria-describedby="library-search-hint"
           enterKeyHint="search"
           onChange={(change) => setQueryInput(change.target.value)}
         />
@@ -980,56 +982,24 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
           <span className="gallery-search__submit-label">Search</span>
         </button>
       </div>
+      <span id="library-search-hint" className="sr-only">Search by contributor, caption, or filename.</span>
+      {query && rows.length > 0 && <button type="button" className="text-button library-search-clear" onClick={clearSearch}>Clear search</button>}
     </form>
-    {/* Row B. One rail, in the order a host works: narrow the set by picks, order it, then act on
-        what is shown. Below 761 every control here is icon-sized — worded, the row measured 442px
-        against a 331px content box at 390 — so each carries its word in `.gallery-toolbar__word`,
-        which the stylesheet takes off screen there while the accessible name keeps it. `Clear`
-        follows the reveal because both belong to the field. */}
-    <div className="gallery-toolbar">
-      {/* Named `Search photos`, not `Search`: the form's own submit already answers to that. From
-          761 the field is always in flow and the stylesheet does not draw this control, so its
-          `aria-expanded` is read only where the fold exists. */}
-      <button
-        type="button"
-        className="button button--secondary gallery-search__reveal"
-        aria-label="Search photos"
-        aria-expanded={searchOpen}
-        aria-controls="gallery-search-input"
-        onClick={toggleSearch}
-      ><Search aria-hidden="true" /><span className="gallery-search__reveal-label">Search</span></button>
-      {query && <button type="button" className="text-button" onClick={clearSearch}>Clear</button>}
-      {/* The count lives here rather than in the tray. In the flow it covers nothing, and it is
-          the one place a host can see how big the album has grown without leaving the photographs
-          they are picking from. It is its own span so the brackets can be drawn only beside a
-          visible word; the accessible name is `Album picks (n)` at every width regardless. */}
-      <button
-        type="button"
-        className="button button--secondary gallery-search__favorites"
-        aria-pressed={favoritesOnly}
-        aria-label={pickCount > 0 ? `Album picks (${pickCount})` : 'Album picks'}
-        onClick={toggleFavorites}
-      ><Check aria-hidden="true" /><span className="gallery-toolbar__word">Album picks</span>{pickCount > 0 && <span className="gallery-toolbar__count">{pickCount}</span>}</button>
-      {/* Named for the photograph the host lands on, not for the sort key: "Newest first" opens on
-          the last dance, "Earliest first" on the empty room. Below 761 the two words become the
-          arrow that means them — down for newest, up for earliest — and the words stay in the
-          accessible name, which still contains the visible word, so the two never disagree. */}
-      <div className="gallery-order" role="group" aria-label="Photo order">
-        <button
-          type="button"
-          aria-pressed={order === 'newest'}
-          aria-label="Newest first"
-          className={order === 'newest' ? 'active' : ''}
-          onClick={() => chooseOrder('newest')}
-        ><ArrowDown aria-hidden="true" /><span className="gallery-toolbar__word">Newest</span></button>
-        <button
-          type="button"
-          aria-pressed={order === 'earliest'}
-          aria-label="Earliest first"
-          className={order === 'earliest' ? 'active' : ''}
-          onClick={() => chooseOrder('earliest')}
-        ><ArrowUp aria-hidden="true" /><span className="gallery-toolbar__word">Earliest</span></button>
-      </div>
+    <div className="library-toolbar">
+      <label className="library-filter">
+        <span className="sr-only">Photos shown</span>
+        <select value={favoritesOnly ? 'album' : 'all'} onChange={() => toggleFavorites()}>
+          <option value="all">All photos</option>
+          <option value="album">In album ({pickCount})</option>
+        </select>
+      </label>
+      <label className="library-sort">
+        <span className="sr-only">Photo order</span>
+        <select value={order} onChange={event => chooseOrder(event.target.value as GalleryTimelineOrder)}>
+          <option value="newest">Newest first</option>
+          <option value="earliest">Earliest first</option>
+        </select>
+      </label>
       <button
         type="button"
         ref={selectToggleRef}
@@ -1037,7 +1007,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
         aria-pressed={selecting}
         aria-label={selecting ? 'Done selecting' : 'Select photos'}
         onClick={toggleSelecting}
-      ><SquareDashedMousePointer aria-hidden="true" /><span className="gallery-toolbar__word">{selecting ? 'Done selecting' : 'Select photos'}</span></button>
+      ><SquareDashedMousePointer aria-hidden="true" /><span className="sr-only">{selecting ? 'Done selecting' : 'Select photos'}</span></button>
     </div>
     {/* Under the row, not in it. `Select all n loaded photos` appears only while a selection runs
         and it is a sentence with no short form: in the row it took the phone's four controls from

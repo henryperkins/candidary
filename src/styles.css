@@ -887,7 +887,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-control-row .gallery-mode-switch { margin-top: 0; }
 .manager-gallery > .gallery-control-row + .state-card--error { width: 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .gallery-audience-summary { margin: 10px 0 0; color: var(--ink); font-size: .8rem; line-height: 1.4; }
-.manager-gallery > .workspace-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.manager-gallery > .workspace-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
 /* Both Gallery switches are pressed-state controls in the same workspace, so the selected pill is
    declared once here rather than twice. `.filter-tabs` has no other user, and the mode switch and the
    publication filter must never drift apart. */
@@ -910,10 +910,16 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .gallery-shared__preview-fallback span { font-size: .75rem; }
 .gallery-shared .manager-notice { display: grid; gap: 8px; justify-items: start; }
 .gallery-shared .manager-notice .text-button { min-width: 44px; min-height: 44px; justify-self: start; }
+.gallery-shared .moderation-grid article { display: flex; flex-direction: column; min-width: 0; }
+.gallery-shared .moderation-grid .intake-photo { flex-shrink: 0; }
+.gallery-shared .moderation-grid .intake-photo + div { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.gallery-shared .moderation-grid .publication { align-self: flex-start; }
 .gallery-shared .moderation-grid article > div > .intake-card-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 6px;
+  margin-top: auto;
+  padding-top: 10px;
 }
 .gallery-shared .moderation-grid article .intake-card-actions button,
 .gallery-shared .moderation-grid article .intake-card-actions button:nth-child(2),
@@ -1852,6 +1858,28 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-exits h3 { margin: 0; font-size: 1.2rem; letter-spacing: -.015em; }
 .album-exits__controls { padding-top: 8px; display: flex; flex-wrap: wrap; gap: 12px; }
 .album-exits__controls > .button { min-height: 48px; }
+.album-destination-rail { padding: 18px; display: grid; gap: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); }
+.album-destination-rail__heading { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 10px 20px; }
+.album-destination-rail__heading h4 { margin: 0; font-size: 1rem; letter-spacing: -.01em; }
+.album-destination-rail__heading p { margin: 4px 0 0; color: var(--muted); font-size: .8rem; line-height: 1.45; }
+.album-destination-rail__ready { min-height: 28px; padding: 4px 8px; display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; background: var(--moss-soft); color: var(--completion-ink); font-size: .72rem; font-weight: 700; }
+.album-destination-rail__ready svg { width: 15px; height: 15px; }
+.album-destination-rail__choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.album-destination { min-width: 0; min-height: 76px; padding: 12px; display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--field); color: var(--ink); text-align: left; cursor: pointer; transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease; }
+.album-destination:hover:not(:disabled) { border-color: var(--denim); background: var(--denim-soft); transform: translateY(-1px); }
+.album-destination:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.album-destination:disabled { cursor: not-allowed; opacity: .58; }
+.album-destination--selected { border-color: var(--denim); background: var(--denim-soft); box-shadow: inset 0 0 0 1px var(--denim); }
+.album-destination--download { background: var(--chestnut); border-color: var(--chestnut); color: var(--paper); }
+.album-destination--download:hover:not(:disabled) { background: var(--chestnut-strong); border-color: var(--chestnut-strong); }
+.album-destination__icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; background: var(--paper); color: var(--denim); }
+.album-destination--download .album-destination__icon { background: rgb(255 255 255 / 16%); color: var(--paper); }
+.album-destination__icon svg { width: 18px; height: 18px; }
+.album-destination__copy { min-width: 0; display: grid; gap: 3px; }
+.album-destination__copy strong { font-size: .82rem; line-height: 1.25; }
+.album-destination__copy small { color: var(--muted); font-size: .7rem; line-height: 1.35; overflow-wrap: anywhere; }
+.album-destination--download .album-destination__copy small { color: rgb(255 255 255 / 78%); }
+.album-destination-rail__selection { margin: 0; color: var(--completion-ink); font-size: .8rem; font-weight: 700; }
 /* Current Album first, prepared download second, then the other Album exits.
    The same source order carries through keyboard navigation and narrow layouts. */
 .album-exits > .album-export { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); justify-items: stretch; gap: 24px; }
@@ -1882,6 +1910,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 @media (max-width: 560px) {
   .album-export__actions > .button, .album-export__actions > .photo-export-entry { width: 100%; }
   .album-export__actions .photo-export-entry > .button { width: 100%; }
+  .album-destination-rail__choices { grid-template-columns: minmax(0, 1fr); }
 }
 .album-share { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); }
 .album-share p { margin: 0; color: var(--muted); font-size: .82rem; line-height: 1.5; }
@@ -2095,17 +2124,23 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
    rest is photographs. Ported from the design system's `templates/gallery-workspace`.
    ═════════════════════════════════════════════════════════════════════════════════════════════ */
 
-/* Each segment carries its own count, so the switch answers how many and where without costing a
-   second row. */
-.gallery-mode-switch button { display: grid; gap: 1px; align-content: center; justify-items: center; line-height: 1.15; }
-/* No opacity: muted ink has 0.37 of headroom over 4.5 on this ground and none to lend. At .72 the
-   count measured 2.86:1. The count is set apart by size and weight, which cost nothing. */
-.gallery-mode-switch__count { font-weight: 500; font-size: .75rem; letter-spacing: .01em; }
-/* The sub-line must not make the band taller. Two 14px lines and a 1px gap are 29px, so the
-   segment's own padding comes down to keep the 44px floor — and not a pixel of it — deciding the
-   height of the one thing on this surface that is pinned. A taller pinned row is a row that
-   covers the control beneath it once the host scrolls. */
-.gallery-mode-switch--three button { padding-block: 6px; }
+/* The same navigation keeps its geometry in all three modes. Counts sit beside their labels
+   when space permits and wrap within their segment when text is enlarged. */
+.manager-gallery > .gallery-control-row { justify-content: stretch; }
+.manager-gallery .gallery-mode-switch { display: grid; width: 100%; max-width: 540px; padding: 3px; }
+.manager-gallery .gallery-mode-switch button {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 4px 6px;
+  min-height: 44px;
+  padding: 8px 5px;
+  line-height: 1.3;
+}
+.manager-gallery .gallery-mode-switch__count { display: inline; font-size: inherit; font-weight: 500; font-variant-numeric: tabular-nums; }
+.manager-gallery .gallery-mode-switch button:hover:not(.active):not(:disabled) { background: var(--paper); color: var(--chestnut); }
+.manager-gallery .gallery-mode-switch button:focus-visible { outline: 2px solid var(--focus); outline-offset: -3px; }
 
 /* Three labelled facts, never blended into one sentence: an event has two independent audiences —
    people with the Album link, and event guests — and a host must be able to read either without
