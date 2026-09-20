@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
-import { MANAGER_MEDIA_PAGE_SIZE, MAX_EVENT_BYTES, MAX_EVENT_MEDIA } from '../../shared/constants';
+import { MANAGER_MEDIA_PAGE_SIZE, MAX_EVENT_BYTES, MAX_EVENT_MEDIA, MAX_EVENT_GUEST_NOTES } from '../../shared/constants';
 import type { ManagerGuestbookItem } from '../../shared/contracts';
 import type { ExportView } from '../../src/app/types';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
@@ -19,7 +19,7 @@ import {
 } from './helpers/geometry';
 
 const managerUrl = `/manage/event/${EVENT_FIXTURE.id}`;
-const DESTINATIONS = ['Intake', 'RSVP', 'Gallery', 'Guestbook', 'Share', 'Settings'] as const;
+const DESTINATIONS = ['Gallery', 'RSVP', 'Guestbook', 'Share', 'Settings'] as const;
 // The compact rail band: 761 opens it and 1100 is the last width before the wide rails return.
 const RAIL_WIDTHS = [761, 768, 780, 860, 1024, 1100];
 // 1134 is the first width the old fixed tracks fit inside; everything under it pushed the page sideways.
@@ -41,11 +41,11 @@ const NOTE = {
   moderationStatus: 'pending' as const,
   createdAt: '2026-09-19T20:00:00Z',
 };
-// A count renders only when there is something to count, so both counted destinations carry one.
+// A count renders only when there is something to count, so Guestbook carries one in this fixture.
 const mediaPages = { first: { media: makeMedia(2), nextCursor: null } };
 const managerFixture = { mediaPages, messages: [NOTE], event: { storedMediaCount: 2 } };
 
-// The Intake and Guestbook buttons carry a count, so their accessible name is not the destination alone.
+// Guestbook can carry a count, so destination lookup follows its visible label.
 function destination(page: Page, name: string) {
   return page.locator('.manager-nav nav button').filter({ hasText: name });
 }
@@ -75,7 +75,7 @@ async function expectContained(page: Page, width: number) {
 async function openManager(page: Page) {
   await stubManagerRoutes(page, managerFixture);
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
 }
 
 // The focused server's CSP blocks Vite's injected React Refresh preamble. These inert globals let
@@ -161,7 +161,7 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
     exports: [],
   });
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
 
   const controls = page.locator('.manager-nav nav button');
   await expect(controls).toHaveCount(DESTINATIONS.length);
@@ -204,7 +204,7 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
     if (!rows.some((rowStart) => Math.abs(rowStart - box.y) <= GEOMETRY_TOLERANCE)) rows.push(box.y);
     return rows;
   }, []);
-  // One swipeable row, not a wrapped grid. Six destinations wrapped into two rows of three cost
+  // One swipeable row, not a wrapped grid. Wrapping destinations into two rows costs
   // 189px of a 568px screen before the product said anything; one row a thumb moves along costs 52.
   expect(rowStarts, 'Manager destinations render as exactly one row').toHaveLength(1);
   for (let index = 0; index < controlBoxes.length; index += 1) {
@@ -240,11 +240,10 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
   }
   await expectContained(page, 320);
 
-  const managerHeadingMargin = await page.locator('#intake-title').evaluate((element) =>
+  const managerHeadingMargin = await page.locator('#gallery-workspace-title').evaluate((element) =>
     Number.parseFloat(getComputedStyle(element).scrollMarginTop));
 
-  await destination(page, 'Gallery').click();
-  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
   const managerNav = page.locator('.manager-nav');
   const controlRow = page.locator('.gallery-control-row');
   const mosaicControl = page.locator('.gallery-mosaic__open').last();
@@ -309,14 +308,14 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
 test('manager shell and media grid turn over exactly at their breakpoints', async ({ page }) => {
   await openManager(page);
   const shell = page.locator('.manager-shell--intake');
-  const mediaGrid = page.locator('.moderation-grid');
+  const mediaGrid = page.locator('.gallery-photo-wall');
 
   // Under 761 the manager is the stacked two-tier header, so the shell resolves no grid tracks at all.
-  // The media grid turns over inside it at 431 regardless, which is the manager's fourth breakpoint.
+  // Library keeps its two-column phone wall until the rail opens at 761.
   for (const width of ONE_COLUMN_WIDTHS) {
     await page.setViewportSize({ width, height: 844 });
     expect(await measureGridTracks(shell), `shell tracks at ${width}`).toEqual([]);
-    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(1);
+    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(2);
     await expectContained(page, width);
   }
 
@@ -332,7 +331,7 @@ test('manager shell and media grid turn over exactly at their breakpoints', asyn
     const tracks = await measureGridTracks(shell);
     expect(tracks.length, `shell tracks at ${width}`).toBe(2);
     expect(tracks[0], `rail width at ${width}`).toBeCloseTo(104, 0);
-    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(2);
+    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(3);
   }
 
   for (const width of WIDE_WIDTHS) {
@@ -341,23 +340,24 @@ test('manager shell and media grid turn over exactly at their breakpoints', asyn
     expect(tracks.length, `shell tracks at ${width}`).toBe(3);
     expect(tracks[0], `rail width at ${width}`).toBeCloseTo(184, 0);
     expect(tracks[2], `utility rail width at ${width}`).toBeCloseTo(330, 0);
-    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`).toBe(3);
+    expect((await measureGridTracks(mediaGrid)).length, `media columns at ${width}`)
+      .toBe(width >= 1440 ? 4 : 3);
   }
 });
 
-test('Intake photos use a compact mobile crop without shrinking card actions', async ({ page }) => {
+test('Library photos keep their square mobile crop without shrinking tile actions', async ({ page }) => {
   await openManager(page);
 
   for (const width of [320, 390]) {
     await page.setViewportSize({ width, height: 844 });
-    const photo = page.locator('.intake-grid .intake-photo > img').first();
+    const photo = page.locator('.gallery-photo-wall .gallery-photo__image > img').first();
     const bounds = await photo.boundingBox();
-    if (!bounds) throw new Error(`The Intake photo requires rendered bounds at ${width}.`);
-    expect(bounds.width / bounds.height, `Intake photo crop at ${width}`).toBeGreaterThanOrEqual(1.7);
+    if (!bounds) throw new Error(`The Library photo requires rendered bounds at ${width}.`);
+    expect(bounds.width / bounds.height, `Library photo crop at ${width}`).toBeCloseTo(1, 1);
     await expectTouchTargets(
       page,
-      '.intake-grid article:first-of-type .intake-card-actions a, .intake-grid article:first-of-type .intake-card-actions button',
-      `compact Intake card actions at ${width}`,
+      '.gallery-photo-wall article:first-of-type .gallery-mosaic__open, .gallery-photo-wall article:first-of-type .gallery-photo__album',
+      `Library tile actions at ${width}`,
     );
     await expectContained(page, width);
   }
@@ -398,8 +398,7 @@ test('a new Album section enters the mobile viewport without focus-induced scrol
     },
   });
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  await destination(page, 'Gallery').click();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
   await page.getByRole('group', { name: 'Gallery mode' })
     .getByRole('button', { name: /^Album, 10$/u }).click();
 
@@ -479,7 +478,8 @@ test('the lifecycle facts each stay on one line for an event at capacity', async
     event: { storedMediaCount: MAX_EVENT_MEDIA, storedBytes: MAX_EVENT_BYTES },
   });
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
+  await page.getByText('Event details', { exact: true }).click();
   const facts = page.locator('.lifecycle p');
   await expect(facts).toHaveCount(3);
 
@@ -520,25 +520,28 @@ test('manager navigation keeps the unresolved Guestbook count visible on both si
 // The badge is a fixed-size box no containment assertion can reach: the digits that leave it are an
 // anonymous box, not an element, so `measureViewportEscapes` and the document scan both see nothing.
 // Only the badge's own scroll width reports it, and only the documented cap makes it happen.
-test('the intake count badge holds the whole photo cap at every width', async ({ page }) => {
+test('the Guestbook count badge holds the whole note cap at every width', async ({ page }) => {
   await stubManagerRoutes(page, {
     mediaPages,
     messages: [NOTE],
-    event: { storedMediaCount: MAX_EVENT_MEDIA, storedBytes: MAX_EVENT_BYTES },
+    guestbook: { summary: {
+      needsReviewCount: MAX_EVENT_GUEST_NOTES, sharedCount: 0, hiddenCount: 0,
+      deletedCount: 0, galleryVisible: true,
+    } },
   });
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  const count = destination(page, 'Intake').locator('.manager-nav__count');
-  await expect(count).toHaveText(String(MAX_EVENT_MEDIA));
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
+  const count = destination(page, 'Guestbook').locator('.manager-nav__count');
+  await expect(count).toHaveText(String(MAX_EVENT_GUEST_NOTES));
 
   for (const width of [...ONE_COLUMN_WIDTHS, ...TWO_COLUMN_WIDTHS, ...RAIL_WIDTHS, ...WIDE_WIDTHS]) {
     await page.setViewportSize({ width, height: 900 });
     const badge = await measureOverflow(count);
-    expect(badge.scrollWidth, `intake count contains ${MAX_EVENT_MEDIA} at ${width}`)
+    expect(badge.scrollWidth, `Guestbook count contains ${MAX_EVENT_GUEST_NOTES} at ${width}`)
       .toBeLessThanOrEqual(badge.clientWidth + 1);
     // Still a badge rather than a bar: it grows with its digits and no further.
     const box = await measureTarget(count);
-    expect(box.width, `intake count width at ${width}`).toBeLessThanOrEqual(48);
+    expect(box.width, `Guestbook count width at ${width}`).toBeLessThanOrEqual(48);
     await expectContained(page, width);
   }
 });
@@ -561,8 +564,8 @@ test('the manager holds every section in the 1280-at-200%-zoom layout', async ({
   // The rails belong to 761 and above; at this size the manager is the stacked layout, not a squeezed
   // three-column one, and the two-column media grid is what the workspace carries.
   expect(await measureGridTracks(page.locator('.manager-shell--intake')), 'shell tracks at 640').toEqual([]);
-  await destination(page, 'Intake').click();
-  expect((await measureGridTracks(page.locator('.moderation-grid'))).length, 'media columns at 640').toBe(2);
+  await destination(page, 'Gallery').click();
+  expect((await measureGridTracks(page.locator('.gallery-photo-wall'))).length, 'Library columns at 640').toBe(2);
 });
 
 test('changing manager section returns the host to the top of the new section', async ({ page }) => {
@@ -577,9 +580,9 @@ test('changing manager section returns the host to the top of the new section', 
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
 
-  // A host who has scrolled a long way into the intake grid, exactly where the audit found the problem.
+  // A host who has scrolled a long way into the Library wall, exactly where the audit found the problem.
   await page.evaluate(() => window.scrollTo({ top: 4_000, behavior: 'instant' }));
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(1_000);
 
@@ -603,7 +606,7 @@ test('a long unbroken guestbook note stays inside the manager at every width', a
     event: { storedMediaCount: 2 },
   });
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
   await destination(page, 'Guestbook').click();
   await expect(page.getByRole('heading', { name: 'Guestbook from the day' })).toBeVisible();
   const note = page.locator('.manager-guestbook__entry > p');
@@ -634,6 +637,7 @@ test('manager navigation labels clear the contrast floor at every width', async 
 
 test('manager cards keep the whole photo name reachable', async ({ page }) => {
   await openManager(page);
+  await page.getByRole('group', { name: 'Gallery mode' }).getByRole('button', { name: /^Guest gallery/u }).click();
   const name = page.locator('.moderation-grid article').first().locator('strong');
   // The card shows what it can; the full name stays available rather than ending in an ellipsis.
   await expect(name).toHaveAttribute('title', LONG_FILENAME);
@@ -677,24 +681,27 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     }, requestId: 'request-a' },
   }));
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-  await page.getByLabel('Filter by guest name').fill('Rowan');
-  await page.getByRole('button', { name: 'Filter', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Clear', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
+  await page.getByLabel('Find photos').fill('Avery');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Clear search', exact: true })).toBeVisible();
 
-  // Every media-grid mode: one phone column, the 431 two-column band, and the three-column rail layout.
+  // Preserve the phone, former Intake breakpoint, and rail widths for both gallery modes.
   for (const width of [390, 431, 470, 1200]) {
     await page.setViewportSize({ width, height: 900 });
 
-    await destination(page, 'Intake').click();
-    await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-    await expectTouchTargets(page, '.intake-search .button', `intake filter at ${width}`);
-    await expectTouchTargets(page, '.intake-search .text-button', `intake clear at ${width}`);
-    await expectTouchTargets(page, '.moderation-grid article:first-of-type .intake-card-actions a', `intake download at ${width}`);
-    await expectTouchTargets(page, '.moderation-grid article:first-of-type .intake-card-actions button', `intake card control at ${width}`);
+    await destination(page, 'Gallery').click();
+    await page.getByRole('button', { name: 'Library' }).click();
+    await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
+    await expectTouchTargets(page, '.gallery-search__submit', `Library search at ${width}`);
+    await expectTouchTargets(page, '.library-search-clear', `Library clear search at ${width}`);
+    await expectTouchTargets(page, '.library-toolbar select', `Library filter and sort at ${width}`);
+    await expectTouchTargets(page, '.library-toolbar .gallery-select-toggle', `Library select toggle at ${width}`);
+    await expectTouchTargets(page, '.gallery-photo-wall article:first-of-type .gallery-mosaic__open', `Library photo at ${width}`);
+    await expectTouchTargets(page, '.gallery-photo-wall article:first-of-type .gallery-photo__album', `Library album action at ${width}`);
 
     await destination(page, 'Gallery').click();
-    await page.getByRole('button', { name: 'Guest gallery' }).click();
+    await page.getByRole('group', { name: 'Gallery mode' }).getByRole('button', { name: /^Guest gallery/u }).click();
     await expectTouchTargets(page, '.filter-tabs button', `publication filter at ${width}`);
     await expectTouchTargets(page, '.gallery-shared .gallery-select-toggle', `publication select toggle at ${width}`);
     await expectTouchTargets(page, '.moderation-grid article:first-of-type button', `gallery card control at ${width}`);
@@ -780,7 +787,8 @@ test('active export progress stays reachable and contained outside Gallery on na
   };
   await stubManagerRoutes(page, { ...managerFixture, exports: [job] });
   await page.goto(managerUrl);
-  await expect(page.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
+  await destination(page, 'Share').click();
 
   const compact = page.getByRole('region', { name: 'Export progress' });
   await expect(compact).toContainText('Complete export · Running');
@@ -1429,7 +1437,8 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
   expect(await boxesIntersect(shortManagerNav, shortTray), 'Manager navigation and tray at 320 by 568').toBe(false);
 
   const shortDestinations = shortManagerNav.locator('button');
-  expect(await shortDestinations.count(), 'all Manager destinations remain rendered at 320 by 568').toBe(6);
+  expect(await shortDestinations.count(), 'all Manager destinations remain rendered at 320 by 568')
+    .toBe(DESTINATIONS.length);
   for (let index = 0; index < await shortDestinations.count(); index += 1) {
     const control = shortDestinations.nth(index);
     await control.focus();

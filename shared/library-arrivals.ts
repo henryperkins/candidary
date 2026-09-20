@@ -7,8 +7,13 @@ export interface LibraryQuery {
   order: GalleryTimelineOrder;
 }
 
+/** Host-only identity for a delivered photo; deliverySequence is a positive safe integer. */
+export interface LibraryMediaView extends ManagerGalleryMediaView {
+  deliverySequence: number;
+}
+
 export interface LibraryPage {
-  media: ManagerGalleryMediaView[];
+  media: LibraryMediaView[];
   nextCursor: string | null;
   snapshotSequence: number;
 }

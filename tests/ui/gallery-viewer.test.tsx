@@ -157,6 +157,22 @@ describe('GalleryViewer file actions', () => {
     if (result === 'failed') expect(screen.getByRole('alert')).toHaveTextContent('Write refused');
   });
 
+  it('keeps a failed Trash write with its photo when the controlled viewer changes', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness photos={[firstDance, cakeCutting]} initialPhotoId={firstDance.id}
+      hasMore={false} loadNextAfter={async () => ({ status: 'exhausted' })}
+      fileActions={{ canTrash: true, trash: vi.fn(async () => { throw new Error('Write refused'); }) }} />);
+
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Write refused');
+
+    await user.click(screen.getByRole('button', { name: 'Next photo' }));
+
+    expect(screen.getByRole('dialog', { name: 'Cake cutting' })).toBeVisible();
+    expect(screen.queryByText('Write refused')).not.toBeInTheDocument();
+  });
+
   it('keeps a successful deletion distinct from failed continuation and retries only the read', async () => {
     const user = userEvent.setup();
     const trash = vi.fn(async (): Promise<TrashOutcome> => ({ status: 'trashed', media: {

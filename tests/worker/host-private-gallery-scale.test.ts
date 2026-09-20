@@ -189,6 +189,16 @@ describe('host private gallery at the 10,000-photo event limit', () => {
     expect(firstLive.status).toBe(200);
     const firstLiveBody = await firstLive.json<any>();
     expect(firstLiveBody.data.media).toHaveLength(48);
+    expect(firstLiveBody.data.media[0].deliverySequence).toBe(10_000);
+    expect(firstLiveBody.data.media.every((photo: { deliverySequence: number }) => Number.isSafeInteger(photo.deliverySequence))).toBe(true);
+    const legacy = await createApp().request(
+      '/api/manage/events/event-a/gallery',
+      { headers: { cookie: host.cookie } }, testEnv,
+    );
+    expect(legacy.status).toBe(200);
+    const legacyBody = await legacy.json<{ data: { media: Record<string, unknown>[] } }>();
+    expect(legacyBody.data.media).toHaveLength(48);
+    expect(legacyBody.data.media.every(photo => !('deliverySequence' in photo))).toBe(true);
     expect(firstLiveBody.data.nextCursor).toEqual(expect.any(String));
     const continuation = await createApp().request(
       `/api/manage/events/event-a/gallery?live=1&cursor=${encodeURIComponent(firstLiveBody.data.nextCursor)}`,

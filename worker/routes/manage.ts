@@ -758,7 +758,7 @@ manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
   );
   return context.json({
     data: {
-      media: page.media,
+      media: live ? page.media : page.media.map(photo => ({ ...photo, deliverySequence: undefined })),
       nextCursor: page.nextCursor
         ? live
           ? encodeLibraryCursor({

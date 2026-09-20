@@ -31,7 +31,7 @@ import {
 } from './gallery-anchor';
 import type { LibraryPage } from '../../../shared/library-arrivals';
 import type { LibraryChange, LibraryFileActions } from './library-file-actions';
-import { readLibraryWindow } from './library-arrivals';
+import { readLibraryWindow, type LibraryArrivalExpectation } from './library-arrivals';
 import { useLibraryArrivals } from './use-library-arrivals';
 import './library-photo-wall.css';
 
@@ -269,6 +269,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   const currentViewer = useRef(viewerPhotoId); currentViewer.current = viewerPhotoId;
   const viewerTrash = useRef<{ id: string; owner: string; before: string[]; confirmed: boolean } | null>(null);
   const ownerKey = JSON.stringify([eventId, query, favoritesOnly, order]);
+  useLayoutEffect(() => { setArrivalError(false); }, [ownerKey, snapshotSequence]);
   const currentOwner = useRef(ownerKey); currentOwner.current = ownerKey;
   const visibleOwner = useRef(false); visibleOwner.current = active && !suspended && !readsPaused && !readsBlocked;
   const retireStaging = useCallback(() => {
@@ -476,6 +477,13 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     }
   }, [active, selectedIds.size, viewerPhotoId]);
 
+  useLayoutEffect(() => {
+    if (!suspended || viewerPhotoId === null) return;
+    setViewerPhotoId(null);
+    viewerOrigin.current = null;
+    viewerTrash.current = null;
+  }, [suspended, viewerPhotoId]);
+
   /**
    * The viewer inerts the rest of the document while it is open, and an inert element
    * cannot take focus. Restoring inside the close handler ran before React had torn the
@@ -572,7 +580,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     return { status: 'failed' };
   }
 
-  async function reconcileWindow(sequence: number, deliberate: boolean, changeToConsume?: string) {
+  async function reconcileWindow(sequence: number, deliberate: boolean, changeToConsume?: string, expectedArrivals?: LibraryArrivalExpectation) {
     if (!visibleOwner.current || loading || nextPageRequest.current) return;
     retireStaging();
     const generation = mutationGeneration.current;
@@ -582,6 +590,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     setAccepting(true); setArrivalError(false);
     try {
       const page = await readLibraryWindow({ snapshotSequence: sequence, boundary, order, signal: controller.signal,
+        arrivals: expectedArrivals,
         fetchPage: request => api<LibraryPage>(galleryPath(query, favoritesOnly, order, request.cursor, request.snapshotSequence), { signal: request.signal }) });
       if (controller.signal.aborted || generation !== mutationGeneration.current || owner !== currentOwner.current || !visibleOwner.current) return;
       // Re-read interaction state at adoption. Selection refs stay owned by their existing
@@ -713,14 +722,21 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
 
   function changeViewerPhoto(photoId: string) {
     if (!rowsRef.current.some((photo) => photo.id === photoId)) return;
-    viewerOrigin.current = tileForId(photoId);
     setViewerPhotoId(photoId);
   }
 
   function closeViewer() {
-    if (active) restoreFocus.current = rowsRef.current.length === 0 ? rootRef.current
-      : (currentViewer.current && rowsRef.current.some(photo => photo.id === currentViewer.current)
-        ? tileForId(currentViewer.current) : tileForId(rowsRef.current[0]!.id)) ?? rootRef.current;
+    if (active) {
+      const origin = viewerOrigin.current;
+      const originPhotoId = origin?.closest<HTMLElement>('[data-photo-id]')?.dataset.photoId;
+      const connectedOrigin = origin?.isConnected
+        && originPhotoId !== undefined
+        && rowsRef.current.some(photo => photo.id === originPhotoId)
+        ? origin : null;
+      restoreFocus.current = connectedOrigin ?? (rowsRef.current.length === 0 ? rootRef.current
+        : (currentViewer.current && rowsRef.current.some(photo => photo.id === currentViewer.current)
+          ? tileForId(currentViewer.current) : tileForId(rowsRef.current[0]!.id)) ?? rootRef.current);
+    }
     setViewerPhotoId(null);
     viewerOrigin.current = null;
     viewerTrash.current = null;
@@ -1278,9 +1294,13 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     <div className="library-arrivals">
       {arrivals.count > 0 && <button type="button" ref={arrivalButton}
         className="text-button library-arrivals__accept" disabled={accepting}
-        onClick={() => { if (arrivals.latestSnapshotSequence !== null) void reconcileWindow(arrivals.latestSnapshotSequence, true); }}
+        onClick={() => {
+          if (snapshotSequence !== null && arrivals.latestSnapshotSequence !== null) {
+            void reconcileWindow(arrivals.latestSnapshotSequence, true, undefined, { afterSequence: snapshotSequence, count: arrivals.count });
+          }
+        }}
       >{accepting ? 'Loading new photos…' : `${arrivals.count} new ${arrivals.count === 1 ? 'photo' : 'photos'}`}</button>}
-      {arrivalError && <span role="alert">Could not load new photos. Try again.</span>}
+      {arrivalError && arrivals.count > 0 && <span role="alert">Could not load new photos. Try again.</span>}
     </div>
     {/* Under the row, not in it. `Select all n loaded photos` appears only while a selection runs
         and it is a sentence with no short form: in the row it took the phone's four controls from
@@ -1342,7 +1362,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       }}
       onClear={clearSelection}
     />}
-    {viewerPhotoId !== null && <GalleryViewer
+    {viewerPhotoId !== null && !suspended && <GalleryViewer
       photos={rows}
       photoId={viewerPhotoId}
       timeZone={event.eventTimezone}

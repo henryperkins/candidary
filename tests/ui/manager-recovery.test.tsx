@@ -640,6 +640,19 @@ describe('moving a photo to Trash', () => {
 });
 
 describe('Trash', () => {
+  it('moves focus to the Trash heading after ordinary keyboard entry', async () => {
+    const user = userEvent.setup();
+    const { fetchMock } = managerFetch({ trash: [TRASHED] });
+    await openManager(fetchMock);
+    const trigger = screen.getByRole('button', { name: 'Trash' });
+    trigger.focus();
+
+    await user.keyboard('{Enter}');
+
+    const heading = await screen.findByRole('heading', { name: 'Trash' });
+    await waitFor(() => expect(heading).toHaveFocus());
+  });
+
   it('shows only the alternate Intake destination', async () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch({

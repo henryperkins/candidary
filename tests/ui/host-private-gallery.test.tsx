@@ -289,7 +289,10 @@ function renderGalleryWithFetch(
   const onStatusChange = vi.fn();
   const onGalleryInvalidated = overrides.onGalleryInvalidated ?? vi.fn();
   const authority = overrides.audience ?? audienceAuthority(overrides.galleryRows);
-  function TestGalleryOwner({ workspaceMounted }: { workspaceMounted: boolean }) {
+  function TestGalleryOwner({ workspaceMounted, librarySuspended }: {
+    workspaceMounted: boolean;
+    librarySuspended: boolean;
+  }) {
     const [announcement, setAnnouncement] = useState('');
     const [galleryMutationEpoch, setGalleryMutationEpoch] = useState(0);
     const invalidateGalleryAfterMutation = useCallback(() => {
@@ -313,6 +316,8 @@ function renderGalleryWithFetch(
       {workspaceMounted && <ControlledGalleryWorkspace
         event={event}
         eventId="event-a"
+        librarySuspended={librarySuspended}
+        trashContent={<section><h2>Trash</h2></section>}
         galleryMutationEpoch={galleryMutationEpoch}
         invalidateGalleryAfterMutation={invalidateGalleryAfterMutation}
         audience={authority}
@@ -345,20 +350,26 @@ function renderGalleryWithFetch(
       />}
     </>;
   }
-  function TestGalleryHarness({ workspaceMounted }: { workspaceMounted: boolean }) {
+  function TestGalleryHarness({ workspaceMounted, librarySuspended }: {
+    workspaceMounted: boolean;
+    librarySuspended: boolean;
+  }) {
     return <ManagerUndoProvider eventId="event-a">
-      <TestGalleryOwner workspaceMounted={workspaceMounted} />
+      <TestGalleryOwner workspaceMounted={workspaceMounted} librarySuspended={librarySuspended} />
       <ManagerUndoBar />
     </ManagerUndoProvider>;
   }
-  const rendered = render(<TestGalleryHarness workspaceMounted />);
+  const rendered = render(<TestGalleryHarness workspaceMounted librarySuspended={false} />);
   return {
     fetchMock,
     onPrepare,
     onStatusChange,
     onGalleryInvalidated,
     setWorkspaceMounted(workspaceMounted: boolean) {
-      rendered.rerender(<TestGalleryHarness workspaceMounted={workspaceMounted} />);
+      rendered.rerender(<TestGalleryHarness workspaceMounted={workspaceMounted} librarySuspended={false} />);
+    },
+    setLibrarySuspended(librarySuspended: boolean) {
+      rendered.rerender(<TestGalleryHarness workspaceMounted librarySuspended={librarySuspended} />);
     },
   };
 }
@@ -848,6 +859,32 @@ describe('host private gallery', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await waitFor(() => expect(origin).toHaveFocus());
     expect(screen.getByRole('button', { name: 'Open Second photo, from Jose' })).not.toHaveFocus();
+  });
+
+  it('retires an open viewer when Library suspends without clearing retained browsing state', async () => {
+    const rendered = renderGallery();
+    const user = userEvent.setup();
+
+    await user.selectOptions(await screen.findByLabelText('Photos shown'), 'album');
+    await user.type(screen.getByPlaceholderText('Search photos'), 'p4');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await user.selectOptions(screen.getByLabelText('Photo order'), 'earliest');
+    const origin = await screen.findByRole('button', { name: 'Open p4.jpg, from Jose' });
+    await user.click(origin);
+    expect(screen.getByRole('dialog', { name: 'p4.jpg' })).toBeVisible();
+
+    rendered.setLibrarySuspended(true);
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: 'Trash' })).toBeVisible();
+    expect(screen.getByPlaceholderText('Search photos')).toHaveValue('p4');
+    expect(screen.getByLabelText('Photos shown')).toHaveValue('album');
+    expect(screen.getByLabelText('Photo order')).toHaveValue('earliest');
+    expect(document.querySelectorAll('[data-photo-id="p4"]')).toHaveLength(1);
+
+    rendered.setLibrarySuspended(false);
+
+    expect(screen.getByRole('button', { name: 'Open p4.jpg, from Jose' })).toBeVisible();
   });
 
   it('keeps the viewer photo and focuses Try again after a continuation failure', async () => {

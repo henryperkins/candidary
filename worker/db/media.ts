@@ -23,7 +23,7 @@ import {
   type SupportedImageType,
 } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
-import type { LibraryQuery } from '../../shared/library-arrivals';
+import type { LibraryMediaView, LibraryQuery } from '../../shared/library-arrivals';
 import type { GalleryCursor } from '../http/gallery-cursor';
 import type { GuestGalleryCursor } from '../http/guest-gallery-cursor';
 import type { ManagerMediaCursor } from '../http/media-cursor';
@@ -755,7 +755,7 @@ export interface GalleryTimelineOptions {
 }
 
 export interface GalleryTimelinePage {
-  media: ManagerGalleryMediaView[];
+  media: LibraryMediaView[];
   nextCursor: GalleryCursor | null;
 }
 
@@ -921,17 +921,17 @@ export class MediaRepository {
       SELECT
         id, original_filename, guest_name, caption, publication_status,
         upload_state, preview_object_key, width, height, created_at, stored_at,
-        captured_at, timeline_at, favorited_at
+        captured_at, timeline_at, favorited_at, delivery_sequence
       FROM media
       WHERE ${predicates.join(' AND ')}
       ORDER BY timeline_at ${direction}, id ${direction}
       LIMIT ?
-    `).bind(...bindings).all<MediaRow>();
+    `).bind(...bindings).all<MediaRow & { delivery_sequence: number }>();
     const pageRows = result.results.slice(0, limit);
     const last = pageRows[pageRows.length - 1];
     const hasMore = result.results.length > limit;
     return {
-      media: pageRows.map(mapGalleryMediaRow),
+      media: pageRows.map(row => ({ ...mapGalleryMediaRow(row), deliverySequence: row.delivery_sequence })),
       nextCursor: hasMore && last
         ? { timelineAt: last.timeline_at, id: last.id }
         : null,

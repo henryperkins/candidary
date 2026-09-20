@@ -53,7 +53,7 @@ it('fences query and event changes and StrictMode replay even for abort-insensit
   expect(result.current.count).toBe(0);
   await act(async () => {pending[2]!.resolve(ok({afterSequence:2,snapshotSequence:3,count:1}));}); expect(result.current.count).toBe(1);
 });
-function photo(id: string): ManagerGalleryMediaView { const time = `2026-09-19T10:00:0${id.slice(1)}.000Z`; return {id,originalFilename:`${id}.jpg`,guestName:'Guest',caption:null,publicationStatus:'unpublished',previewAvailable:true,width:null,height:null,receivedAt:time,timelineAt:time,timelineSource:'received',isFavorite:false}; }
+function photo(id: string): ManagerGalleryMediaView & { deliverySequence: number } { const time = `2026-09-19T10:00:0${id.slice(1)}.000Z`; return {id,deliverySequence:Number(id.slice(1)),originalFilename:`${id}.jpg`,guestName:'Guest',caption:null,publicationStatus:'unpublished',previewAvailable:true,width:null,height:null,receivedAt:time,timelineAt:time,timelineSource:'received',isFavorite:false}; }
 const props = {event:EVENT_FIXTURE,eventId:'event-a',pickCount:0,albumEntryCount:0,onPicksChanged:()=>{},invalidateGalleryAfterMutation:()=>{}};
 function Library(extra: Partial<ComponentProps<typeof ManagerPrivateGallery>> = {}) {return <ManagerUndoProvider eventId={extra.eventId ?? 'event-a'}><ManagerPrivateGallery {...props} {...extra}/></ManagerUndoProvider>;}
 const gridIds = () => Array.from(document.querySelectorAll<HTMLElement>('[data-photo-id]')).map(item => item.dataset.photoId);
@@ -113,6 +113,44 @@ it('retires staged acceptance when the host continues the old loaded window', as
   fireEvent.click(screen.getByRole('button',{name:'Load more photos'})); await settle();
   await act(async () => {fixture.staged.resolve(ok({media:['p5','p4'].map(photo),nextCursor:'fresh3',snapshotSequence:8}));});
   expect(gridIds()).toEqual(['p5','p4','p3','p2']); expect(screen.getByRole('button',{name:'3 new photos'})).toBeInTheDocument();
+});
+it.each(['order', 'search', 'album', 'event'] as const)('retires an acceptance failure after a successful %s replacement', async replacement => {
+  const fixture = arrivalFixture(); const view = render(Library()); await settle();
+  fireEvent.click(screen.getByRole('button', { name: 'Load more photos' })); await settle();
+  await act(async () => { fixture.poll.resolve(ok({afterSequence:5,snapshotSequence:8,count:3})); });
+  fireEvent.click(screen.getByRole('button', { name: '3 new photos' })); await settle();
+  await act(async () => { fixture.staged.resolve(new Response(JSON.stringify({code:'INTERNAL_ERROR',message:'offline'}),{status:503})); });
+  expect(screen.getByText('Could not load new photos. Try again.')).toBeInTheDocument();
+  if (replacement === 'order') fireEvent.change(screen.getByRole('combobox', { name: 'Photo order' }), { target: { value: 'earliest' } });
+  else if (replacement === 'search') {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Find photos' }), { target: { value: 'Guest' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  } else if (replacement === 'album') fireEvent.change(screen.getByRole('combobox', { name: 'Photos shown' }), { target: { value: 'album' } });
+  else view.rerender(Library({ eventId: 'event-b' }));
+  await settle();
+  expect(gridIds()).toEqual(['p5', 'p4']);
+  expect(screen.queryByRole('button', { name: '3 new photos' })).not.toBeInTheDocument();
+  expect(screen.queryByText('Could not load new photos. Try again.')).not.toBeInTheDocument();
+});
+it.each(['earliest', 'newest'] as const)('waits for the counted arrival beyond the old %s boundary before adopting', async order => {
+  const laterPage = deferred<Response>(); const accepted = vi.fn();
+  const arrived = { ...photo('p6'), timelineAt: order === 'earliest' ? '2026-09-19T11:00:00.000Z' : '2026-09-19T09:00:00.000Z' };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), 'https://test');
+    if (url.pathname.endsWith('/arrivals')) return ok({afterSequence:5,snapshotSequence:6,count:1});
+    if (url.searchParams.has('snapshot')) return url.searchParams.has('cursor') ? laterPage.promise : ok({media:[photo('p5')],nextCursor:'two',snapshotSequence:6});
+    return ok({media:[photo('p5')],nextCursor:null,snapshotSequence:5});
+  }));
+  render(Library({ onArrivalsAccepted: accepted })); await settle();
+  if (order === 'earliest') {
+    fireEvent.change(screen.getByRole('combobox', { name: 'Photo order' }), { target: { value: order } }); await settle();
+  }
+  fireEvent.click(screen.getByRole('button', { name: '1 new photo' })); await settle();
+  expect(gridIds()).toEqual(['p5']);
+  expect(accepted).not.toHaveBeenCalled();
+  await act(async () => { laterPage.resolve(ok({media:[arrived],nextCursor:null,snapshotSequence:6})); });
+  expect(gridIds()).toEqual(['p5', 'p6']);
+  expect(accepted).toHaveBeenCalledOnce();
 });
 it('retains browsing state when suspended and fences a confirmed trash against staged rows', async () => {
   const fixture=arrivalFixture(); const view=render(Library()); await settle();

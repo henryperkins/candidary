@@ -58,7 +58,7 @@ export function GalleryViewer({
   const index = photos.findIndex((candidate) => candidate.id === photoId);
   const photo = photos[index];
   const [phase, setPhase] = useState<'photo' | 'confirm-trash' | 'trashing' | 'next-photo-failed'>('photo');
-  const [trashError, setTrashError] = useState<string | null>(null);
+  const [trashError, setTrashError] = useState<{ photoId: string; message: string } | null>(null);
   const trashActionRef = useRef<HTMLButtonElement>(null);
   const keepRef = useRef<HTMLButtonElement>(null);
   const trashRequest = useRef(false);
@@ -146,7 +146,10 @@ export function GalleryViewer({
     } catch (caught) {
       if (!viewerMounted.current || generation !== viewerRequestGeneration.current) return;
       if (confirmedPhotoId.current === photo.id) { setPhase('next-photo-failed'); return; }
-      setTrashError(caught instanceof Error ? caught.message : 'This photo could not be moved to Trash.');
+      setTrashError({
+        photoId: photo.id,
+        message: caught instanceof Error ? caught.message : 'This photo could not be moved to Trash.',
+      });
       setPhase('photo');
     } finally { trashRequest.current = false; }
   }
@@ -372,7 +375,7 @@ export function GalleryViewer({
           ? <><Check aria-hidden="true" /> <span aria-hidden="true">In Album</span></>
           : <><Plus aria-hidden="true" /> <span aria-hidden="true">Pick</span></>}
       </button>
-      {trashError && <p role="alert">{trashError}</p>}
+      {trashError?.photoId === photo.id && <p role="alert">{trashError.message}</p>}
       {fileActions && <div className="gallery-viewer__file-actions">
         <a href={mediaOriginal(photo.id)} download className="button button--secondary">Download original</a>
         <button type="button" className="button button--danger-outline" ref={trashActionRef}

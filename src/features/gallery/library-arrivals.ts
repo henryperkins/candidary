@@ -2,6 +2,7 @@ import { MAX_EVENT_MEDIA, type GalleryTimelineOrder } from '../../../shared/cons
 import type { LibraryPage } from '../../../shared/library-arrivals';
 
 export interface LibraryTimelineKey { timelineAt: string; id: string }
+export interface LibraryArrivalExpectation { afterSequence: number; count: number }
 export type FetchLibraryPage = (request: {
   snapshotSequence: number; cursor?: string; signal: AbortSignal;
 }) => Promise<LibraryPage>;
@@ -21,12 +22,14 @@ export async function readLibraryWindow(request: {
   boundary: LibraryTimelineKey | null;
   order: GalleryTimelineOrder;
   signal: AbortSignal;
+  arrivals?: LibraryArrivalExpectation;
 }): Promise<LibraryPage> {
-  const { fetchPage, snapshotSequence, boundary, order, signal } = request;
+  const { fetchPage, snapshotSequence, boundary, order, signal, arrivals } = request;
   const media: LibraryPage['media'] = [];
   const seenIds = new Set<string>();
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
+  let incorporatedArrivals = 0;
   for (;;) {
     signal.throwIfAborted();
     const page = await fetchPage({ snapshotSequence, ...(cursor ? { cursor } : {}), signal });
@@ -36,10 +39,15 @@ export async function readLibraryWindow(request: {
       if (seenIds.has(photo.id)) continue;
       if (media.length >= MAX_EVENT_MEDIA) throw new Error('Library exceeds the event photo limit.');
       seenIds.add(photo.id); media.push(photo);
+      if (arrivals && photo.deliverySequence > arrivals.afterSequence && photo.deliverySequence <= snapshotSequence) {
+        incorporatedArrivals++;
+      }
     }
     if (page.nextCursor !== null && seenCursors.has(page.nextCursor)) throw new Error('Repeated Library continuation cursor.');
     const last = page.media.at(-1);
-    if (boundary === null || page.nextCursor === null || (last && compareLibraryKeys(last, boundary, order) >= 0)) {
+    const reachedBoundary = boundary === null || (last && compareLibraryKeys(last, boundary, order) >= 0);
+    const reachedArrivals = !arrivals || incorporatedArrivals >= arrivals.count;
+    if (page.nextCursor === null || (reachedBoundary && reachedArrivals)) {
       return { media, nextCursor: page.nextCursor, snapshotSequence };
     }
     if (!last || media.length >= MAX_EVENT_MEDIA) throw new Error('Library continuation did not reach the loaded boundary.');

@@ -450,6 +450,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const [trashPending, setTrashPending] = useState(false);
   const trashWritePending = useRef(false);
   const trashHeading = useRef<HTMLHeadingElement>(null);
+  const ordinaryTrashFocusRequested = useRef(false);
   const restoringTrashIds = useRef(new Set<string>());
   const trashTargetPages = useRef<{ id: string; cursors: Set<string> } | null>(null);
   const [trashRestorePendingIds, setTrashRestorePendingIds] = useState<ReadonlySet<string>>(new Set());
@@ -2150,7 +2151,13 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     galleryWorkspace.current.focusCompleteExport();
   }, [event, galleryMode, section]);
   useLayoutEffect(() => {
-    if (libraryTrash) return;
+    if (libraryTrash) {
+      if (ordinaryTrashFocusRequested.current) {
+        ordinaryTrashFocusRequested.current = false;
+        trashHeading.current?.focus({ preventScroll: true });
+      }
+      return;
+    }
     if (returnFromTrash.current) { returnFromTrash.current = false; trashTrigger.current?.focus({ preventScroll: true }); }
     if (libraryHeadingFocusRequested.current) { libraryHeadingFocusRequested.current = false; document.getElementById('gallery-workspace-title')?.focus(); }
   }, [libraryTrash, event]);
@@ -2886,7 +2893,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         fileActions={{ canTrash: !trashPending && managerUndo.canPresent, trash: confirmTrash }}
         librarySuspended={libraryTrash}
         libraryActions={<><button ref={addPhotosTrigger} type="button" className="button button--primary" aria-disabled={!hostUploadAvailability.enabled} onClick={click => openManagerUpload(click.currentTarget)}>Add photos</button>{hostUploadUnavailableMessage && <p className="library-note">{hostUploadUnavailableMessage}</p>}</>}
-        trashAction={<button ref={trashTrigger} type="button" className="text-button library-trash-trigger" onClick={() => requestSectionDestination({ kind: 'trash' })}>Trash{recoverableCount > 0 ? ` (${recoverableCount})` : ''}</button>}
+        trashAction={<button ref={trashTrigger} type="button" className="text-button library-trash-trigger" onClick={(click) => {
+          ordinaryTrashFocusRequested.current = click.detail === 0;
+          requestSectionDestination({ kind: 'trash' });
+        }}>Trash{recoverableCount > 0 ? ` (${recoverableCount})` : ''}</button>}
         trashContent={<section aria-labelledby="library-trash-title"><h2 id="library-trash-title" tabIndex={-1} ref={trashHeading}>Trash</h2><p className="library-note">These photos still use this event's capacity until they are restored or their recovery ends.</p>{showRecentlyDeletedIntentGuidance && <p>The retained photo may be under Load more.</p>}{trashResource.state.failure && <ErrorState message={trashResource.state.failure.message} recoveryHint={trashResource.state.failure.recoveryHint} onRetry={() => void trashResource.reload()} />}{renderTrashList()}</section>}
         libraryReadsPaused={rotationResourcesPaused || managerUploadOpen}
         onArrivalsAccepted={() => { void eventResource.invalidate(); void audienceResource.invalidate(); }}
