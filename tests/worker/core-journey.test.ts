@@ -46,7 +46,9 @@ describe('complete private event journey', () => {
         guestbookPrompt: access.event.guestbookPrompt,
         galleryVisible: true, moderationRequired: true,
         eventTimezone: 'America/Chicago', eventStartTime: '00:00',
-        rsvpDeadlineDate: '2026-09-05', rsvpEnabled: false, rsvpRosterVersion: 0,
+        rsvpDeadlineDate: access.event.rsvpDeadlineDate,
+        rsvpEnabled: false,
+        rsvpRosterVersion: 0,
       }),
     }, testEnv);
     const published = await createApp().request(`/api/manage/events/${access.event.id}/media/${media.id}`, {
@@ -184,16 +186,27 @@ describe('guest read surfaces', () => {
 describe('server-owned event configuration and phase', () => {
   beforeEach(resetDatabase);
 
+  const EVENT_DATE = '2099-09-19';
+  const DEADLINE_DATE = '2099-09-05';
+  const DEADLINE_AT_CHICAGO = '2099-09-06T04:59:59.999Z';
+
+  function scheduledAccess() {
+    return eventAccess('Maya & Theo', true, {
+      eventDate: EVENT_DATE,
+      rsvpDeadlineDate: DEADLINE_DATE,
+    });
+  }
+
   function create(patch: Record<string, unknown> = {}) {
     return createApp().request('/api/events', {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin },
       body: JSON.stringify({
         name: 'Maya & Theo',
-        eventDate: '2026-09-19',
+        eventDate: EVENT_DATE,
         welcomeMessage: 'Welcome.',
         eventTimezone: 'America/Chicago',
-        rsvpDeadlineDate: '2026-09-05',
+        rsvpDeadlineDate: DEADLINE_DATE,
         ...patch,
       }),
     }, testEnv);
@@ -206,9 +219,9 @@ describe('server-owned event configuration and phase', () => {
     expect(created.status).toBe(201);
     expect(body.data.event).toMatchObject({
       eventTimezone: 'America/Chicago',
-      // 2026-09-05 is CDT, so the day ends at 05:00Z the next morning.
-      rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
-      rsvpDeadlineDate: '2026-09-05',
+      // September is CDT, so the day ends at 05:00Z the next morning.
+      rsvpDeadlineAt: DEADLINE_AT_CHICAGO,
+      rsvpDeadlineDate: DEADLINE_DATE,
       rsvpEnabled: false,
       rsvpRosterVersion: 0,
       // Photo delivery is permitted from the start, and the schedule decides
@@ -223,7 +236,7 @@ describe('server-owned event configuration and phase', () => {
     const body = await (await create()).json<any>();
 
     expect(body.data.event).toMatchObject({
-      eventStartAt: '2026-09-19T05:00:00.000Z',
+      eventStartAt: '2099-09-19T05:00:00.000Z',
       eventStartTime: '00:00',
     });
   });
@@ -236,7 +249,7 @@ describe('server-owned event configuration and phase', () => {
     })).json<any>();
 
     expect(body.data.event).toMatchObject({
-      eventStartAt: '2026-09-19T22:30:00.000Z',
+      eventStartAt: '2099-09-19T22:30:00.000Z',
       eventStartTime: '17:30',
     });
   });
@@ -252,20 +265,20 @@ describe('server-owned event configuration and phase', () => {
     ['an impossible event date', { eventDate: '2026-02-30' }, 'eventDate'],
     ['an impossible date', { rsvpDeadlineDate: '2026-02-30' }, 'rsvpDeadlineDate'],
     ['a malformed date', { rsvpDeadlineDate: '2026-9-5' }, 'rsvpDeadlineDate'],
-    ['a deadline after the event', { rsvpDeadlineDate: '2026-09-20' }, 'rsvpDeadlineDate'],
+    ['a deadline after the event', { rsvpDeadlineDate: '2099-09-20' }, 'rsvpDeadlineDate'],
     // The deadline is the last millisecond of its local day, so no start time on
     // the event date can be later than a deadline on that same date.
-    ['a deadline on the event date', { rsvpDeadlineDate: '2026-09-19' }, 'rsvpDeadlineDate'],
+    ['a deadline on the event date', { rsvpDeadlineDate: EVENT_DATE }, 'rsvpDeadlineDate'],
     [
       'a deadline on the event date under the latest start',
-      { rsvpDeadlineDate: '2026-09-19', eventStartTime: '23:59' },
+      { rsvpDeadlineDate: EVENT_DATE, eventStartTime: '23:59' },
       'rsvpDeadlineDate',
     ],
     ['a malformed start time', { eventStartTime: '24:00' }, 'eventStartTime'],
-    // 2027-03-14 is the spring-forward Sunday in Chicago: 02:30 never happens.
+    // 2099-03-08 is the spring-forward Sunday in Chicago: 02:30 never happens.
     [
       'a start time the zone skips',
-      { eventDate: '2027-03-14', eventStartTime: '02:30' },
+      { eventDate: '2099-03-08', eventStartTime: '02:30' },
       'eventStartTime',
     ],
   ])('refuses %s against its own field', async (_label, patch, field) => {
@@ -277,16 +290,16 @@ describe('server-owned event configuration and phase', () => {
   });
 
   it('gives a guest the host time zone deadline, not their own', async () => {
-    const access = await eventAccess();
+    const access = await scheduledAccess();
     const shell = await createApp().request(`/api/event/${access.event.slug}`, {
       headers: { cookie: access.guest.cookie },
     }, testEnv);
     const event = (await shell.json<any>()).data.event;
 
     // A guest in Auckland reads the same calendar date the host picked.
-    expect(event.rsvpDeadlineDate).toBe('2026-09-05');
+    expect(event.rsvpDeadlineDate).toBe(DEADLINE_DATE);
     expect(event.eventTimezone).toBe('America/Chicago');
-    expect(event.rsvpDeadlineAt).toBe('2026-09-06T04:59:59.999Z');
+    expect(event.rsvpDeadlineAt).toBe(DEADLINE_AT_CHICAGO);
     // The guest view never carries manager configuration.
     expect(event).not.toHaveProperty('rsvpEnabled');
     expect(event).not.toHaveProperty('rsvpRosterVersion');
@@ -366,7 +379,7 @@ describe('server-owned event configuration and phase', () => {
   });
 
   it('refuses to open RSVP with no guest list, and leaves the event untouched', async () => {
-    const access = await eventAccess();
+    const access = await scheduledAccess();
     const response = await applySettings(access, { rsvpEnabled: true });
 
     expect(response.status).toBe(409);
@@ -395,21 +408,21 @@ describe('server-owned event configuration and phase', () => {
   });
 
   it('moves a deadline without trusting any timestamp from the browser', async () => {
-    const access = await eventAccess();
+    const access = await scheduledAccess();
     const response = await applySettings(access, {
-      rsvpDeadlineDate: '2026-09-10',
+      rsvpDeadlineDate: '2099-09-10',
       // Ignored: only the date and the zone are inputs.
       rsvpDeadlineAt: '1999-01-01T00:00:00.000Z',
     });
     const event = (await response.json<any>()).data.event;
 
     expect(response.status).toBe(200);
-    expect(event.rsvpDeadlineAt).toBe('2026-09-11T04:59:59.999Z');
-    expect(event.rsvpDeadlineDate).toBe('2026-09-10');
+    expect(event.rsvpDeadlineAt).toBe('2099-09-11T04:59:59.999Z');
+    expect(event.rsvpDeadlineDate).toBe('2099-09-10');
   });
 
   it('recomputes both instants together when the time zone moves', async () => {
-    const access = await eventAccess();
+    const access = await scheduledAccess();
     const response = await applySettings(access, { eventTimezone: 'America/New_York' });
     expect(response.status).toBe(200);
 
@@ -418,21 +431,21 @@ describe('server-owned event configuration and phase', () => {
     expect(await testEnv.DB.prepare(
       'SELECT event_start_at, rsvp_deadline_at FROM events WHERE id = ?',
     ).bind(access.event.id).first()).toEqual({
-      event_start_at: '2026-09-19T04:00:00.000Z',
-      rsvp_deadline_at: '2026-09-06T03:59:59.999Z',
+      event_start_at: '2099-09-19T04:00:00.000Z',
+      rsvp_deadline_at: '2099-09-06T03:59:59.999Z',
     });
   });
 
   it('retimes the start without disturbing the deadline', async () => {
-    const access = await eventAccess();
+    const access = await scheduledAccess();
     const response = await applySettings(access, { eventStartTime: '17:30' });
     const event = (await response.json<any>()).data.event;
 
     expect(response.status).toBe(200);
     expect(event).toMatchObject({
-      eventStartAt: '2026-09-19T22:30:00.000Z',
+      eventStartAt: '2099-09-19T22:30:00.000Z',
       eventStartTime: '17:30',
-      rsvpDeadlineAt: '2026-09-06T04:59:59.999Z',
+      rsvpDeadlineAt: DEADLINE_AT_CHICAGO,
     });
   });
 
@@ -462,15 +475,15 @@ describe('server-owned event configuration and phase', () => {
     expect(updated.data.event).toMatchObject({
       eventTimezone: 'America/New_York',
       eventStartTime: '17:30',
-      eventStartAt: '2026-09-19T21:30:00.000Z',
+      eventStartAt: '2099-09-19T21:30:00.000Z',
     });
   });
 
   it.each<[string, string]>([
-    ['on the event date', '2026-09-19'],
-    ['after the event', '2026-09-20'],
+    ['on the event date', EVENT_DATE],
+    ['after the event', '2099-09-20'],
   ])('refuses a settings deadline %s and stores nothing', async (_label, rsvpDeadlineDate) => {
-    const access = await eventAccess();
+    const access = await scheduledAccess();
     const response = await applySettings(access, { rsvpDeadlineDate });
 
     expect(response.status).toBe(422);
@@ -478,13 +491,17 @@ describe('server-owned event configuration and phase', () => {
       rsvpDeadlineDate: 'The RSVP deadline must be before the event starts.',
     });
     expect(await testEnv.DB.prepare('SELECT rsvp_deadline_at FROM events WHERE id = ?')
-      .bind(access.event.id).first('rsvp_deadline_at')).toBe('2026-09-06T04:59:59.999Z');
+      .bind(access.event.id).first('rsvp_deadline_at')).toBe(DEADLINE_AT_CHICAGO);
   });
 
   it('refuses a settings start time the zone skips and stores nothing', async () => {
-    // 2027-03-14 is the spring-forward Sunday in Chicago, and the host retimes
+    // 2099-03-08 is the spring-forward Sunday in Chicago, and the host retimes
     // the event onto the hour that does not happen on it.
-    const created = await create({ eventDate: '2027-03-14', eventStartTime: '01:00' });
+    const created = await create({
+      eventDate: '2099-03-08',
+      eventStartTime: '01:00',
+      rsvpDeadlineDate: '2099-02-28',
+    });
     const body = await created.json<any>();
     const access = {
       event: body.data.event,
@@ -498,7 +515,7 @@ describe('server-owned event configuration and phase', () => {
       eventStartTime: 'Choose a start time that exists on the event date.',
     });
     expect(await testEnv.DB.prepare('SELECT event_start_at FROM events WHERE id = ?')
-      .bind(access.event.id).first('event_start_at')).toBe('2027-03-14T07:00:00.000Z');
+      .bind(access.event.id).first('event_start_at')).toBe('2099-03-08T07:00:00.000Z');
   });
 
   it('attributes an impossible stored event date to the date field', async () => {

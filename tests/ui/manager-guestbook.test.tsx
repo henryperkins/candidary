@@ -634,6 +634,8 @@ describe('Manager Guestbook', () => {
     expect(summaryCount()).toBe(initial);
 
     await user.click(within(navigation).getByRole('button', { name: 'Guestbook 1' }));
+    expect(await screen.findByRole('heading', { name: 'Guestbook from the day' })).toBeVisible();
+    await act(async () => { await Promise.resolve(); });
     const active = summaryCount();
     window.dispatchEvent(new Event('focus'));
     await waitFor(() => expect(summaryCount()).toBe(active + 1));

@@ -7,7 +7,7 @@ import { MediaRepository } from '../../worker/db/media';
 import type { AppEnv } from '../../worker/env';
 import { finalizedMediaObjectKey, mediaReservationObjectKey } from '../../worker/storage/media-keys';
 import { getOrCreatePreview } from '../../worker/storage/previews';
-import { exchangeEventEntry, withRecordingImages } from './helpers';
+import { exchangeEventEntry, futureCalendarDate, withRecordingImages } from './helpers';
 
 const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const origin = env.APP_ORIGIN;
@@ -24,11 +24,14 @@ async function guestAccess() {
   const created = await createApp().request('/api/events', {
     method: 'POST', headers: { 'content-type': 'application/json', origin },
     body: JSON.stringify({
-      name: 'Maya & Theo', eventDate: '2026-09-19', welcomeMessage: 'Welcome.',
-      eventTimezone: 'America/Chicago', rsvpDeadlineDate: '2026-09-05',
+      name: 'Maya & Theo', eventDate: futureCalendarDate(30), welcomeMessage: 'Welcome.',
+      eventTimezone: 'America/Chicago', rsvpDeadlineDate: futureCalendarDate(16),
     }),
   }, testEnv);
   const body = await created.json<any>();
+  if (created.status !== 201) {
+    throw new Error(`Event fixture was not created: ${JSON.stringify(body)}`);
+  }
   const exchange = await exchangeEventEntry(body.data.eventLink);
   const manager = cookiesFrom(created);
   // Photo delivery is permitted from creation but opens on the schedule, and
@@ -44,6 +47,9 @@ async function guestAccess() {
     },
     body: JSON.stringify({ action: 'open_early' }),
   }, testEnv);
+  if (opened.status !== 200) {
+    throw new Error(`Photo delivery fixture did not open: ${await opened.text()}`);
+  }
   return {
     ...cookiesFrom(exchange),
     event: (await opened.json<any>()).data.event,

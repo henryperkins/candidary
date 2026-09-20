@@ -205,7 +205,7 @@ describe('Manager Guestbook export downloads', () => {
     expect(screen.getByRole('button', { name: 'Download all' })).toHaveFocus();
   });
 
-  it('prioritizes a resolved semantic download over terminal retry and prepare actions', () => {
+  it('prioritizes terminal retry after expired download links', () => {
     const ref = createRef<GalleryExportControlHandle>();
     render(createElement(GalleryExportControl, {
       ...CONTROL_CONTEXT,
@@ -231,8 +231,8 @@ describe('Manager Guestbook export downloads', () => {
 
     act(() => ref.current?.focusIntendedAction());
 
-    expect(screen.getByRole('link', { name: 'Photo manifest' })).toHaveFocus();
-    expect(screen.getByRole('button', { name: 'Retry this prepared export' })).not.toHaveFocus();
+    expect(screen.queryByRole('link', { name: 'Photo manifest' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry this prepared export' })).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Prepare current collection' })).not.toHaveFocus();
   });
 
