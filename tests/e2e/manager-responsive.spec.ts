@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { chooseManagerSection, openManagerNavigation } from './helpers/manager-navigation';
 
 import { MANAGER_MEDIA_PAGE_SIZE, MAX_EVENT_BYTES, MAX_EVENT_MEDIA, MAX_EVENT_GUEST_NOTES } from '../../shared/constants';
 import type { ManagerGuestbookItem } from '../../shared/contracts';
@@ -132,6 +133,7 @@ test('manager navigation keeps every destination labelled at the control-text fl
   for (const width of [320, 390, ...RAIL_WIDTHS, 1101, 1440]) {
     await page.setViewportSize({ width, height: 900 });
 
+    await openManagerNavigation(page);
     for (const name of DESTINATIONS) {
       const button = destination(page, name);
       const target = await measureTarget(button);
@@ -163,6 +165,7 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
 
+  await openManagerNavigation(page);
   const controls = page.locator('.manager-nav nav button');
   await expect(controls).toHaveCount(DESTINATIONS.length);
   const labels = await controls.locator('.manager-nav__label').all();
@@ -189,7 +192,7 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
     }
     controlBoxes.push(controlBox);
     expect(controlBox.width, `${DESTINATIONS[index]} target width`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
-    expect(controlBox.height, `${DESTINATIONS[index]} target height`).toBeGreaterThanOrEqual(52);
+    expect(controlBox.height, `${DESTINATIONS[index]} target height`).toBeGreaterThanOrEqual(48);
     expect(labelBox.x, `${DESTINATIONS[index]} label starts inside its control`).toBeGreaterThanOrEqual(controlBox.x);
     expect(labelBox.x + labelBox.width, `${DESTINATIONS[index]} label ends inside its control`)
       .toBeLessThanOrEqual(controlBox.x + controlBox.width);
@@ -204,23 +207,16 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
     if (!rows.some((rowStart) => Math.abs(rowStart - box.y) <= GEOMETRY_TOLERANCE)) rows.push(box.y);
     return rows;
   }, []);
-  // One swipeable row, not a wrapped grid. Wrapping destinations into two rows costs
-  // 189px of a 568px screen before the product said anything; one row a thumb moves along costs 52.
-  expect(rowStarts, 'Manager destinations render as exactly one row').toHaveLength(1);
-  for (let index = 0; index < controlBoxes.length; index += 1) {
-    expect(
-      Math.abs(controlBoxes[index]!.y - rowStarts[0]!),
-      `${DESTINATIONS[index]} shares the single destination row`,
-    ).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
-  }
-  // Source order still reads left to right, which is what a swipe follows.
+  expect(rowStarts, 'Manager destinations each have a full-width row').toHaveLength(DESTINATIONS.length);
+  // Visual order follows the same top-to-bottom order as keyboard navigation.
   for (let index = 1; index < controlBoxes.length; index += 1) {
-    expect(controlBoxes[index]!.x, `${DESTINATIONS[index]} follows ${DESTINATIONS[index - 1]}`)
-      .toBeGreaterThan(controlBoxes[index - 1]!.x);
+    expect(controlBoxes[index]!.y, `${DESTINATIONS[index]} follows ${DESTINATIONS[index - 1]}`)
+      .toBeGreaterThanOrEqual(controlBoxes[index - 1]!.y + controlBoxes[index - 1]!.height);
+    expect(controlBoxes[index]!.x).toBe(controlBoxes[0]!.x);
   }
 
   const counts = controls.locator('.manager-nav__count');
-  await expect(counts).toHaveCount(2);
+  await expect(counts).toHaveCount(1);
   for (let index = 0; index < await counts.count(); index += 1) {
     const count = counts.nth(index);
     await expect(count, `Manager count ${index + 1} is visible`).toBeVisible();
@@ -239,6 +235,21 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
       .toBeLessThanOrEqual(controlBox.y + controlBox.height);
   }
   await expectContained(page, 320);
+
+  const navigation = page.locator('.manager-nav nav');
+  expect(await measureGridTracks(navigation), 'Manager section menu has one column').toHaveLength(1);
+  expect(await navigation.evaluate(element => element.scrollWidth - element.clientWidth), 'no horizontal navigation overflow').toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(navigation).toBeHidden();
+});
+
+test('320 Gallery scroll targets clear the compact manager header', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await stubManagerRoutes(page, {
+    mediaPages: { first: { media: makeMedia(6), nextCursor: null } },
+    messages: [NOTE], event: { storedMediaCount: 6 }, exports: [],
+  });
+  await page.goto(managerUrl);
 
   const managerHeadingMargin = await page.locator('#gallery-workspace-title').evaluate((element) =>
     Number.parseFloat(getComputedStyle(element).scrollMarginTop));
@@ -282,16 +293,7 @@ test('320 Manager navigation labels do not intersect', async ({ page }) => {
   expect(scrollY, 'the 320 mosaic target is measured after scrolling').toBeGreaterThan(0);
   expect(mosaicControlBox.y, 'scrolled 320 mosaic target clears the measured sticky stack')
     .toBeGreaterThanOrEqual(combinedStickyBottom - GEOMETRY_TOLERANCE);
-  // The row is a flex scroller now, so it resolves no grid tracks at all — the topology assertion
-  // is that there is no track structure left to wrap the destinations into.
-  const managerTracks = await measureGridTracks(page.locator('.manager-nav nav'));
-  expect(managerTracks, 'Manager destination topology').toHaveLength(0);
-  const navScrolls = await page.locator('.manager-nav nav').evaluate((element) => ({
-    overflowX: getComputedStyle(element).overflowX,
-    reachable: element.scrollWidth > element.clientWidth,
-  }));
-  expect(navScrolls.overflowX, 'the destination row scrolls sideways').toBe('auto');
-  expect(navScrolls.reachable, 'the off-screen destinations are reachable by swiping').toBe(true);
+  await expect(page.locator('.manager-nav nav'), 'the compact menu stays closed while scrolling').toBeHidden();
   expect(managerHeadingMargin, 'narrow Manager heading scroll margin').toBe(stickyOffset + 12);
   // 52, not 150: the audience facts left the pinned row for normal flow, and the mode switch
   // stays one row at 320 — stacked it was 138px of pinned chrome on a 568px screen, and the first
@@ -310,7 +312,7 @@ test('manager shell and media grid turn over exactly at their breakpoints', asyn
   const shell = page.locator('.manager-shell--intake');
   const mediaGrid = page.locator('.gallery-photo-wall');
 
-  // Under 761 the manager is the stacked two-tier header, so the shell resolves no grid tracks at all.
+  // Under 761 the compact manager header stacks above the workspace without grid tracks.
   // Library keeps its two-column phone wall until the rail opens at 761.
   for (const width of ONE_COLUMN_WIDTHS) {
     await page.setViewportSize({ width, height: 844 });
@@ -365,7 +367,7 @@ test('Library photos keep their square mobile crop without shrinking tile action
 
 test('Library search is immediately available with an inset submit control at every width', async ({ page }) => {
   await openManager(page);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
   const searchForm = page.getByRole('search');
   const input = searchForm.getByRole('textbox', { name: 'Find photos' });
@@ -504,6 +506,7 @@ test('manager navigation keeps the unresolved Guestbook count visible on both si
 
   for (const width of [320, 761, 1101]) {
     await page.setViewportSize({ width, height: 900 });
+    await openManagerNavigation(page);
     await expect(guestbook, `Guestbook is the inactive destination at ${width}`).toHaveAttribute('aria-pressed', 'false');
     await expect(count, `Guestbook count rendered at ${width}`).toBeVisible();
     await expect(count).toHaveText('1');
@@ -532,10 +535,12 @@ test('the Guestbook count badge holds the whole note cap at every width', async 
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
   const count = destination(page, 'Guestbook').locator('.manager-nav__count');
+  await openManagerNavigation(page);
   await expect(count).toHaveText(String(MAX_EVENT_GUEST_NOTES));
 
   for (const width of [...ONE_COLUMN_WIDTHS, ...TWO_COLUMN_WIDTHS, ...RAIL_WIDTHS, ...WIDE_WIDTHS]) {
     await page.setViewportSize({ width, height: 900 });
+    await openManagerNavigation(page);
     const badge = await measureOverflow(count);
     expect(badge.scrollWidth, `Guestbook count contains ${MAX_EVENT_GUEST_NOTES} at ${width}`)
       .toBeLessThanOrEqual(badge.clientWidth + 1);
@@ -553,8 +558,9 @@ test('the manager holds every section in the 1280-at-200%-zoom layout', async ({
   await page.setViewportSize({ width: 640, height: 450 });
 
   for (const name of DESTINATIONS) {
-    await destination(page, name).click();
+    await chooseManagerSection(page, name);
     await expect(destination(page, name), `${name} is the open destination`).toHaveAttribute('aria-pressed', 'true');
+    await openManagerNavigation(page);
     const target = await measureTarget(destination(page, name));
     expect(target.width, `${name} target width at 640 by 450`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
     expect(target.height, `${name} target height at 640 by 450`).toBeGreaterThanOrEqual(TOUCH_MINIMUM);
@@ -564,7 +570,7 @@ test('the manager holds every section in the 1280-at-200%-zoom layout', async ({
   // The rails belong to 761 and above; at this size the manager is the stacked layout, not a squeezed
   // three-column one, and the two-column media grid is what the workspace carries.
   expect(await measureGridTracks(page.locator('.manager-shell--intake')), 'shell tracks at 640').toEqual([]);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   expect((await measureGridTracks(page.locator('.gallery-photo-wall'))).length, 'Library columns at 640').toBe(2);
 });
 
@@ -586,7 +592,7 @@ test('changing manager section returns the host to the top of the new section', 
   await page.evaluate(() => window.scrollTo({ top: 4_000, behavior: 'instant' }));
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(1_000);
 
-  await destination(page, 'Share').click();
+  await chooseManagerSection(page, 'Share');
   const heading = page.getByRole('heading', { name: 'Share your event' });
   await expect(heading).toBeVisible();
   await expect.poll(
@@ -607,7 +613,7 @@ test('a long unbroken guestbook note stays inside the manager at every width', a
   });
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
-  await destination(page, 'Guestbook').click();
+  await chooseManagerSection(page, 'Guestbook');
   await expect(page.getByRole('heading', { name: 'Guestbook from the day' })).toBeVisible();
   const note = page.locator('.manager-guestbook__entry > p');
   await expect(note).toHaveText(UNBROKEN_NOTE);
@@ -628,6 +634,7 @@ test('manager navigation labels clear the contrast floor at every width', async 
   for (const width of [320, 390, 761, 1024, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     for (const name of DESTINATIONS) {
+      await openManagerNavigation(page);
       const label = destination(page, name).locator('.manager-nav__label');
       const contrast = await measureContrast(label);
       expect(contrast, `${name} label contrast at ${width}`).toBeGreaterThanOrEqual(MIN_CONTRAST);
@@ -690,7 +697,7 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
   for (const width of [390, 431, 470, 1200]) {
     await page.setViewportSize({ width, height: 900 });
 
-    await destination(page, 'Gallery').click();
+    await chooseManagerSection(page, 'Gallery');
     await page.getByRole('button', { name: 'Library' }).click();
     await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
     await expectTouchTargets(page, '.gallery-search__submit', `Library search at ${width}`);
@@ -700,7 +707,7 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     await expectTouchTargets(page, '.gallery-photo-wall article:first-of-type .gallery-mosaic__open', `Library photo at ${width}`);
     await expectTouchTargets(page, '.gallery-photo-wall article:first-of-type .gallery-photo__album', `Library album action at ${width}`);
 
-    await destination(page, 'Gallery').click();
+    await chooseManagerSection(page, 'Gallery');
     await page.getByRole('group', { name: 'Gallery mode' }).getByRole('button', { name: /^Guest gallery/u }).click();
     await expectTouchTargets(page, '.filter-tabs button', `publication filter at ${width}`);
     await expectTouchTargets(page, '.gallery-shared .gallery-select-toggle', `publication select toggle at ${width}`);
@@ -743,11 +750,11 @@ test('every manager control the host can touch measures at least 44 by 44', asyn
     expect(actionRow.scrollWidth, `card controls fit their row at ${width}`)
       .toBeLessThanOrEqual(actionRow.clientWidth + 1);
 
-    await destination(page, 'Guestbook').click();
+    await chooseManagerSection(page, 'Guestbook');
     await expect(page.locator('.manager-guestbook__entry .button').first()).toBeVisible();
     await expectTouchTargets(page, '.manager-guestbook__entry .button', `Guestbook control at ${width}`);
 
-    await destination(page, 'Gallery').click();
+    await chooseManagerSection(page, 'Gallery');
     await page.getByRole('button', { name: 'Library' }).click();
     const panel = page.locator('.gallery-export');
     const links = panel.locator('.export-links a');
@@ -788,7 +795,7 @@ test('active export progress stays reachable and contained outside Gallery on na
   await stubManagerRoutes(page, { ...managerFixture, exports: [job] });
   await page.goto(managerUrl);
   await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
-  await destination(page, 'Share').click();
+  await chooseManagerSection(page, 'Share');
 
   const compact = page.getByRole('region', { name: 'Export progress' });
   await expect(compact).toContainText('Complete export · Running');
@@ -825,7 +832,7 @@ test('Library first photo intersects the initial 390 by 844 viewport', async ({ 
     },
   });
   await page.goto(managerUrl);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 
   const firstPhoto = page.locator('.gallery-mosaic__item').first();
@@ -968,7 +975,7 @@ test('Photo Wall gives every photo equal weight with a separate immediate Album 
     status: 404, contentType: 'application/json', body: JSON.stringify({ code: 'PREVIEW_UNAVAILABLE', message: 'Preview unavailable.' }),
   }));
   await page.goto(managerUrl);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   const wall = page.locator('.gallery-photo-wall');
   const tiles = wall.locator('.gallery-photo');
   await expect(tiles).toHaveCount(8);
@@ -1034,7 +1041,7 @@ test('audience failure stays below the mobile Gallery sticky row', async ({ page
     audienceReadShouldFail = true;
     await page.setViewportSize({ width, height: 844 });
     await page.goto(managerUrl);
-    await destination(page, 'Gallery').click();
+    await chooseManagerSection(page, 'Gallery');
     await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 
     const controlRow = page.locator('.gallery-control-row');
@@ -1164,7 +1171,7 @@ test('the mobile Library tray, reopened Undo, Album, and Guest gallery stay reac
     event: { storedMediaCount: rows.length, storedBytes: 512 },
   });
   await page.goto(managerUrl);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
 
   for (const width of [320, 390]) {
@@ -1709,7 +1716,7 @@ test('Manager Guestbook contains maximum Unicode content at phone, desktop, and 
     { width: 640, height: 450, label: '200% zoom equivalent' },
   ]) {
     await page.setViewportSize({ width, height });
-    await destination(page, 'Guestbook').click();
+    await chooseManagerSection(page, 'Guestbook');
     await expect(page.getByRole('heading', { name: 'Guestbook from the day' })).toBeVisible();
     const entry = page.locator('.manager-guestbook__entry');
     await expect(entry.locator('h3')).toHaveAttribute('dir', 'auto');
@@ -1740,6 +1747,7 @@ test('keyboard-only Manager moderation keeps focus and scroll stable after confi
   });
   await page.goto(managerUrl);
   const guestbook = destination(page, 'Guestbook');
+  await openManagerNavigation(page);
   await guestbook.focus();
   await page.keyboard.press('Enter');
   const panel = page.getByRole('region', { name: 'Guestbook from the day' });
@@ -1776,7 +1784,7 @@ test('gallery-off keeps published captions out of Shared and labels them precise
     guestbook: { items: [caption] },
   });
   await page.goto(managerUrl);
-  await destination(page, 'Guestbook').click();
+  await chooseManagerSection(page, 'Guestbook');
   await expect(page.getByText('Photo captions with a saved Published state are not currently visible to event guests while the Guest gallery is off.')).toBeVisible();
   await expect(page.locator('.manager-guestbook__list > li')).toHaveCount(0);
   await page.getByRole('button', { name: /Hidden/u }).click();
@@ -1797,7 +1805,7 @@ test('Album metadata fields keep focus when 761 narrows to the phone fold', asyn
     },
   });
   await page.goto(managerUrl);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   await page.getByRole('group', { name: 'Gallery mode' }).getByRole('button', { name: /^Album/u }).click();
 
   const details = page.getByRole('button', { name: 'Album details' });
@@ -1827,7 +1835,7 @@ test('Gallery primary actions keep one focused control in their stable host acro
     },
   });
   await page.goto(managerUrl);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
 
   const modes = page.getByRole('group', { name: 'Gallery mode' });
   const host = page.locator('.workspace-heading .gallery-action');
@@ -1861,7 +1869,7 @@ test('a wide Library tray leaves the heading action visible but suppresses its m
     event: { storedMediaCount: rows.length },
   });
   await page.goto(managerUrl);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   await page.getByRole('button', { name: 'Select photos' }).click();
   await page.getByRole('button', {
     name: `Select ${rows[0]!.caption}, from ${rows[0]!.guestName}`,
@@ -1893,7 +1901,7 @@ test('an inactive Library tray does not suppress the active Album mobile action'
     },
   });
   await page.goto(managerUrl);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   await page.getByRole('button', { name: 'Select photos' }).click();
   await page.getByRole('button', {
     name: `Select ${rows[0]!.caption}, from ${rows[0]!.guestName}`,
@@ -1917,7 +1925,7 @@ test('the 320px Library dock follows a child tray as its capacity copy grows', a
     event: { storedMediaCount: 1 },
   });
   await page.goto(managerUrl);
-  await destination(page, 'Gallery').click();
+  await chooseManagerSection(page, 'Gallery');
   await page.locator('.gallery-private').evaluate((library) => {
     library.insertAdjacentHTML('beforeend', `
       <div class="selection-tray" role="region" aria-label="Album">

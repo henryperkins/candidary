@@ -157,7 +157,9 @@
   .gallery-private--wall .gallery-photo-wall { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
-  .manager-main:has(.manager-gallery[data-mode="library"]) { padding-top: 16px; }
+  .manager-main:has(.manager-gallery[data-mode="library"]) { padding-top: 12px; }
+  .manager-main .manager-title--library { margin-bottom: 8px; }
+  .manager-main .manager-title--library h1 { flex-basis: 10ch; }
   .manager-main:has(.manager-gallery[data-mode="library"]) .manager-title h1 { font-size: 1.375rem; }
   .manager-main:has(.manager-gallery[data-mode="library"]) .manager-title .status { margin-top: 8px; }
   .manager-main:has(.manager-gallery[data-mode="library"]) .lifecycle { margin: 12px 0 24px; padding: 10px 0; }
@@ -190,15 +192,32 @@
 body:has(.gallery-viewer) [data-gallery-live-host="true"] .album-undo__bar { bottom: calc(12px + env(safe-area-inset-bottom)); }
 
 .manager-gallery > .workspace-heading[hidden] { display: none; }
+.library-heading-actions { display: contents; }
 .library-add-photos { margin-left: auto; }
 .library-utilities { display: flex; align-items: center; gap: 4px; }
 .library-trash-trigger { min-width: 44px; min-height: 44px; }
 .library-note { color: var(--muted); line-height: 1.5; }
 .manager-gallery:not([data-mode="library"]) .library-utilities { display: contents; }
 @media (max-width: 760px) {
+  /* Keep utilities together, allowing headings and actions to wrap with larger text.
+     Visual order follows DOM order; exports remain anchored to this heading. */
+  .manager-gallery[data-mode="library"] > .workspace-heading { gap: 8px; }
+  .manager-gallery[data-mode="library"] #gallery-workspace-title { font-size: 1.625rem; }
   .manager-gallery[data-mode="library"] .gallery-total { margin-left: 0; }
-  .manager-gallery[data-mode="library"] .library-utilities { flex-basis: 100%; justify-content: flex-end; margin-top: -6px; }
-  .manager-gallery[data-mode="library"] .gallery-control-row { margin-top: 6px; }
+  .manager-gallery[data-mode="library"] .library-heading-actions {
+    flex-basis: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px 8px;
+  }
+  .manager-gallery[data-mode="library"] .library-add-photos { margin-left: 0; }
+  .manager-gallery[data-mode="library"] .library-add-photos .button { padding-inline: 16px; }
+  .manager-gallery[data-mode="library"] .library-utilities { justify-content: flex-end; }
+  .manager-gallery[data-mode="library"] .gallery-control-row { margin: 8px 0; }
+  .gallery-private.gallery-private--wall > .gallery-search { margin-bottom: 4px; }
+  .gallery-private--wall .library-toolbar { margin-bottom: 0; }
 }
 /* The single Undo host is a body portal, outside the inert manager shell. */
 body:has(.gallery-viewer) [data-gallery-live-host] .album-undo__bar { top: 64px; bottom: auto; max-height: 132px; overflow: auto; }

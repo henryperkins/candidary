@@ -1,5 +1,5 @@
 import type { LibraryChange, TrashOutcome } from '../features/gallery/library-file-actions';
-import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon, Link as LinkIcon, MessageCircle, QrCode, Settings, Trash2, X } from 'lucide-react';
+import { Check, ClipboardCheck, Copy, EyeOff, Image as ImageIcon, Link as LinkIcon, MessageCircle, QrCode, Settings, Trash2, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -53,6 +53,8 @@ import type {
   TrashedMediaView,
 } from '../app/types';
 import { Brand } from '../components/Brand';
+import { ManagerNavigation } from '../features/manager/ManagerNavigation';
+import { useWideViewport } from '../features/gallery/viewport';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventAccountCard } from '../components/EventAccountCard';
 import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
@@ -329,6 +331,7 @@ export function ManagerPage() {
 }
 
 function ManagerEventPage({ eventId }: { eventId: string }) {
+  const wideViewport = useWideViewport();
   const routerLocation = useLocation();
   const navigate = useNavigate();
   const navigationType = useNavigationType();
@@ -2766,6 +2769,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       && managerLinkRotation.saveStatus === 'copied'
     );
   const librarySurface = section === 'gallery' && (galleryMode === 'library' || galleryMode === 'album');
+  const compactEventHeader = librarySurface || !wideViewport;
   const uploadStatus = <span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span>;
   const managementDeadline = formatEventDateTime(event.managementAccessExpiresAt, event.eventTimezone);
   const lifecycle = <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{purgeAfterDisplay === null
@@ -2783,16 +2787,16 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     {/* The brand and the section navigation, which is a banner rather than complementary content. As
         an `aside` this announced a second unnamed complementary landmark beside the utility rail —
         `landmark-unique` — and as a plain `div` the brand fell outside every landmark — `region`. */}
-    <header className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
+    <ManagerNavigation section={section} navigationKey={canonicalManagerHref} mobile={!wideViewport} reviewCount={guestbookSummary?.needsReviewCount ?? 0} liveHost={galleryLiveHost}>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => { void openSection('gallery'); }}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
       <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => { void openSection('rsvp'); }}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
       <button aria-label={guestbookSummary?.needsReviewCount ? `Guestbook ${guestbookSummary.needsReviewCount}` : 'Guestbook'} disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'guestbook'} className={section === 'guestbook' ? 'active' : ''} onClick={() => { void openSection('guestbook'); }}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Guestbook</span>{Boolean(guestbookSummary?.needsReviewCount) && <span className="manager-nav__count" aria-hidden="true">{guestbookSummary?.needsReviewCount}</span>}</button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => { void openSection('share'); }}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => { void openSection('settings'); }}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
-    </nav></header>
+    </ManagerNavigation>
 
     <main className="manager-main">
-      {librarySurface ? <header className="manager-title manager-title--library">
+      {compactEventHeader ? <header className="manager-title manager-title--library">
         <h1>{event.name}</h1>
         <details className="library-event-details">
           <summary>Event details</summary>
@@ -2804,7 +2808,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         recoveryHint={eventResource.state.failure.recoveryHint}
         onRetry={() => void eventResource.reload()}
       />}
-      {!librarySurface && lifecycle}
+      {!compactEventHeader && lifecycle}
 
       {visibleNotice && <section
         className="manager-action-error"

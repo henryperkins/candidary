@@ -937,18 +937,20 @@ ManagerGalleryWorkspaceProps
     <div className="workspace-heading" hidden={librarySuspended}>
       <h2 id="gallery-workspace-title" tabIndex={-1}>{mode === 'library' ? 'Library' : 'Gallery'}</h2>
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} {event.storedMediaCount === 1 ? 'photo' : 'photos'}</p>
-      {mode === 'library' && <div className="library-add-photos">{libraryActions}</div>}
-      <div className="library-utilities">{mode === 'library' && trashAction}<details
-        className="gallery-export-tools"
-        open={mode !== 'library' || libraryToolsOpen || photoExportTarget?.mode === 'library' || !!exports.failure}
-        onToggle={event => { if (mode === 'library') setLibraryToolsOpen(event.currentTarget.open); }}
-      >
-        <summary hidden={mode !== 'library'}>Exports</summary>
-        <div className="gallery-export-tools__body">
-          <div className="gallery-action" ref={setActionDock} />
-          {libraryExportContent}
-        </div>
-      </details></div>
+      <div className="library-heading-actions">
+        {mode === 'library' && <div className="library-add-photos">{libraryActions}</div>}
+        <div className="library-utilities">{mode === 'library' && trashAction}<details
+          className="gallery-export-tools"
+          open={mode !== 'library' || libraryToolsOpen || photoExportTarget?.mode === 'library' || !!exports.failure}
+          onToggle={event => { if (mode === 'library') setLibraryToolsOpen(event.currentTarget.open); }}
+        >
+          <summary hidden={mode !== 'library'}>Exports</summary>
+          <div className="gallery-export-tools__body">
+            <div className="gallery-action" ref={setActionDock} />
+            {libraryExportContent}
+          </div>
+        </details></div>
+      </div>
     </div>
     <div className="gallery-control-row">
       <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">

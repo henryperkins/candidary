@@ -838,6 +838,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* The label and the count are styled by their own class, so neither can win the other's font size. */
 .manager-nav__label { margin: 0; color: var(--ink); font-size: .875rem; }
 .manager-nav button.active .manager-nav__label { color: var(--chestnut); }
+.manager-nav .manager-nav__toggle { display: none; }
+.manager-nav nav[hidden] { display: none; }
 /* A count runs to 10,000 — the per-event photo cap — so the badge is a pill that grows with its own
    text rather than a fixed box the digits spill out of. The 999px radius reads as a circle at one
    digit and as a capsule past that. */
@@ -2178,25 +2180,26 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-metadata:has(.album-metadata__summary) { display: block; }
 
 @media (max-width: 760px) {
-  /* Six destinations wrapped into a grid cost 189px — a third of the screen before the product says
-     anything, and at 320 `Gallery`, `Guestbook` and `Share` collided outright. One row a thumb moves
-     along costs 53. Bounded by max-width rather than undone later: from 761 the product turns this
-     into a vertical rail, and an unscoped horizontal row outranks every rule that would put it back,
-     so anything that re-shapes the nav belongs inside this query. */
+  /* A current-section disclosure keeps every destination reachable without a
+     clipped horizontal strip. The expanded list overlays the workspace. */
   .manager-shell, [data-gallery-live-host] { --manager-sticky-offset: 53px; }
-  /* One row: the brand holds the left edge — it is the only way back out of the manager, and the
-     shell has an e2e contract that it stays a 44px target at every width — and the destinations
-     scroll beside it. */
-  .manager-nav { display: flex; align-items: stretch; box-shadow: 0 1px 0 rgb(74 36 21 / 4%); }
-  .manager-nav .brand { flex: 0 0 auto; width: auto; min-height: 52px; padding: 0 14px; border-right: 1px solid var(--border); }
-  .manager-nav nav { flex: 1 1 auto; min-width: 0; width: auto; display: flex; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; scrollbar-width: none; -webkit-overflow-scrolling: touch; border-top: 0; }
-  .manager-nav nav::-webkit-scrollbar { display: none; }
-  .manager-nav button { flex: 0 0 auto; scroll-snap-align: center; width: auto; min-height: 52px; padding: 0 15px; flex-direction: row; gap: 7px; border-bottom: 2px solid transparent; }
-  .manager-nav button svg { width: 17px; height: 17px; }
-  .manager-nav button.active { border-bottom-color: var(--chestnut); background: none; box-shadow: none; }
-  .manager-nav button:not(.active):hover { background: none; }
-  /* In a row the badge sits beside its label instead of over it. */
+  .manager-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 8px; padding: 0 12px; }
+  .manager-nav[data-navigation-open] { z-index: 50; }
+  /* Workspace popovers and Undo sit below navigation; modal viewers still own
+     the foreground while the manager is inert. */
+  [inert] .manager-nav[data-navigation-open] { z-index: 5; }
+  .manager-nav .brand { flex: 0 0 auto; width: auto; min-height: 52px; padding: 0; }
+  .manager-nav .manager-nav__toggle { display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 6px; min-width: 44px; min-height: 44px; margin: 4px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--chestnut); font-size: .875rem; line-height: 1.3; }
+  .manager-nav nav { position: absolute; top: calc(100% + 8px); left: 12px; right: 12px; width: auto; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; max-height: calc(100svh - var(--manager-sticky-offset) - 24px); padding: 8px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); }
+  .manager-nav nav button { width: 100%; min-width: 44px; min-height: 48px; padding: 10px 12px; flex-direction: row; justify-content: start; gap: 10px; border: 0; border-radius: 6px; line-height: 1.3; text-align: left; }
+  .manager-nav button svg { width: 20px; height: 20px; flex-shrink: 0; }
+  .manager-nav nav button.active { background: var(--denim-soft); box-shadow: none; }
+  .manager-nav nav button:not(.active):hover { background: var(--manager-ground, #faf6ee); }
+  .manager-nav :is(button, a):focus-visible { outline: 2px solid var(--focus); outline-offset: -3px; }
+  .manager-nav nav .manager-nav__label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .manager-nav__count { position: static; top: auto; right: auto; }
+  .manager-nav__count { height: auto; min-height: 20px; flex-shrink: 0; line-height: 1.3; }
+  .manager-main:has(.manager-title--library) { padding-top: 12px; }
 
   /* The three chips restate what the switch above already carries — the Album count and the Guest
      gallery state are in the segments — and a second row saying it again costs 43px of photograph.
