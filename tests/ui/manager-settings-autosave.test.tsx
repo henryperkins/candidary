@@ -79,9 +79,10 @@ function managerFetch(pages: Record<string, MediaPage>, event: Record<string, un
 }
 
 async function openSettings(user: ReturnType<typeof userEvent.setup>) {
-  await screen.findByRole('heading', { name: 'Live intake' });
+  await screen.findByRole('heading', { name: 'Library' });
   await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
     .getByRole('button', { name: /settings/i }));
+  await screen.findByRole('heading', { name: 'Settings' });
 }
 
 function typist() {
@@ -301,7 +302,7 @@ describe('manager settings autosave guards', () => {
     vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
     const user = typist();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
     await user.click(nav.getByRole('button', { name: 'RSVP' }));
@@ -350,7 +351,7 @@ describe('manager settings autosave guards', () => {
 
     const user = typist();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
     await user.click(nav.getByRole('button', { name: 'RSVP' }));
     await user.click(await screen.findByRole('button', { name: 'Add guests' }));
@@ -525,7 +526,7 @@ describe('manager settings autosave guards', () => {
     expect(screen.queryByRole('heading', { name: 'Gallery' })).not.toBeInTheDocument();
 
     release!();
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
   });
 
@@ -704,7 +705,7 @@ describe('manager settings autosave guards', () => {
     const removed = vi.spyOn(window, 'removeEventListener');
     const user = typist();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     const nav = within(screen.getByRole('navigation', { name: 'Manager sections' }));
     await user.click(nav.getByRole('button', { name: 'RSVP' }));
@@ -720,25 +721,16 @@ describe('manager settings autosave guards', () => {
       .toBeGreaterThan(0));
   });
 
-  it('does not let an Intake poll opened before an RSVP write restore an older event', async () => {
-    const staleEvent = { ...MANAGED_EVENT, name: 'Stale intake event', rsvpRosterVersion: 7 };
+  it('keeps the confirmed RSVP refresh authoritative without a retired Intake poll', async () => {
     const freshEvent = { ...MANAGED_EVENT, name: 'Fresh RSVP event', rsvpRosterVersion: 8 };
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
     let eventReads = 0;
-    let releaseStaleRead: (() => void) | null = null;
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
       if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
         eventReads += 1;
         if (eventReads === 1) return json({ event: MANAGED_EVENT });
-        if (eventReads === 2) {
-          return new Promise<Response>((resolve) => {
-            releaseStaleRead = () => resolve(new Response(JSON.stringify({
-              data: { event: staleEvent }, requestId: 'request-a',
-            }), { headers: { 'content-type': 'application/json' } }));
-          });
-        }
         return json({ event: freshEvent });
       }
       if (url.endsWith('/rsvp/roster/preview') && method === 'POST') {
@@ -761,11 +753,9 @@ describe('manager settings autosave guards', () => {
     const intervals = vi.spyOn(window, 'setInterval');
     const user = typist();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
 
-    const poll = intervals.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0] as (() => void) | undefined;
-    poll?.();
-    await waitFor(() => expect(releaseStaleRead).not.toBeNull());
+    expect(intervals.mock.calls.some(([, delay]) => delay === 5_000)).toBe(false);
 
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: 'RSVP' }));
@@ -776,9 +766,7 @@ describe('manager settings autosave guards', () => {
     await user.click(screen.getByRole('button', { name: 'Continue to details' }));
     await user.click(screen.getByRole('button', { name: 'Review guests' }));
     await user.click(await screen.findByRole('button', { name: 'Add 1 guest across 1 household' }));
-    await waitFor(() => expect(eventReads).toBe(3));
-
-    releaseStaleRead!();
+    await waitFor(() => expect(eventReads).toBe(2));
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /settings/i }));
     await waitFor(() => expect(screen.getByLabelText('Event name')).toHaveValue('Fresh RSVP event'));

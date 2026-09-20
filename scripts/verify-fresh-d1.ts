@@ -398,17 +398,21 @@ const INVARIANT_STATEMENT_COUNT = 31;
  * immutable preset asset versions 1 and 2 without widening other cover guards.
  * Twenty-three with `0023_photo_export_selection.sql`, which preserves legacy
  * exports and adds disabled selection admission and device delivery leases.
+ * Twenty-four with `0024_guest_gallery_pagination.sql`, which adds stable guest
+ * gallery publication ordering. Twenty-five with
+ * `0025_library_delivery_sequence.sql`, which adds the Library arrival ledger.
  * Count and terminal schema assertions move together here.
  */
-const EXPECTED_MIGRATION_COUNT = 23;
+const EXPECTED_MIGRATION_COUNT = 25;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
  * existing invariant bodies, all fifteen 0015 bodies, the twelve 0019 recovery
  * and source-hold bodies, the nine 0020 execution/progress/admission bodies,
- * the eight 0021 actor/Album bodies, and the two 0022 cover bodies cannot drift
- * behind a name-only check. Selection protocol and lease guards from 0023
- * are pinned alongside the preserved legacy guards.
+ * the eight 0021 actor/Album bodies, the two 0022 cover bodies, and the two
+ * 0025 delivery-sequence bodies cannot drift behind a name-only check.
+ * Selection protocol and lease guards from 0023 are pinned alongside the
+ * preserved legacy guards.
  *
  * Two of these names are older than their bodies: 0019 replaces
  * `media_object_write_tombstone_guard_update` and `media_stored_legacy_guard_update`
@@ -454,6 +458,8 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   media_album_pick_pair_guard: '3b5f330cba957d70996fab01ec7c5a2a036d187d763b272cbc5c47537398ba99',
   media_album_pick_version_on_legacy_pick: '56a71f0e73e766ef0849252f57602d6bd138560e73550e9b2f92fde17aaf02f9',
   media_album_pick_version_on_legacy_unpick: '6828c1b9287e68d1571dafd500f3793dadb5d322b174d791d78d53b0b8dfd6e4',
+  media_delivery_sequence_insert: 'd7353b6d82d68af98a0654eacf7255afb1a46cbbe8b87c877ff49d66f8a34534',
+  media_delivery_sequence_stored: '07cc94063cc3534315ed7a538e526a0d9501cc1850cec9fd724ae709d3d04bc9',
   media_object_promotion_inventory_insert: 'ec75363b45f7be245506e400dca3329e06abe7f388334a6c13b01d64d237579e',
   media_object_promotion_inventory_update: '3523593400afa87a2ba6ac0432deee1686d944cfd4b2aa6a35fba2e5cbb69ea6',
   media_object_promotion_reservation_capability_guard: 'f7473c9ffeee90d78349f46bf91bc20e70da52bc7bb49f41f176ba0ce1f3848a',
@@ -672,6 +678,8 @@ const EXPECTED_GUESTBOOK_COLUMNS: Record<string, readonly string[]> = {
     'trashed_at', 'restore_until',
     // 0021, appended so every earlier ordinal is unmoved.
     'album_pick_version',
+    // 0025, appended so delivered Library snapshots keep a stable event-local order.
+    'delivery_sequence',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
@@ -977,6 +985,9 @@ const EXPECTED_COLUMN_NAMES = {
     // 0021. Album eligibility and Manager-link rotation each own an event-local
     // monotonic revision; neither exposes credential identity.
     'album_pick_generation', 'manager_link_revision',
+    // 0025. The Library arrival marker advances only when a delivery receives
+    // its stable event-local sequence.
+    'last_delivery_sequence',
   ],
   rsvpRosterBatchReceipts: [
     'event_id', 'idempotency_key', 'request_digest', 'receipt_json', 'created_at',
@@ -1030,6 +1041,7 @@ const EXPECTED_TERMINAL_COLUMNS: Record<keyof typeof EXPECTED_COLUMN_NAMES, Expe
     { name: 'recoverable_bytes', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
     { name: 'album_pick_generation', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
     { name: 'manager_link_revision', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
+    { name: 'last_delivery_sequence', type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 },
   ],
   rsvpRosterBatchReceipts: [
     { name: 'event_id', type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 },

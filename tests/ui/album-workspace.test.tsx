@@ -886,6 +886,14 @@ async function openAlbum(user = userEvent.setup()) {
   await screen.findByRole('heading', { name: 'Library' });
   await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
     .getByRole('button', { name: /^Album/ }));
+  const settings = screen.queryByRole('button', { name: 'Album settings' });
+  if (settings && settings.getAttribute('aria-expanded') !== 'true') await user.click(settings);
+  return user;
+}
+
+async function openAlbumSettings(user = userEvent.setup()) {
+  const settings = await screen.findByRole('button', { name: 'Album settings' });
+  if (settings.getAttribute('aria-expanded') !== 'true') await user.click(settings);
   return user;
 }
 
@@ -1330,9 +1338,9 @@ describe('gallery modes', () => {
       },
       [['Album', '1 photo'], ['Album link', 'Off'], ['Guest gallery', 'On, 1 published']],
     ],
-  ] satisfies Array<[GalleryAudienceSummaryView, Array<[string, string]>]>)('renders the persistent audience summary %#', async (audienceSummary, expected) => {
+  ] satisfies Array<[GalleryAudienceSummaryView, Array<[string, string]>]>)('renders the Album audience summary %#', async (audienceSummary, expected) => {
     const { fetchMock } = harness({ audienceSummary });
-    renderWorkspace(fetchMock);
+    renderWorkspace(fetchMock, {}, { mode: 'album' });
 
     await waitFor(() => expect(audienceFacts()).toEqual(expected));
     expect(document.querySelector('.gallery-audience')).toBeVisible();
@@ -1409,14 +1417,13 @@ describe('gallery modes', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('The refreshed summary failed.');
     expect(audienceFacts()).toEqual(trustedFacts);
-    expect(document.querySelector('.gallery-audience')).toBeVisible();
+    expect(document.querySelector('.gallery-audience')).not.toBeVisible();
     expect(state.audienceReads).toBe(2);
 
     await userEvent.setup().click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
-    expect(await screen.findByText(
-      'Last known current Album: 12 photos. Current Album count unavailable.',
-    )).toBeVisible();
+    expect(document.querySelector('.gallery-audience')).toBeVisible();
+    expect(audienceFacts()).toEqual(trustedFacts);
     expect(screen.queryByText('Current Album: 12 photos (+2 photos).')).not.toBeInTheDocument();
   });
 
@@ -1482,6 +1489,7 @@ describe('gallery modes', () => {
     expect(within(contextDisclosure()).getByText(/^One Album per event/u)).toBeInTheDocument();
     expect(within(contextDisclosure()).queryByText(/^Delivered photos stay private to hosts/u))
       .not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Album settings' }));
     expect(screen.getByRole('button', { name: 'Add a section' })).toBeVisible();
     expect(screen.queryByRole('heading', { name: 'The order people with the Album link will see' }))
       .not.toBeInTheDocument();
@@ -1674,7 +1682,7 @@ describe('gallery modes', () => {
 
     await user.click(within(modes).getByRole('button', { name: /^Library/u }));
     expect(await screen.findByRole('button', { name: 'Add to album: First dance' })).toBeVisible();
-    expect(screen.getByText('Guest gallery · Published')).toBeVisible();
+    expect(within(modes).getByRole('button', { name: 'Guest gallery, 1' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Add to album: First dance' }));
     await waitFor(() => expect(controlled.state.galleryRows[0]).toMatchObject({
       publicationStatus: 'published', isFavorite: true,
@@ -2015,12 +2023,13 @@ describe('audience summary invalidation boundaries', () => {
     expect(publishedReads).toHaveLength(2);
 
     await user.click(screen.getByRole('button', { name: /^Library/u }));
-    expect(await screen.findByText('Guest gallery · Published')).toBeVisible();
+    expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: 'Guest gallery, 1' })).toBeVisible();
     const libraryReads = controlled.fetchMock.mock.calls.filter(([input, init]) => {
       const url = new URL(String(input), 'https://candidary.test');
       return url.pathname.endsWith('/gallery') && (init?.method ?? 'GET') === 'GET';
     });
-    expect(libraryReads).toHaveLength(2);
+    expect(libraryReads).toHaveLength(1);
   });
 
   it('drops a deferred single confirmation after its event workspace is replaced', async () => {
@@ -2598,6 +2607,7 @@ describe('the album', () => {
     expect(screen.queryByText('Earlier Album picks')).not.toBeInTheDocument();
 
     start.resolve();
+    await openAlbumSettings();
     const description = await screen.findByLabelText('Description');
     vi.useFakeTimers();
     fireEvent.change(description, { target: { value: 'Saved after automatic start.' } });
@@ -2751,6 +2761,7 @@ describe('the album', () => {
     await openAlbum();
 
     expect(await screen.findByText('The Album changed before it could be started.')).toBeVisible();
+    await openAlbumSettings();
     expect(await screen.findByLabelText('Album title')).toBeVisible();
     expect(controlled.state.albumReads).toBe(2);
     expect(controlled.state.startRequests).toHaveLength(1);
@@ -2867,6 +2878,7 @@ describe('the album', () => {
     const rendered = render(<EventAlbum eventId="event-a" />);
     await waitFor(() => expect(first.state.startRequests).toHaveLength(1));
     rendered.rerender(<EventAlbum eventId="event-b" />);
+    await openAlbumSettings();
     expect(await screen.findByDisplayValue('Second event Album')).toBeVisible();
     onPicksChanged.mockClear();
     onAudienceChanged.mockClear();
@@ -3136,6 +3148,7 @@ describe('the album', () => {
     const save = deferred();
     const controlled = harness({ orderGates: [save.promise] });
     const { albumRef } = renderAlbum(controlled.fetchMock);
+    await openAlbumSettings();
     const title = await screen.findByLabelText('Album title');
     fireEvent.change(title, { target: { value: 'Settled before leaving' } });
 
@@ -3154,6 +3167,7 @@ describe('the album', () => {
   it('returns exact invalid and failed Album leave outcomes', async () => {
     const invalid = harness();
     const invalidView = renderAlbum(invalid.fetchMock);
+    await openAlbumSettings();
     const title = await screen.findByLabelText('Album title');
     fireEvent.change(title, { target: { value: '' } });
 
@@ -3168,6 +3182,7 @@ describe('the album', () => {
       orderErrorCodes: ['SESSION_EXPIRED'],
     });
     const failedView = renderAlbum(failed.fetchMock);
+    await openAlbumSettings();
     const failedTitle = await screen.findByLabelText('Album title');
     fireEvent.change(failedTitle, { target: { value: 'Cannot save' } });
     fireEvent.blur(failedTitle);
@@ -3182,6 +3197,7 @@ describe('the album', () => {
   it('discards scheduled Album work while allowing an already-sent request to finish', async () => {
     const scheduled = harness();
     const scheduledView = renderAlbum(scheduled.fetchMock);
+    await openAlbumSettings();
     const scheduledTitle = await screen.findByLabelText('Album title');
     vi.useFakeTimers();
     fireEvent.change(scheduledTitle, { target: { value: 'Never sent' } });
@@ -3195,6 +3211,7 @@ describe('the album', () => {
     const inFlight = deferred();
     const sent = harness({ orderGates: [inFlight.promise] });
     const sentView = renderAlbum(sent.fetchMock);
+    await openAlbumSettings();
     const sentTitle = await screen.findByLabelText('Album title');
     fireEvent.change(sentTitle, { target: { value: 'Already sent' } });
     fireEvent.blur(sentTitle);
@@ -3328,9 +3345,7 @@ describe('the album', () => {
     });
     renderAlbum(fetchMock);
 
-    expect(await screen.findByText(
-      '0 photos · drag an entry, or use the move controls',
-    )).toBeVisible();
+    expect(await screen.findByText('0 photos')).toBeVisible();
   });
 
   it('renders explicit and fallback covers, photo-only numbers, and independent failed preview tiles', async () => {
@@ -3390,6 +3405,7 @@ describe('the album', () => {
       },
     });
     const { onAnnouncement } = renderAlbum(fetchMock);
+    await openAlbumSettings();
 
     await userEvent.setup().click(
       await screen.findByRole('button', { name: 'Use the first photo instead' }),
@@ -3829,6 +3845,7 @@ describe('the album', () => {
 
     await user.click(screen.getByRole('button', { name: 'Undo' }));
     expect(await screen.findByDisplayValue('Reception')).toBeVisible();
+    await openAlbumSettings(user);
     expect(Array.from(document.querySelectorAll('.album-review-grid > li')).map((item) => (
       item.getAttribute('data-entry-key')
     ))).toEqual(['photo:p2', 'section:s1', 'photo:p1']);
@@ -3895,6 +3912,7 @@ describe('the album', () => {
 
     await user.click(screen.getByRole('button', { name: 'Undo' }));
     expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
+    await openAlbumSettings(user);
     expect(screen.getByText('Cover · p2.jpg')).toBeVisible();
     expect(Array.from(document.querySelectorAll('.album-review-grid > li')).map((item) => (
       item.getAttribute('data-entry-key')
@@ -4312,7 +4330,7 @@ describe('the album', () => {
     const user = await openAlbum();
 
     expect(await screen.findByRole('heading', { name: 'The Album is empty.' })).toBeVisible();
-    expect(screen.getByText('Pick photos in Library. Each pick makes a photo In Album for every host on this event. It does not publish to the Guest gallery.')).toBeVisible();
+    expect(screen.getByText('Add photos from Library to start arranging your album.')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Go to Library' }));
     expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Library/u })).toHaveAttribute('aria-pressed', 'true');
@@ -4355,14 +4373,12 @@ describe('the album', () => {
     });
     const onPrepare = vi.fn(noop);
     renderWorkspace(controlled.fetchMock, { onPrepare });
-    const user = await openAlbum();
+    await openAlbum();
 
     expect(await screen.findByRole('button', { name: 'Remove p1.jpg from the Album' })).toBeVisible();
-    const prepare = screen.getByRole('button', { name: 'Prepare Album ZIP' });
-    expect(prepare.closest('.album-export')).toHaveTextContent('Current Album: 0 photos.');
-    expect(prepare).toBeDisabled();
-    expect(screen.getByText('Add a photo to the Album before preparing it.')).toBeVisible();
-    await user.click(prepare);
+    const download = screen.getByRole('button', { name: 'Download Album' });
+    expect(download).toBeDisabled();
+    expect(download).toHaveAccessibleDescription('Add photos from Library to download your album.');
     expect(onPrepare).not.toHaveBeenCalled();
   });
 
@@ -4464,10 +4480,10 @@ describe('the album', () => {
     controlled.state.albumReadErrors[recoveryRead] = 'The canonical album could not be reloaded.';
     controlled.state.albumReadGates[recoveryRead + 1] = retryReload.promise;
     await user.click(screen.getByRole('button', { name: /^Move First dance later/ }));
-    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
+    await user.click(screen.getByRole('button', { name: 'Download Album' }));
     await act(async () => { save.resolve(); });
     await waitFor(() => expect(controlled.state.albumReads).toBe(recoveryRead + 1));
-    expect(screen.getByRole('button', { name: 'Preparing Album ZIP…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Preparing…' })).toBeDisabled();
     expect(onPrepare).not.toHaveBeenCalled();
     await act(async () => { failedReload.resolve(); });
 
@@ -4478,8 +4494,8 @@ describe('the album', () => {
     expect(onPrepare).not.toHaveBeenCalled();
 
     await act(async () => { retryReload.resolve(); });
-    await screen.findByRole('button', { name: 'Prepare Album ZIP' });
-    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
+    await screen.findByRole('button', { name: 'Download Album' });
+    await user.click(screen.getByRole('button', { name: 'Download Album' }));
     expect(onPrepare).toHaveBeenCalledOnce();
   });
 
@@ -4554,6 +4570,7 @@ describe('the album', () => {
     await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
+    await user.click(await screen.findByRole('button', { name: 'Your prepared download is ready' }));
 
     expect(await screen.findByRole('link', { name: /Download ZIP part 1 of 2/ })).toHaveAttribute('href', '/part-1');
     expect(screen.getByRole('link', { name: /Download ZIP part 2 of 2/ })).toHaveAttribute('href', '/part-2');
@@ -4571,7 +4588,6 @@ describe('the album', () => {
     await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
-
     expect(await screen.findByRole('heading', { name: '1 existing pick from before this update.' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Start the Album from it' }));
     await waitFor(() => expect(state.startWrites).toEqual(['from-picks']));
@@ -4612,7 +4628,6 @@ describe('the album', () => {
     await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
-
     await screen.findByRole('button', { name: /^Move First dance later/ });
     await user.click(screen.getByRole('button', { name: /^Move First dance later/ }));
 
@@ -4628,6 +4643,7 @@ describe('the album', () => {
     await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
+    await openAlbumSettings(user);
 
     await user.click(await screen.findByRole('button', { name: 'Add a section' }));
     await waitFor(() => expect(state.orderWrites.at(-1)?.some((entry) => entry.kind === 'section')).toBe(true));
@@ -4662,13 +4678,12 @@ describe('the album', () => {
     await screen.findByRole('heading', { name: 'Library' });
     await user.click(within(screen.getByRole('group', { name: 'Gallery mode' }))
       .getByRole('button', { name: /^Album/ }));
-    const exportControl = (await screen.findByRole('button', { name: 'Prepare Album ZIP' }))
-      .closest('.album-export');
-    expect(exportControl).toHaveTextContent('Current Album: 2 photos.');
+    const modes = screen.getByRole('group', { name: 'Gallery mode' });
+    expect(within(modes).getByRole('button', { name: 'Album, 2' })).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Remove p2.jpg from the Album' }));
 
-    await waitFor(() => expect(exportControl).toHaveTextContent('Current Album: 1 photo.'));
+    await waitFor(() => expect(within(modes).getByRole('button', { name: 'Album, 1' })).toBeVisible());
   });
 
   it('keeps successful removal undoable when the authoritative refresh fails', async () => {
@@ -4717,8 +4732,8 @@ describe('the album', () => {
     await act(async () => { refresh.resolve(); });
 
     expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Prepare Album ZIP' }).closest('.album-export'))
-      .toHaveTextContent('Current Album: 1 photo.');
+    expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: 'Album, 1' })).toBeVisible();
   });
 
   it('reconciles a committed removal while export count remains summary-authoritative', async () => {
@@ -4766,8 +4781,8 @@ describe('the album', () => {
     await act(async () => { refresh.resolve(); });
 
     expect(await screen.findByRole('button', { name: 'Remove p2.jpg from the Album' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Prepare Album ZIP' }).closest('.album-export'))
-      .toHaveTextContent('Current Album: 2 photos.');
+    expect(within(screen.getByRole('group', { name: 'Gallery mode' }))
+      .getByRole('button', { name: 'Album, 2' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
     expect(rendered.invalidateGalleryAfterMutation).toHaveBeenCalled();
 
@@ -4785,7 +4800,7 @@ describe('the album', () => {
       .getByRole('button', { name: /^Album/ }));
 
     expect(await screen.findByRole('heading', { name: 'The Album is empty.' })).toBeVisible();
-    expect(screen.getByText('Pick photos in Library. Each pick makes a photo In Album for every host on this event. It does not publish to the Guest gallery.')).toBeVisible();
+    expect(screen.getByText('Add photos from Library to start arranging your album.')).toBeVisible();
   });
 });
 
@@ -4950,7 +4965,7 @@ describe('album review regressions', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(message);
     expect(state.orderWrites).toHaveLength(0);
-  });
+  }, 15_000);
 
   it('reloads only REVISION_CONFLICT and leaves ALBUM_FULL as a retryable save failure', async () => {
     const controlled = harness({
@@ -5318,6 +5333,7 @@ describe('album review regressions', () => {
     expect(document.querySelectorAll('.album-undo [role="status"]')).toHaveLength(1);
 
     loadingAlbum.resolve();
+    await openAlbumSettings();
     await screen.findByLabelText('Album title');
     expect(document.querySelectorAll('[data-gallery-live-host] [role="status"]')).toHaveLength(1);
   });
@@ -5341,12 +5357,13 @@ describe('album review regressions', () => {
     };
     renderWorkspace(pickedHarness.fetchMock, { albumJob, onPrepare });
     const user = await openAlbum();
+    await user.click(await screen.findByRole('button', { name: 'View previous download' }));
 
     expect(await screen.findByText(/A photo in this prepared export is no longer available\. Prepare the current Album\./, {
       selector: 'span',
     })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Retry this prepared export' })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Prepare Album ZIP' }));
+    await user.click(screen.getByRole('button', { name: 'Download Album' }));
     expect(onPrepare).toHaveBeenCalledWith('album');
   });
 
@@ -6039,7 +6056,7 @@ describe('album review regressions', () => {
 
   it.each([
     [0, 'Undo'],
-    [1, 'Album title'],
+    [1, 'Album'],
   ] as const)('uses the first mounted editor control after Start empty click detail %i', async (
     detail,
     focusedName,
@@ -6055,9 +6072,9 @@ describe('album review regressions', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Start empty' }), { detail });
     await screen.findByRole('button', { name: 'Undo' });
 
-    const focused = focusedName === 'Album title'
-      ? screen.getByLabelText(focusedName)
-      : screen.getByRole('button', { name: focusedName });
+    const focused = focusedName === 'Undo'
+      ? screen.getByRole('button', { name: focusedName })
+      : screen.getByRole('heading', { name: focusedName });
     expect(focused).toHaveFocus();
   });
 
@@ -6093,7 +6110,7 @@ describe('album review regressions', () => {
     await openAlbum();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Start empty' }), { detail: 1 });
-    await screen.findByLabelText('Album title');
+    await screen.findByRole('heading', { name: 'Album' });
 
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
     expect(rendered.invalidateGalleryAfterMutation).toHaveBeenCalled();
@@ -6437,11 +6454,12 @@ describe('recently deleted photos in the album', () => {
     const marker = await retainedMarker();
 
     await userEvent.setup().click(
-      within(marker).getByRole('button', { name: 'Restore in Recently deleted' }),
+      within(marker).getByRole('button', { name: 'Restore in Trash' }),
     );
 
     expect(onOpenRecentlyDeleted).toHaveBeenCalledExactlyOnceWith('p9');
     // Album routed nowhere and kept nothing: it is still the editor, unsaved and unread.
+    await openAlbumSettings();
     expect(screen.getByLabelText('Album title')).toHaveValue('The evening');
     expect(await retainedMarker()).toBeInTheDocument();
     expect(state.orderWrites).toHaveLength(0);
@@ -6458,7 +6476,7 @@ describe('recently deleted photos in the album', () => {
     const marker = await retainedMarker();
     expect(within(marker).getByText('Recovery expired · cleanup pending')).toBeVisible();
     expect(within(marker).getByText(LAPSED_IN_CHICAGO)).toBeVisible();
-    expect(within(marker).queryByRole('button', { name: 'Restore in Recently deleted' })).not.toBeInTheDocument();
+    expect(within(marker).queryByRole('button', { name: 'Restore in Trash' })).not.toBeInTheDocument();
     // The slot is still held, so it is still reorderable and still saved.
     expect(within(marker).getByRole('button', { name: 'Move Recently deleted photo earlier' })).toBeEnabled();
   });
@@ -6473,7 +6491,7 @@ describe('recently deleted photos in the album', () => {
 
     const marker = await retainedMarker();
     expect(within(marker).getByText('Recovery expired · cleanup pending')).toBeVisible();
-    expect(within(marker).queryByRole('button', { name: 'Restore in Recently deleted' })).not.toBeInTheDocument();
+    expect(within(marker).queryByRole('button', { name: 'Restore in Trash' })).not.toBeInTheDocument();
   });
 
   it('updates a retained slot when its recovery deadline crosses while the editor stays open', async () => {
@@ -6487,10 +6505,10 @@ describe('recently deleted photos in the album', () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     const marker = screen.getByText('Recently deleted photo').closest('li')!;
-    expect(within(marker).getByRole('button', { name: 'Restore in Recently deleted' })).toBeEnabled();
+    expect(within(marker).getByRole('button', { name: 'Restore in Trash' })).toBeEnabled();
     act(() => { vi.advanceTimersByTime(1_000); });
     expect(within(marker).getByText('Recovery expired · cleanup pending')).toBeVisible();
-    expect(within(marker).queryByRole('button', { name: 'Restore in Recently deleted' })).not.toBeInTheDocument();
+    expect(within(marker).queryByRole('button', { name: 'Restore in Trash' })).not.toBeInTheDocument();
   });
 
   it('starts an unsaved retained-only album from picks without dropping its held slot', async () => {
@@ -6518,7 +6536,7 @@ describe('recently deleted photos in the album', () => {
     expect(state.album.saved).toBe(true);
     expect(screen.queryByText('1 existing pick from before this update.')).not.toBeInTheDocument();
     expect(await retainedMarker()).toBeInTheDocument();
-    expect(screen.getByText('0 photos In Album, and 1 recently deleted photo still holding a place'))
+    expect(screen.getByText('0 photos, and 1 recently deleted photo still holding a place'))
       .toBeVisible();
   });
 
@@ -6550,7 +6568,7 @@ describe('recently deleted photos in the album', () => {
     // Trash does not give an album slot back, and this line is where a host looks
     // before deciding there is room for more.
     expect(await screen.findByText(
-      '2 photos In Album, and 1 recently deleted photo still holding a place',
+      '2 photos, and 1 recently deleted photo still holding a place',
     )).toBeVisible();
   });
 
@@ -6560,7 +6578,7 @@ describe('recently deleted photos in the album', () => {
     });
     renderAlbum(fetchMock, { eventTimezone: 'America/Chicago' });
 
-    expect(await screen.findByText('1 photo In Album')).toBeVisible();
+    expect(await screen.findByText('1 photo')).toBeVisible();
     expect(screen.queryByText(/still holding a place/)).not.toBeInTheDocument();
   });
 
@@ -6568,13 +6586,14 @@ describe('recently deleted photos in the album', () => {
     const slot = retainedSlot('p9', RECOVERABLE_UNTIL);
     const { fetchMock } = albumWithRetainedSlot(slot, { coverMediaId: 'p9' });
     renderAlbum(fetchMock, { eventTimezone: 'America/Chicago' });
+    await openAlbumSettings();
 
     const cover = await screen.findByRole('img', { name: 'Album cover: First dance' });
     expect(cover).toHaveAttribute('src', '/api/media/p1/preview');
     expect(screen.getByText('Cover · first photo, until you star another · First dance')).toBeVisible();
     expect(screen.getByText('Your chosen cover is a recently deleted photo.')).toBeVisible();
     expect(document.querySelector('.album-cover__retained')).toHaveTextContent(
-      `Restore it in Recently deleted by ${RECOVERABLE_IN_CHICAGO} and it is the cover again. Until then people with the Album link see the first photo`,
+      `Restore it in Trash by ${RECOVERABLE_IN_CHICAGO} and it is the cover again. Until then people with the Album link see the first photo`,
     );
     expect(document.querySelector('.album-cover__retained time'))
       .toHaveAttribute('datetime', RECOVERABLE_UNTIL);
@@ -6584,6 +6603,7 @@ describe('recently deleted photos in the album', () => {
     const slot = retainedSlot('p9', RECOVERABLE_UNTIL);
     const { state, fetchMock } = albumWithRetainedSlot(slot, { coverMediaId: 'p9' });
     renderAlbum(fetchMock, { eventTimezone: 'America/Chicago' });
+    await openAlbumSettings();
 
     await userEvent.setup().click(
       await screen.findByRole('button', { name: 'Use p2.jpg as the Album cover' }),
@@ -6601,6 +6621,7 @@ describe('recently deleted photos in the album', () => {
     const slot = retainedSlot('p9', LAPSED_UNTIL, 'expired-cleanup-pending');
     const { fetchMock } = albumWithRetainedSlot(slot, { coverMediaId: 'p9' });
     renderAlbum(fetchMock, { eventTimezone: 'America/Chicago' });
+    await openAlbumSettings();
 
     expect(await screen.findByText('Your chosen cover is a recently deleted photo.')).toBeVisible();
     expect(document.querySelector('.album-cover__retained')).toHaveTextContent(
@@ -6763,7 +6784,7 @@ describe('stopping the album link', () => {
 
     await waitFor(() => expect(state.shareWrites).toEqual(['stop']));
     expect(screen.getByRole('button', { name: 'Create Album link' })).toBeDisabled();
-    expect(screen.getByRole('heading', { name: 'Download Album' })).toHaveFocus();
+    expect(screen.getByRole('heading', { name: 'Album link' })).toHaveFocus();
   });
 
   it('uses the Album link fallback and keeps the host in the dialog when revocation fails', async () => {

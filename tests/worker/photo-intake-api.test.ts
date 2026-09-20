@@ -276,7 +276,7 @@ describe('scheduled photo delivery', () => {
 
     expect(response.status).toBe(200);
     expect(event).toMatchObject({
-      eventStartAt: '2026-09-19T22:30:00.000Z',
+      eventStartTime: '17:30',
       uploadsEnabled: true,
       photosOpen: false,
       photoIntakeState: 'scheduled',

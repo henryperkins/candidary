@@ -53,6 +53,10 @@ export default defineConfig({
   ],
   test: {
     include: ['tests/worker/**/*.test.ts'],
+    // Keep workerd, D1, and R2 integration pools within the memory budget used
+    // by the local and CI gate runners. Higher concurrency can cancel healthy
+    // requests while several isolated runtimes initialize at once.
+    maxWorkers: 2,
     // Password hashing is deliberately expensive, and a test that registers and
     // signs in several times spends real time in scrypt rather than waiting on IO.
     testTimeout: 20_000,

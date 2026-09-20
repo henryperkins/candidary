@@ -2964,7 +2964,12 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                     </ol>}
               </div>}
 
-          <section className="album-settings" aria-label="Album settings">
+          {previewOpen && <button
+            type="button"
+            className="button button--secondary"
+            onClick={() => { void togglePreview(); }}
+          ><Eye aria-hidden="true" /> Back to editing</button>}
+          {!previewOpen && <section className="album-settings" aria-label="Album settings">
             <button type="button" className="album-settings__toggle"
               aria-expanded={albumDetailsExpanded} aria-controls="album-settings-body"
               onClick={() => setAlbumDetailsOpen(current => !current)}>
@@ -3126,7 +3131,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
             </div>}
             </div>
             </div>}
-          </section>
+          </section>}
         </>}
 
     {/*

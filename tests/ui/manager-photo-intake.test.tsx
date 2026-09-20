@@ -78,6 +78,7 @@ async function openSettings(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole('heading', { name: 'Library' });
   await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
     .getByRole('button', { name: /settings/i }));
+  await screen.findByRole('heading', { name: 'Settings' });
 }
 
 function LifecycleHarness({

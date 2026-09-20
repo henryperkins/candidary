@@ -586,6 +586,12 @@ export async function applySettings(
 // all assume intake is running, so this opens it early the way a host would
 // rather than by writing to the database behind the route that owns the
 // decision.
+export function futureCalendarDate(days: number) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 export async function eventAccess(
   name = 'Maya & Theo',
   openPhotosEarly = true,
@@ -594,9 +600,9 @@ export async function eventAccess(
   const created = await createApp().request('/api/events', {
     method: 'POST', headers: { 'content-type': 'application/json', origin },
     body: JSON.stringify({
-      name, eventDate: schedule.eventDate ?? '2026-09-19', welcomeMessage: 'Welcome.',
+      name, eventDate: schedule.eventDate ?? futureCalendarDate(30), welcomeMessage: 'Welcome.',
       eventTimezone: 'America/Chicago',
-      rsvpDeadlineDate: schedule.rsvpDeadlineDate ?? '2026-09-05',
+      rsvpDeadlineDate: schedule.rsvpDeadlineDate ?? futureCalendarDate(16),
     }),
   }, testEnv);
   const body = await created.json<any>();

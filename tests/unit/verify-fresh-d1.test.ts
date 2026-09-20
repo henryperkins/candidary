@@ -64,10 +64,11 @@ const eventColumnNames = [
   'guestbook_prompt',
   'recoverable_media_count', 'recoverable_bytes',
   'album_pick_generation', 'manager_link_revision',
+  'last_delivery_sequence',
 ];
 
 // Every checked-in migration, in order. Pinned rather than globbed: the
-// post-cutover verifier refuses a candidate whose ledger is not exactly twenty-two.
+// post-cutover verifier refuses a candidate whose ledger is not exactly twenty-five.
 const migrationFileNames = [
   '0001_core.sql', '0002_wedding_photo_drop.sql', '0003_partitioned_exports.sql',
   '0004_manager_media_pagination.sql', '0005_media_stored_at.sql', '0006_host_accounts.sql',
@@ -78,6 +79,7 @@ const migrationFileNames = [
   '0017_event_album.sql', '0018_album_end_to_end.sql', '0019_media_recovery.sql',
   '0020_export_progress.sql', '0021_manager_upload_and_album_era.sql',
   '0022_event_cover_preset_asset_v2.sql', '0023_photo_export_selection.sql',
+  '0024_guest_gallery_pagination.sql', '0025_library_delivery_sequence.sql',
 ];
 
 // Exactly how SQLite renders the stored `cover_config` default, quotes and all.
@@ -306,7 +308,7 @@ const guestbookColumns: Record<string, string[]> = {
     'publication_status', 'idempotency_key', 'reservation_expires_at', 'created_at', 'published_at',
     'preview_object_key', 'deleted_at', 'stored_at', 'object_bucket_generation',
     'captured_at', 'timeline_at', 'favorited_at', 'trashed_at', 'restore_until',
-    'album_pick_version',
+    'album_pick_version', 'delivery_sequence',
   ],
   media_object_promotions: [
     'media_id', 'event_id', 'source_bucket_generation', 'source_object_key',
@@ -704,6 +706,7 @@ function terminalRows() {
   Object.assign(events[31]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
   Object.assign(events[32]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
   Object.assign(events[33]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
+  Object.assign(events[34]!, { type: 'INTEGER', notnull: 1, dflt_value: '0', pk: 0 });
 
   const roster = columns(rosterColumnNames);
   Object.assign(roster[0]!, { type: 'TEXT', notnull: 1, dflt_value: null, pk: 1 });
@@ -829,7 +832,7 @@ function successfulAdapters(output: string) {
 describe('fresh local D1 verification', () => {
   it('matches affected invariant rows captured from the actual migrated D1 schema lane', () => {
     const hashes: Record<number, string> = {
-  "13": "e4112d745f59a3c61a97390a17842a74a6336a740a9153e574a00214c6a41086",
+  "13": "a9e9332f12ac8402401649ec028f689676b8ba59db6918584fb3fbf36357a4c7",
   "15": "f3263dae840a38e8b927684de7fcf602e0b65314e9dbb56d0cc9abba208425c9",
   "16": "31eb2a4335e093a8815b25873b1e62041dfd30eef293d8ab9c0b0e0504c3ff04",
   "22": "b9783fdc084bb88130605d703f6a09cb5c69e1d8e4b35e269a64404079ac1169",
@@ -1173,7 +1176,7 @@ describe('fresh local D1 verification', () => {
     }
   });
 
-  it('refuses a candidate whose ledger is not exactly twenty-two migrations', async () => {
+  it('refuses a candidate whose ledger is not exactly twenty-five migrations', async () => {
     const candidate = await fixture();
     const twenty = candidate.ledgerNames.slice(0, -1);
     const output = invariantOutput(candidate.ledgerNames) as Array<{ results: unknown[] }>;
