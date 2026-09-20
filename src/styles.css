@@ -758,6 +758,44 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* Overrides the 100svh base and the 720px enhancement: review sizes to its content, leaving no dead space. */
 .photo-drop--review { min-height: auto; }
 
+/* Review is one delivery task. Its selection scrolls while Send stays in view. */
+.guest-drop-main--review { min-height: 0; display: flow-root; }
+.photo-drop--guest-review { box-sizing: border-box; height: 100svh; height: 100dvh; min-height: 0; }
+.photo-drop--guest-review .photo-drop__card { height: 100%; min-height: 0; padding: 0; display: flex; flex-direction: column; }
+.photo-drop__review-content { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; padding: 24px 20px 16px; scroll-padding-block: 16px; }
+.photo-drop__review-content:focus-visible { outline-offset: -3px; }
+.photo-drop--guest-review .review-heading { padding: 0; border: 0; }
+.photo-drop--guest-review .review-heading > p { margin-bottom: 8px; font-size: .875rem; font-weight: 500; letter-spacing: normal; text-transform: none; }
+.photo-drop--guest-review .review-heading h1 { font-size: 1.75rem; line-height: 1.15; overflow-wrap: anywhere; }
+.review-heading__sender { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; column-gap: 16px; margin-top: 8px; font-size: .875rem; color: var(--event-muted-text); }
+.review-heading__sender > span { min-width: 0; overflow-wrap: anywhere; }
+.photo-drop--guest-review .review-heading .text-button { position: static; flex: 0 0 auto; font-size: .875rem; }
+.photo-drop--guest-review .selection-grid { align-items: start; margin-top: 20px; }
+.photo-drop--guest-review .selection-grid--single { grid-template-columns: minmax(0, 200px); }
+.photo-drop--guest-review .selection-card--selected { border: 0; background: transparent; }
+.photo-drop--guest-review .selection-card__image { border-radius: var(--event-card-radius); }
+.photo-drop--guest-review .selection-card__status { min-height: 0; padding: 8px 0; }
+.photo-drop--guest-review .selection-card--failed .selection-card__status { padding-inline: 8px; }
+.selection-add-more { margin-top: 12px; }
+.selection-add-more > .text-button { font-size: .875rem; }
+.selection-source-options { display: flex; flex-wrap: wrap; gap: 4px 20px; }
+.selection-source-options .text-button { justify-content: flex-start; font-size: .875rem; }
+.photo-drop__delivery-actions { flex: 0 0 auto; padding: 16px 20px max(16px, env(safe-area-inset-bottom)); border-top: 1px solid var(--event-review-divider); background: var(--event-surface); }
+.photo-drop__delivery-actions .selection-summary { margin: 0 0 8px; }
+.delivery-privacy { margin: 0 0 12px; color: var(--event-muted-text); font-size: .875rem; line-height: 1.45; text-align: center; }
+.photo-drop__delivery-actions .send-button { margin-top: 0; box-shadow: none; }
+.photo-drop__delivery-actions .progress-note { margin-inline: 0; font-size: .875rem; }
+.guest-secondary[hidden], .guest-shell--drop > footer[hidden] { display: none; }
+@media (min-width: 700px) and (min-height: 760px) {
+  .photo-drop--guest-review { height: calc(100svh - 76px); height: calc(100dvh - 76px); margin-block: 38px; box-shadow: none; }
+  .photo-drop__review-content { padding: 28px 32px 20px; }
+  .photo-drop__delivery-actions { padding-inline: 32px; }
+}
+@media (max-width: 390px) {
+  .photo-drop__review-content { padding-inline: 17px; }
+  .photo-drop__delivery-actions { padding-inline: 17px; }
+}
+
 /* Shallow landscape phones keep the 2-line base through 567px so both photo sources remain reachable. */
 @media (min-height: 568px) {
   .photo-drop__welcome--clamped { -webkit-line-clamp: 4; }

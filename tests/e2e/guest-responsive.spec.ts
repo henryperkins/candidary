@@ -345,6 +345,43 @@ test('the guest photo drop holds the 1280-at-200%-zoom layout at 640 by 450', as
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth + 1);
 });
 
+test('guest delivery review keeps Send reachable and sending statuses keyboard-scrollable', async ({ page }) => {
+  await stubGuestRoutes(page);
+  await page.goto('/event/maya-theo');
+  await page.getByLabel('Your name').fill('Taylor Morgan');
+  await page.locator('input[data-photo-source="library"]').setInputFiles(Array.from({ length: 12 }, () => KEEPER));
+
+  for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 1440, height: 1000 }]) {
+    await page.setViewportSize(viewport);
+    const send = await measureFold(page, page.getByRole('button', { name: 'Send 12 photos', exact: true }));
+    expect(send.bottom, `Send is visible at ${viewport.width}`).toBeLessThanOrEqual(send.fold);
+    await expect(page.locator('.guest-secondary')).toBeHidden();
+    const size = await page.evaluate(() => ({ height: document.documentElement.scrollHeight, viewport: innerHeight }));
+    expect(size.height, 'review does not create a second page scroll').toBeLessThanOrEqual(size.viewport + 1);
+  }
+
+  await page.setViewportSize({ width: 320, height: 568 });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`**/api/event/${EVENT_FIXTURE.slug}/uploads/batch`, async (route) => {
+    await pending;
+    await route.fulfill({ status: 503, json: { code: 'INTERNAL_ERROR', message: 'Try again.', requestId: 'review-audit' } });
+  });
+  try {
+    await page.getByRole('button', { name: 'Send 12 photos', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Sending…', exact: true })).toBeDisabled();
+    const review = page.getByRole('region', { name: 'Photos to send', exact: true });
+    await review.focus();
+    await expect(review).toBeFocused();
+    await page.keyboard.press('End');
+    await expect.poll(() => review.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    const cancel = await measureFold(page, page.getByRole('button', { name: 'Cancel sending' }));
+    expect(cancel.bottom).toBeLessThanOrEqual(cancel.fold);
+  } finally {
+    release();
+  }
+});
+
 test('review status text stays within the caption band at 320 px', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await stubGuestRoutes(page);
@@ -352,7 +389,7 @@ test('review status text stays within the caption band at 320 px', async ({ page
   await page.goto('/event/maya-theo');
   await page.getByLabel('Your name').fill('Taylor Morgan');
   await page.locator('input[data-photo-source="library"]').setInputFiles([KEEPER, REJECT]);
-  await expect(page.getByText('2 photos selected')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Selected photos' }).getByRole('listitem')).toHaveCount(2);
 
   for (const locator of [
     page.locator('.selection-card__status strong'),

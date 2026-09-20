@@ -1,5 +1,5 @@
 import { AlertCircle, Camera, Check, Image as ImageIcon, Images, LoaderCircle, Pencil, RotateCcw, X } from 'lucide-react';
-import { useRef, useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 
 import type { GuestEventCoverView } from '../../../shared/event-cover';
 import { guestEventCoverSlotPath } from '../../app/api';
@@ -74,6 +74,10 @@ export function GuestUploadFlow({
   const name = manager ? 'Host' : guestName ?? fallbackName;
   const [editingName, setEditingName] = useState(!manager && !name);
   const [nameError, setNameError] = useState('');
+  const [showSources, setShowSources] = useState(false);
+  const [unavailablePreviews, setUnavailablePreviews] = useState<Set<string>>(() => new Set());
+  const sourcesId = useId();
+  const addPhotosButton = useRef<HTMLButtonElement>(null);
   const cameraInput = useRef<HTMLInputElement>(null);
   const libraryInput = useRef<HTMLInputElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
@@ -111,6 +115,15 @@ export function GuestUploadFlow({
   function adoptFiles(files: FileList | null, isNewCapture: boolean) {
     if (!uploadsAvailable || !saveName()) return;
     session.adoptFiles(files, isNewCapture);
+    if (files?.length) {
+      setShowSources(false);
+      requestAnimationFrame(() => addPhotosButton.current?.focus());
+    }
+  }
+
+  function editName() {
+    setEditingName(true);
+    requestAnimationFrame(() => nameInput.current?.focus());
   }
 
   async function sendSelected() {
@@ -126,6 +139,7 @@ export function GuestUploadFlow({
   const validationFailureCount = items.filter(({ validationError }) => validationError).length;
   const onlyValidationFailures = items.length > 0 && validationFailureCount === items.length;
   const reviewMode = items.length > 0;
+  const guestReview = !manager && reviewMode;
   const eventDate = formatEventDate(event.eventDate, 'compact') ?? DATE_UNAVAILABLE;
 
   if (receiptCount > 0) {
@@ -156,7 +170,7 @@ export function GuestUploadFlow({
     </section>;
   }
 
-  return <section className={`photo-drop${manager ? ' photo-drop--manager' : ''}${reviewMode ? ' photo-drop--review' : ''}`}>
+  return <section className={`photo-drop${manager ? ' photo-drop--manager' : ''}${reviewMode ? ' photo-drop--review' : ''}${guestReview ? ' photo-drop--guest-review' : ''}`}>
     {!manager && !reviewMode && <GuestEventHero
       event={event}
       sourceFor={(slot) => guestEventCoverSlotPath(slug, slot)}
@@ -164,19 +178,29 @@ export function GuestUploadFlow({
     />}
 
     <div className="photo-drop__card">
+      <div
+        className={guestReview ? 'photo-drop__review-content' : undefined}
+        role={guestReview ? 'region' : undefined}
+        aria-label={guestReview ? 'Photos to send' : undefined}
+        tabIndex={guestReview ? 0 : undefined}
+      >
       {reviewMode && <header className="review-heading">
         <p>{event.name} <span aria-hidden="true">·</span> {eventDate}</p>
-        <p>{manager ? 'From Host' : `Sending as ${name}`}</p>
+        {manager && <p>From Host</p>}
         <Heading>{manager
           ? sending ? 'Adding photos' : 'Ready to add'
-          : sending ? 'Sending photos' : 'Ready to send'}
+          : sending ? 'Sending photos' : 'Send photos to the host'}
         </Heading>
-        {!manager && <button
-          type="button"
-          className="text-button"
-          onClick={() => setEditingName(true)}
-          disabled={sending}
-        ><Pencil aria-hidden="true" /> Edit name</button>}
+        {!manager && <div className="review-heading__sender">
+          <span>From {name}</span>
+          <button
+            type="button"
+            className="text-button"
+            aria-label="Edit name"
+            onClick={editName}
+            disabled={sending}
+          ><Pencil aria-hidden="true" /> Edit</button>
+        </div>}
       </header>}
 
       {!manager && (editingName ? <label className="photo-drop__name">
@@ -199,7 +223,7 @@ export function GuestUploadFlow({
           type="button"
           className="text-button"
           aria-label="Edit name"
-          onClick={() => setEditingName(true)}
+          onClick={editName}
         ><Pencil aria-hidden="true" /> Edit</button>
       </div>)}
       {manager && !reviewMode && <div className="sending-as"><span>From Host</span></div>}
@@ -225,13 +249,18 @@ export function GuestUploadFlow({
           : unavailableMessage}
         </p>
       </div> : <>
-        <ul className="selection-grid" aria-label="Selected photos" aria-live="polite">
-          {items.map((item) => <li key={item.id} className={`selection-card selection-card--${item.state}`}>
+        <ul className={`selection-grid${guestReview && items.length === 1 ? ' selection-grid--single' : ''}`} aria-label="Selected photos" aria-live="polite">
+          {items.map((item) => {
+            const previewAvailable = item.previewUrl && !unavailablePreviews.has(item.id);
+            const showStatus = manager || !previewAvailable || item.state !== 'selected';
+            return <li key={item.id} className={`selection-card selection-card--${item.state}`} aria-label={item.file.name}>
             <div className="selection-card__image">
-              {item.previewUrl
-                ? <img src={item.previewUrl} alt="" />
+              {previewAvailable
+                ? <img src={item.previewUrl} alt="" onError={() => {
+                    setUnavailablePreviews((previous) => new Set(previous).add(item.id));
+                  }} />
                 : <ImageIcon aria-hidden="true" />}
-              {item.isNewCapture && <span className="new-badge">New</span>}
+              {manager && item.isNewCapture && <span className="new-badge">New</span>}
               {['selected', 'failed'].includes(item.state) && <button
                 type="button"
                 aria-label={`Remove ${item.file.name}`}
@@ -245,19 +274,20 @@ export function GuestUploadFlow({
                 <Check aria-hidden="true" />
               </span>}
             </div>
-            <div className="selection-card__status">
+            {showStatus && <div className="selection-card__status">
               <strong>{item.file.name}</strong>
-              <span>{statusLabel(item.state, item.progress)}</span>
+              {(manager || item.state !== 'selected') && <span>{statusLabel(item.state, item.progress)}</span>}
               {item.error && <small>{item.error}</small>}
               {item.state === 'uploading' && <progress
                 max="100"
                 value={item.progress}
                 aria-label={`Sending ${item.file.name}`}
               />}
-            </div>
-          </li>)}
+            </div>}
+          </li>;
+          })}
         </ul>
-        <div className="selection-add-actions">
+        {manager ? <div className="selection-add-actions">
           <button
             type="button"
             className="source-button source-button--library"
@@ -270,16 +300,39 @@ export function GuestUploadFlow({
             disabled={sending || !uploadsAvailable}
             onClick={() => openSource(cameraInput.current)}
           ><RotateCcw aria-hidden="true" /> Retake a photo</button>
-        </div>
+        </div> : <div className="selection-add-more">
+          <button
+            ref={addPhotosButton}
+            type="button"
+            className="text-button"
+            aria-expanded={showSources && !sending}
+            aria-controls={sourcesId}
+            disabled={sending || !uploadsAvailable}
+            onClick={() => setShowSources((previous) => !previous)}
+          ><Images aria-hidden="true" /> Add photos</button>
+          {showSources && !sending && <div id={sourcesId} className="selection-source-options">
+            <button type="button" className="text-button" disabled={!uploadsAvailable}
+              onClick={() => openSource(libraryInput.current)}
+            ><Images aria-hidden="true" /> Choose photos</button>
+            <button type="button" className="text-button" disabled={!uploadsAvailable}
+              onClick={() => openSource(cameraInput.current)}
+            ><Camera aria-hidden="true" /> Take another photo</button>
+          </div>}
+        </div>}
         {!uploadsAvailable && <p className="field-error" role="alert">
           <AlertCircle aria-hidden="true" /> {unavailableMessage}
         </p>}
-        <div className="selection-summary">
-          <span>{items.length} {plural(items.length, 'photo')} selected</span>
+      </>}
+      </div>
+      {reviewMode && <div className={guestReview ? 'photo-drop__delivery-actions' : undefined}>
+        {(manager || failedCount > 0) && <div className="selection-summary">
+          {manager && <span>{items.length} {plural(items.length, 'photo')} selected</span>}
           {failedCount > 0 && <span className="selection-summary__attention">
             {failedCount} {plural(failedCount, 'needs', 'need')} attention
           </span>}
-        </div>
+        </div>}
+        {guestReview && !sending && !onlyValidationFailures && uploadsAvailable
+          && <p className="delivery-privacy">Photos go privately to the host.</p>}
         {(sending || unresolvedCount > 0) && <button
           type="button"
           className="send-button"
@@ -294,15 +347,15 @@ export function GuestUploadFlow({
           className="text-button send-cancel"
           onClick={() => void session.cancel()}
         >{manager ? 'Cancel uploads' : 'Cancel sending'}</button>}
-        <p className="progress-note">{!uploadsAvailable
+        {(manager || sending || onlyValidationFailures || !uploadsAvailable) && <p className="progress-note">{!uploadsAvailable
           ? unavailableMessage
           : onlyValidationFailures
             ? 'Remove or replace the photos that need attention.'
             : manager
               ? 'Keep this dialog open while your photos transfer.'
-              : 'Keep this page open while your photos transfer.'}
-        </p>
-      </>}
+               : 'Keep this page open until delivery is confirmed.'}
+        </p>}
+      </div>}
 
       <input
         ref={cameraInput}

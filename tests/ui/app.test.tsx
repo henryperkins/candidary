@@ -716,9 +716,14 @@ describe('guest event experience', () => {
       target: { files: [new File(['photo'], 'toast.jpg', { type: 'image/jpeg' })] },
     });
 
-    expect(await screen.findByRole('heading', { name: 'Ready to send' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Send photos to the host' })).toBeVisible();
     expect(screen.getByText(/Maya & Theo/, { selector: '.review-heading p' }))
       .toHaveTextContent('Maya & Theo · Sep 19');
+    expect(screen.getByText('Here when you want it.')).not.toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Candidary home' })).not.toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Remove toast.jpg' }));
+    expect(screen.getByText('Here when you want it.')).toBeVisible();
   });
 
   it('loads the private photo drop first and keeps the gallery and notes secondary', async () => {

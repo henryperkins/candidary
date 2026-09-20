@@ -102,11 +102,11 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
   await cameraInput.setInputFiles({
     name: 'just-taken.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('captured-photo'),
   });
-  await expect(page.getByText('New')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Remove just-taken.jpg' })).toBeVisible();
   await libraryInput.setInputFiles({
     name: 'recent.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('recent-photo'),
   });
-  await expect(page.getByText('2 photos selected')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Selected photos' }).getByRole('listitem')).toHaveCount(2);
   expect(batchAttempt).toBe(0);
 
   await page.getByRole('button', { name: 'Send 2 photos' }).click();

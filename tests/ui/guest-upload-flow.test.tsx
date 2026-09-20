@@ -165,6 +165,47 @@ afterEach(() => {
 });
 
 describe('mobile guest photo delivery', () => {
+  it('distills review to previews and one add action while preserving source choice and name editing', async () => {
+    const user = userEvent.setup();
+    const session = {
+      items: [{ id: 'photo-a', file: new File(['photo'], 'keeper.jpg', { type: 'image/jpeg' }),
+        previewUrl: 'blob:keeper', state: 'selected' as const, progress: 0, isNewCapture: false }],
+      sending: false, receiptCount: 0, adoptFiles: vi.fn(), canRemoveItem: () => true,
+      removeItem: vi.fn(), send: vi.fn(async () => {}), cancel: vi.fn(async () => {}),
+    };
+    const { container } = render(<ControlledGuestUploadFlow event={event} slug="alex-jordan"
+      guestName="Taylor" session={session} uploadsAvailable unavailableMessage="Paused" />);
+
+    expect(screen.getByRole('heading', { name: 'Send photos to the host' })).toBeVisible();
+    expect(screen.queryByText('keeper.jpg')).not.toBeInTheDocument();
+    expect(screen.queryByText('Selected')).not.toBeInTheDocument();
+    expect(screen.queryByText('1 photo selected')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove keeper.jpg' })).toBeEnabled();
+    expect(screen.getByText('Photos go privately to the host.')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Take another photo' })).not.toBeInTheDocument();
+
+    const add = screen.getByRole('button', { name: 'Add photos', exact: true });
+    await user.click(add);
+    expect(add).toHaveAttribute('aria-expanded', 'true');
+    const library = screen.getByLabelText('Choose recent photos from your library');
+    const camera = screen.getByLabelText('Take a photo from your camera');
+    const libraryClick = vi.spyOn(library, 'click');
+    const cameraClick = vi.spyOn(camera, 'click');
+    await user.click(screen.getByRole('button', { name: 'Choose photos', exact: true }));
+    expect(libraryClick).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole('button', { name: 'Take another photo' }));
+    expect(cameraClick).toHaveBeenCalledOnce();
+    fireEvent.change(camera, { target: { files: [new File(['capture'], 'another.jpg', { type: 'image/jpeg' })] } });
+    expect(session.adoptFiles).toHaveBeenCalledWith(expect.anything(), true);
+    expect(add).toHaveAttribute('aria-expanded', 'false');
+    expect(session.send).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Edit name' }));
+    await waitFor(() => expect(screen.getByLabelText('Your name')).toHaveFocus());
+    fireEvent.error(container.querySelector('.selection-card__image img')!);
+    expect(screen.getByText('keeper.jpg')).toBeVisible();
+  });
+
   it('renders the nested cover through a current-revision same-origin slot', () => {
     window.innerWidth = 390;
     window.innerHeight = 844;
@@ -221,11 +262,16 @@ describe('mobile guest photo delivery', () => {
     const camera = screen.getByLabelText('Take a photo from your camera');
     const library = screen.getByLabelText('Choose recent photos from your library');
     fireEvent.change(camera, { target: { files: [new File(['new'], 'just-taken.jpg', { type: 'image/jpeg' })] } });
-    expect(await screen.findByText('New')).toBeVisible();
-    expect(screen.getByText('1 photo selected')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Remove just-taken.jpg' })).toBeEnabled();
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+    const addPhotos = screen.getByRole('button', { name: 'Add photos', exact: true });
+    await waitFor(() => expect(addPhotos).toHaveFocus());
 
+    await user.click(addPhotos);
+    await user.click(screen.getByRole('button', { name: 'Choose photos', exact: true }));
     fireEvent.change(library, { target: { files: [new File(['recent'], 'recent.jpg', { type: 'image/jpeg' })] } });
-    expect(screen.getByText('2 photos selected')).toBeVisible();
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+    await waitFor(() => expect(addPhotos).toHaveFocus());
     expect(queueTransport.reserve).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'Send 2 photos' }));
@@ -244,7 +290,7 @@ describe('mobile guest photo delivery', () => {
       target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
     });
 
-    expect(await screen.findByRole('heading', { name: 'Ready to send' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Send photos to the host' })).toBeVisible();
     const identity = screen.getByText(/Alex & Jordan/);
     expect(identity).toBeVisible();
     expect(identity).toHaveTextContent('Sep 14');
@@ -264,7 +310,7 @@ describe('mobile guest photo delivery', () => {
         ],
       },
     });
-    expect(await screen.findByText('2 photos selected')).toBeVisible();
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
 
     expect(screen.queryByRole('button', { name: /^Retry/u })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Send 1 photo' }));
@@ -282,7 +328,7 @@ describe('mobile guest photo delivery', () => {
       target: { files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] },
     });
 
-    expect(await screen.findByText('1 photo selected')).toBeVisible();
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
     expect(screen.queryByRole('button', { name: /^Send/u })).not.toBeInTheDocument();
     expect(screen.getByText('Remove or replace the photos that need attention.')).toBeVisible();
     expect(screen.queryByText('Keep this page open while your photos transfer.')).not.toBeInTheDocument();
@@ -296,7 +342,7 @@ describe('mobile guest photo delivery', () => {
       target: { files: [new File(['heic'], 'phone.heic', { type: 'image/x-heic' })] },
     });
 
-    expect(await screen.findByText('1 photo selected')).toBeVisible();
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
     expect(screen.queryByText('Needs attention')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send 1 photo' })).toBeEnabled();
   });
@@ -310,7 +356,7 @@ describe('mobile guest photo delivery', () => {
     fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
       target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
     });
-    expect(await screen.findByText('1 photo selected')).toBeVisible();
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
 
     await user.click(screen.getByRole('button', { name: 'Send 1 photo' }));
     expect(screen.getByRole('heading', { name: 'Sending photos' })).toBeVisible();
@@ -321,7 +367,7 @@ describe('mobile guest photo delivery', () => {
 
     expect(await screen.findByRole('button', { name: 'Retry 1 photo' })).toBeEnabled();
     expect(screen.getByText('Sending was cancelled. Retry when you are ready.')).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Ready to send' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Send photos to the host' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Cancel sending' })).not.toBeInTheDocument();
     expect(queueTransport.finalize).not.toHaveBeenCalled();
   });
@@ -489,7 +535,7 @@ describe('mobile guest photo delivery', () => {
     fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), {
       target: { files: [new File(['keeper'], 'keeper.jpg', { type: 'image/jpeg' })] },
     });
-    expect(await screen.findByText('keeper.jpg')).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Remove keeper.jpg' })).toBeEnabled();
 
     await user.click(screen.getByRole('button', { name: 'Send 1 photo' }));
 

@@ -114,7 +114,7 @@ test('the guest photo drop holds its longest welcome, its review, and phone land
   await page.setViewportSize({ width: 320, height: 844 });
   await page.getByLabel('Your name').fill('Taylor Morgan');
   await page.locator('input[data-photo-source="library"]').setInputFiles([KEEPER, REJECT]);
-  await expect(page.getByText('2 photos selected')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Selected photos' }).getByRole('listitem')).toHaveCount(2);
   await expect(page.locator('.selection-card__image img')).toHaveCount(1);
   await settle(page);
   await expect(page.locator('.photo-drop--review')).toHaveScreenshot('guest-review-320.png');

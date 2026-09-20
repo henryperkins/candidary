@@ -58,6 +58,7 @@ export function GuestPhotoUpload({
   onGuestNameChange,
   onDelivered,
   onLeaveGuestbook,
+  onReviewChange,
   transport,
 }: {
   event: GuestUploadEvent;
@@ -66,6 +67,7 @@ export function GuestPhotoUpload({
   onGuestNameChange(name: string): void;
   onDelivered?(count: number): void;
   onLeaveGuestbook(): void;
+  onReviewChange?(reviewing: boolean): void;
   transport?: UploadTransport;
 }) {
   const session = useGuestUploadSession({
@@ -75,6 +77,9 @@ export function GuestPhotoUpload({
     transport,
     onDelivered,
   });
+  const reviewing = session.items.length > 0 && session.receiptCount === 0;
+  useEffect(() => { onReviewChange?.(reviewing); }, [onReviewChange, reviewing]);
+  useEffect(() => () => { onReviewChange?.(false); }, [onReviewChange]);
   return <GuestUploadFlow
     event={event}
     slug={slug}
@@ -113,6 +118,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
   }
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [terminal, setTerminal] = useState(false);
+  const [reviewingPhotos, setReviewingPhotos] = useState(false);
   const [rsvpExpanded, setRsvpExpanded] = useState(false);
   const [rememberedGuestName, setRememberedGuestName] = useState(readGuestName);
   const [guestbookOpenRequest, setGuestbookOpenRequest] = useState(0);
@@ -246,7 +252,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
 
   return <GuestEventRefreshProvider refreshEvent={recheckEvent}>
     <div className="guest-shell guest-shell--drop" style={themeStyle}>
-    <main className="guest-drop-main">
+    <main className={`guest-drop-main${reviewingPhotos ? ' guest-drop-main--review' : ''}`}>
       {event.phase === 'rsvp-primary' && <GuestRsvpFlow
         event={event}
         presentation="primary"
@@ -266,12 +272,14 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
         guestName={rememberedGuestName}
         onGuestNameChange={updateRememberedGuestName}
         onDelivered={markUploadDelivered}
+        onReviewChange={setReviewingPhotos}
         onLeaveGuestbook={openGuestbookFromReceipt}
       />}
 
       {event.phase === 'waiting' && !terminal && <GuestWaiting event={event} />}
 
       {event.guestReadSurfaces.available && <section
+        hidden={reviewingPhotos}
         className={`guest-secondary${terminal ? ' guest-secondary--guestbook-only' : ''}`}
         aria-labelledby={terminal ? 'terminal-more-from-event' : 'more-from-event'}
       >
@@ -330,7 +338,7 @@ export function EventPage({ fullscreen = false }: { fullscreen?: boolean }) {
         </details>
       </section>}
     </main>
-    {!terminal && <footer><Brand compact /><p>Private moments, held together.</p></footer>}
+    {!terminal && <footer hidden={reviewingPhotos}><Brand compact /><p>Private moments, held together.</p></footer>}
     </div>
   </GuestEventRefreshProvider>;
 }
