@@ -49,7 +49,15 @@ import { ManagerUndoProvider } from '../../src/features/gallery/undo';
 import { useManagerResource } from '../../src/features/manager/resources';
 import { AUTOSAVE_DEBOUNCE_MS } from '../../src/features/settings/autosave-queue';
 import type { GalleryMode } from '../../src/app/manager-location';
-import { makeMedia } from '../e2e/fixtures/ui-data';
+import { makeMedia as makeLegacyMedia } from '../e2e/fixtures/ui-data';
+
+// The default Library consumes timeline metadata in addition to the shared media fields.
+function makeMedia(...args: Parameters<typeof makeLegacyMedia>) {
+  return makeLegacyMedia(...args).map((row) => ({
+    ...row, receivedAt: row.createdAt, timelineAt: row.createdAt,
+    timelineSource: 'received' as const, isFavorite: false, previewAvailable: true,
+  }));
+}
 
 function json(data: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify({ data, requestId: 'request-a' }), {
@@ -1166,8 +1174,9 @@ const RSVP_SUMMARY = {
 
 interface MediaPage { media: unknown[]; nextCursor: string | null }
 
-// Answers every manager GET, resolving `/media` from a cursor-keyed page map that the test may mutate
-// between requests. A request that carries no `cursor` parameter is the first page: the server rejects
+// Answers every manager GET, resolving the private Library `/gallery` feed from a cursor-keyed page
+// map that the test may mutate between requests. Guest-gallery callers still use `/media`.
+// A request that carries no `cursor` parameter is the first page: the server rejects
 // `cursor=` as malformed, so the client has to omit the parameter rather than send an empty one.
 function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] = []) {
   return vi.fn((input: RequestInfo | URL) => {
@@ -1180,12 +1189,17 @@ function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] 
       needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
     } });
     if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
-    if (url.includes('/media')) {
+    if (url.includes('/media') || (url.includes('/gallery') && !url.endsWith('/gallery/summary'))) {
       mediaRequests.push(url);
       const cursor = new URL(url, 'https://candidary.test').searchParams.get('cursor') ?? 'first';
-      return json(pages[cursor] ?? { media: [], nextCursor: null });
+      const page = pages[cursor] ?? { media: [], nextCursor: null };
+      return json(url.includes('/gallery') ? { ...page, media: page.media.map(item => {
+        const row = item as MediaView;
+        const receivedAt = row.createdAt ?? '2026-09-19T20:00:00.000Z';
+        return { receivedAt, timelineAt: receivedAt, timelineSource: 'received',
+          isFavorite: false, previewAvailable: true, ...row };
+      }) } : page);
     }
-    if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
     if (url.includes('/messages')) return json({ messages: [] });
     if (url.endsWith('/exports')) return json({ exports: [] });
     if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
@@ -1499,10 +1513,11 @@ function deferredAlbumSaveFetch() {
 
 describe('canonical Manager location ownership', () => {
   it.each([
-    [`/manage/event/${MANAGED_EVENT.id}`, 'Intake', null, ''],
-    [`/manage/event/${MANAGED_EVENT.id}?section=intake`, 'Intake', null, ''],
+    [`/manage/event/${MANAGED_EVENT.id}`, 'Gallery', 'Library', ''],
+    [`/manage/event/${MANAGED_EVENT.id}?section=intake`, 'Gallery', 'Library', ''],
     [`/manage/event/${MANAGED_EVENT.id}?section=rsvp`, 'RSVP', null, '?section=rsvp'],
-    [`/manage/event/${MANAGED_EVENT.id}?section=gallery`, 'Gallery', 'Library', '?section=gallery'],
+    [`/manage/event/${MANAGED_EVENT.id}?section=gallery`, 'Gallery', 'Library', ''],
+    [`/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=library`, 'Gallery', 'Library', ''],
     [`/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=album`, 'Gallery', 'Album', '?section=gallery&mode=album'],
     [`/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=guest-gallery`, 'Gallery', 'Guest gallery', '?section=gallery&mode=guest-gallery'],
     [`/manage/event/${MANAGED_EVENT.id}?section=guestbook`, 'Guestbook', null, '?section=guestbook'],
@@ -1527,7 +1542,7 @@ describe('canonical Manager location ownership', () => {
   );
 
   it.each([
-    [`/manage/event/${MANAGED_EVENT.id}?section=gallery&section=share`, 'Intake', null, ''],
+    [`/manage/event/${MANAGED_EVENT.id}?section=gallery&section=share`, 'Gallery', 'Library', ''],
     [`/manage/event/${MANAGED_EVENT.id}?section=rsvp&mode=album`, 'RSVP', null, '?section=rsvp'],
     [`/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=shared`, 'Gallery', 'Guest gallery', '?section=gallery&mode=guest-gallery'],
     [`/manage/event/${MANAGED_EVENT.id}?section=share&unknown=value`, 'Share', null, '?section=share'],
@@ -1567,32 +1582,32 @@ describe('canonical Manager location ownership', () => {
     expect(router.state.location.state).toEqual(state);
   });
 
-  it('traverses Manager work in history through Album, Library, and Intake', async () => {
+  it('traverses Manager work in history through Album, Library, and Share', async () => {
     vi.stubGlobal('fetch', managerLocationFetch());
-    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}`]);
+    const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=share`]);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
     const managerNavigation = await screen.findByRole('navigation', { name: 'Manager sections' });
 
     await user.click(within(managerNavigation).getByText('Gallery').closest('button')!);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await user.click(await findGalleryMode('Album'));
     await waitFor(() => expect(router.state.location.search).toBe('?section=gallery&mode=album'));
 
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(galleryMode('Library'))
       .toHaveAttribute('aria-pressed', 'true'));
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe(''));
-    await waitFor(() => expect(within(managerNavigation).getByText('Intake').closest('button'))
+    await waitFor(() => expect(router.state.location.search).toBe('?section=share'));
+    await waitFor(() => expect(within(managerNavigation).getByText('Share').closest('button'))
       .toHaveAttribute('aria-pressed', 'true'));
   });
 
   it.each([
-    ['Gallery mode', '?section=gallery', 'Library'],
+    ['Gallery mode', '', 'Library'],
     ['Manager section', '?section=share', 'Share your event'],
-    ['browser Back', '?section=gallery', 'Library'],
+    ['browser Back', '', 'Library'],
   ] as const)(
     'keeps Album rendered until URL settlement for a %s request',
     async (requestSource, expectedSearch, expectedContent) => {
@@ -1641,7 +1656,7 @@ describe('canonical Manager location ownership', () => {
   it('keeps Album rendered until URL settlement for a clean browser Back check', async () => {
     vi.stubGlobal('fetch', managerLocationFetch());
     const router = createAppRouter([
-      `/manage/event/${MANAGED_EVENT.id}?section=gallery`,
+      `/manage/event/${MANAGED_EVENT.id}`,
       `/manage/event/${MANAGED_EVENT.id}?section=gallery&mode=album`,
     ]);
     render(<RouterProvider router={router} />);
@@ -1654,7 +1669,7 @@ describe('canonical Manager location ownership', () => {
       .not.toBeInTheDocument();
 
     await navigation;
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(galleryMode('Library'))
       .toHaveAttribute('aria-pressed', 'true'));
   });
@@ -1673,7 +1688,6 @@ describe('canonical Manager location ownership', () => {
     const router = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=gallery`]);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Show more photos' }));
     await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
       .toHaveLength(library.length));
     vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
@@ -1700,7 +1714,7 @@ describe('canonical Manager location ownership', () => {
     expect(scrollY).toBe(0);
 
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     act(() => { frames.shift()?.(0); });
     expect(tile.getBoundingClientRect().top - effectiveTop()).toBe(before);
@@ -1747,7 +1761,7 @@ describe('canonical Manager location ownership', () => {
     await screen.findByRole('heading', { name: 'Share your event' });
 
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     act(() => { frames.shift()?.(0); });
     expect(scrollTo).not.toHaveBeenCalled();
@@ -1762,7 +1776,7 @@ describe('canonical Manager location ownership', () => {
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     act(() => { frames.shift()?.(0); });
 
-    expect(scrollTo).toHaveBeenLastCalledWith({ top: 570, behavior: 'instant' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 670, behavior: 'instant' });
     expect(libraryGets).toBe(1);
   });
 
@@ -1886,7 +1900,7 @@ describe('canonical Manager location ownership', () => {
     await waitFor(() => expect(libraryGets).toBe(1));
 
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     act(() => { frames.shift()?.(0); });
     expect(scrollTo).not.toHaveBeenCalled();
@@ -1905,7 +1919,7 @@ describe('canonical Manager location ownership', () => {
     expect(frames).toHaveLength(0);
 
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     expect(frames).toHaveLength(1);
     act(() => { frames.shift()?.(0); });
@@ -1953,7 +1967,7 @@ describe('canonical Manager location ownership', () => {
       'after-second': 1_000,
     }, () => scrollY);
     await candidateRouter.navigate(-1);
-    await waitFor(() => expect(candidateRouter.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(candidateRouter.state.location.search).toBe(''));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     const candidateRequestCount = candidateRequests.length;
     act(() => { frames.shift()?.(0); });
@@ -1982,7 +1996,7 @@ describe('canonical Manager location ownership', () => {
       .mockReturnValue(historyRect(0, 100));
     installHistoryAnchorRects('.gallery-private', { other: 500 }, () => scrollY);
     await fallbackRouter.navigate(-1);
-    await waitFor(() => expect(fallbackRouter.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(fallbackRouter.state.location.search).toBe(''));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     const fallbackRequestCount = fallbackRequests.length;
     act(() => { frames.shift()?.(0); });
@@ -2053,7 +2067,7 @@ describe('canonical Manager location ownership', () => {
     await user.click(within(navigation).getByRole('button', { name: /gallery/i }));
     const prompt = await screen.findByRole('region', { name: /not saved yet/i });
     await user.click(within(prompt).getByRole('button', { name: 'Leave now' }));
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
 
     expect(window.history.state).toEqual(browserWrapper);
   });
@@ -2109,7 +2123,7 @@ describe('canonical Manager location ownership', () => {
     }, () => scrollY);
 
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     const capturedGuestWrite = replaceState.mock.calls.find(([next]) => {
       const wrapper = next as Record<string, unknown>;
       const usr = wrapper.usr as RouterHistoryState | undefined;
@@ -2320,7 +2334,7 @@ describe('canonical Manager location ownership', () => {
     installHistoryAnchorRects('.gallery-shared', { 'guest-1': 720 }, () => scrollY);
 
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(galleryMode('Library'))
       .toHaveAttribute('aria-pressed', 'true'));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
@@ -2501,10 +2515,10 @@ describe('canonical Manager location ownership', () => {
 
     await waitFor(() => expect(focusSnapshots).toHaveLength(1));
     expect(focusSnapshots[0]).toEqual({
-      search: '?section=gallery',
+      search: '',
       state: { source: 'task-4-test' },
     });
-    expect(router.state.location.search).toBe('?section=gallery');
+    expect(router.state.location.search).toBe('');
     expect(router.state.location.state).toEqual({ source: 'task-4-test' });
   });
 
@@ -2533,7 +2547,7 @@ describe('canonical Manager location ownership', () => {
 
     await originalNavigate({
       pathname: `/manage/event/${MANAGED_EVENT.id}`,
-      search: '?section=gallery',
+      search: '',
     }, { replace: true, state: { source: 'newer-same-target-entry' } });
     await waitFor(() => expect(router.state.location.state)
       .toEqual({ source: 'newer-same-target-entry' }));
@@ -2541,7 +2555,7 @@ describe('canonical Manager location ownership', () => {
 
     const action = await screen.findByRole('button', { name: 'Download all' });
     expect(action).not.toHaveFocus();
-    expect(router.state.location.search).toBe('?section=gallery');
+    expect(router.state.location.search).toBe('');
     expect(router.state.location.state).toEqual({ source: 'newer-same-target-entry' });
   });
 
@@ -2580,7 +2594,7 @@ describe('canonical Manager location ownership', () => {
     expect(cleanupCalls).toBe(2);
     expect(cleanupStates[1]).not.toBe(cleanupStates[0]);
     expect(focusSnapshots[0]).toEqual({
-      search: '?section=gallery',
+      search: '',
       state: { source: 'task-4-test' },
     });
     await act(async () => { await Promise.resolve(); });
@@ -2639,7 +2653,7 @@ describe('canonical Manager location ownership', () => {
     const winnerCyclic = makeCyclicState();
     await originalNavigate({
       pathname: `/manage/event/${MANAGED_EVENT.id}`,
-      search: '?section=gallery',
+      search: '',
     }, {
       replace: true,
       state: {
@@ -2733,7 +2747,7 @@ describe('canonical Manager location ownership', () => {
     await waitFor(() => expect(focusSnapshots).toHaveLength(1));
     expect(cleanupCalls).toBe(3);
     expect(focusSnapshots[0]).toEqual({
-      search: '?section=gallery',
+      search: '',
       state: { source: 'task-4-test' },
     });
     await act(async () => { await Promise.resolve(); });
@@ -2775,7 +2789,6 @@ describe('canonical Manager location ownership', () => {
     render(<StrictMode><RouterProvider router={router} /></StrictMode>);
     const user = userEvent.setup();
     await committed;
-    await user.click(await screen.findByRole('button', { name: 'Show more photos' }));
     await waitFor(() => expect(document.querySelectorAll('.gallery-private [data-gallery-anchor-id]'))
       .toHaveLength(library.length));
     vi.spyOn(document.querySelector<HTMLElement>('.manager-nav')!, 'getBoundingClientRect')
@@ -2803,7 +2816,7 @@ describe('canonical Manager location ownership', () => {
     expect(scrollY).toBe(0);
 
     await router.navigate(-1);
-    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery'));
+    await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(frames.length).toBeGreaterThan(0));
     act(() => {
       while (frames.length > 0) frames.shift()?.(0);
@@ -2954,19 +2967,18 @@ describe('canonical Manager location ownership', () => {
     const view = render(<RouterProvider router={router} />);
 
     await userEvent.setup().click(await screen.findByRole('button', {
-      name: 'Restore in Recently deleted',
+      name: 'Restore in Trash',
     }));
 
     const restore = await screen.findByRole('button', { name: 'Restore retained-photo.jpg' });
-    expect(restore).toHaveFocus();
+    await waitFor(() => expect(restore).toHaveFocus());
     expect(trashGets).toBe(1);
     await waitFor(() => expect(router.state.location.state).toEqual({ source: 'album-entry' }));
 
-    // Park focus off the Restore. Recently deleted names the way back rather than itself, so the
-    // sibling control here is `Live intake`, not `Trash`.
-    screen.getByRole('button', { name: 'Live intake' }).focus();
+    // Park focus off Restore on the Gallery destination before replaying history.
+    screen.getByRole('button', { name: 'Gallery' }).focus();
     await router.navigate(-1);
-    await screen.findByLabelText('Album title');
+    await screen.findByRole('heading', { name: /^Album$/u });
     await router.navigate(1);
     expect(await screen.findByRole('button', { name: 'Restore retained-photo.jpg' })).not.toHaveFocus();
     expect(trashGets).toBe(1);
@@ -2978,15 +2990,17 @@ describe('canonical Manager location ownership', () => {
     expect(await screen.findByRole('button', { name: 'Restore retained-photo.jpg' })).not.toHaveFocus();
   });
 
-  it('clears settled retained guidance when the host exhausts Load more', async () => {
+  it('clears retained guidance when automatic target search exhausts Load more', async () => {
     const requested: string[] = [];
+    let releaseContinuation!: () => void;
+    const continuation = new Promise<void>(resolve => { releaseContinuation = resolve; });
     const base = managerLocationFetch();
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/media/trash')) {
         requested.push(url);
         return url.includes('cursor=')
-          ? json({ media: [], nextCursor: null })
+          ? continuation.then(() => json({ media: [], nextCursor: null }))
           : json({ media: [{
               id: 'unrelated-first-page',
               originalFilename: 'unrelated-first-page.jpg',
@@ -3000,6 +3014,7 @@ describe('canonical Manager location ownership', () => {
     }));
     const router = createAppRouter([{
       pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&view=trash',
       state: managerIntentState({
         kind: 'open-recently-deleted',
         focusMediaId: 'retained-on-later-page',
@@ -3007,21 +3022,21 @@ describe('canonical Manager location ownership', () => {
     }]);
     render(<RouterProvider router={router} />);
 
-    const heading = await screen.findByRole('heading', { name: 'Recently deleted' });
+    const heading = await screen.findByRole('heading', { name: 'Trash' });
     await screen.findByText(/may be under Load more/u);
-    expect(heading).toHaveFocus();
-    expect(requested).toHaveLength(1);
+    await waitFor(() => expect(requested).toHaveLength(2));
     expect(requested[0]).not.toContain('cursor=');
 
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Load more' }));
+    await act(async () => { releaseContinuation(); });
 
     await waitFor(() => expect(requested).toHaveLength(2));
     expect(requested[1]).toContain('cursor=later-trash-page');
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
     expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
+    await waitFor(() => expect(heading).toHaveFocus());
   });
 
-  it('keeps a preloaded page-2 retained target outside the bounded intent search', async () => {
+  it('focuses a preloaded page-2 retained target without fetching another page', async () => {
     const retainedId = 'retained-only-on-page-2';
     const restoreUntil = '2099-10-19T00:00:00.000Z';
     const requested: string[] = [];
@@ -3063,12 +3078,12 @@ describe('canonical Manager location ownership', () => {
     expect(await screen.findByRole('button', { name: 'Restore page-two.jpg' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Album'));
-    await user.click(await screen.findByRole('button', { name: 'Restore in Recently deleted' }));
+    await user.click(await screen.findByRole('button', { name: 'Restore in Trash' }));
 
-    const heading = await screen.findByRole('heading', { name: 'Recently deleted' });
-    await waitFor(() => expect(heading).toHaveFocus());
-    expect(screen.getByText(/may be under Load more/u)).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Restore page-two.jpg' })).not.toHaveFocus();
+    const heading = await screen.findByRole('heading', { name: 'Trash' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore page-two.jpg' })).toHaveFocus());
+    expect(heading).not.toHaveFocus();
+    expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
     expect(requested).toHaveLength(2);
     expect(requested[0]).not.toContain('cursor=');
     expect(requested[1]).toContain('cursor=trash-page-2');
@@ -3113,24 +3128,24 @@ describe('canonical Manager location ownership', () => {
     await user.click(await screen.findByRole('button', { name: /^Trash/ }));
     await screen.findByRole('button', { name: 'Restore exhausted-first.jpg' });
     await user.click(await screen.findByRole('button', { name: 'Load more' }));
-    const secondPageRestore = await screen.findByRole('button', {
+    await screen.findByRole('button', {
       name: 'Restore exhausted-second.jpg',
     });
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Album'));
-    await user.click(await screen.findByRole('button', { name: 'Restore in Recently deleted' }));
+    await user.click(await screen.findByRole('button', { name: 'Restore in Trash' }));
 
-    const heading = await screen.findByRole('heading', { name: 'Recently deleted' });
-    await waitFor(() => expect(heading).toHaveFocus());
-    expect(secondPageRestore).not.toHaveFocus();
+    const heading = await screen.findByRole('heading', { name: 'Trash' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore exhausted-second.jpg' })).toHaveFocus());
+    expect(heading).not.toHaveFocus();
     expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
     expect(requested).toHaveLength(2);
     expect(requested[0]).not.toContain('cursor=');
     expect(requested[1]).toContain('cursor=exhausted-page-2');
   });
 
-  it('abandons a delayed retained intent when the host manually returns to Live intake', async () => {
+  it('abandons a delayed retained intent when the host manually leaves for Share', async () => {
     const retainedId = 'delayed-retained-row';
     const restoreUntil = '2099-10-19T00:00:00.000Z';
     let releaseFirstTrash!: () => void;
@@ -3157,21 +3172,25 @@ describe('canonical Manager location ownership', () => {
     }));
     const router = createAppRouter([{
       pathname: `/manage/event/${MANAGED_EVENT.id}`,
+      search: '?section=gallery&view=trash',
       state: managerIntentState({ kind: 'open-recently-deleted', focusMediaId: retainedId }),
     }]);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
     await waitFor(() => expect(releaseFirstTrash).toBeTypeOf('function'));
-
-    await user.click(screen.getByRole('button', { name: 'Live intake' }));
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await waitFor(() => expect(router.state.location.search).toBe('?section=gallery&view=trash'));
+    await screen.findByRole('heading', { name: 'Trash' });
+    await user.click(screen.getByRole('button', { name: 'Share' }));
+    await screen.findByRole('heading', { name: 'Share your event' });
     await act(async () => { releaseFirstTrash(); });
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Trash' }));
 
     const restore = await screen.findByRole('button', { name: 'Restore delayed.jpg' });
     expect(restore).not.toHaveFocus();
     expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
-    expect(trashGets).toBe(2);
+    expect(trashGets).toBe(1); // Library retains the completed Trash page across destinations.
   });
 
   it('Guest gallery Settings round trip cleans each intent, waits for save, and restores Hidden focus once', async () => {
@@ -3498,7 +3517,7 @@ describe('canonical Manager location ownership', () => {
       }]);
       render(<RouterProvider router={router} />);
 
-      const heading = await screen.findByRole('heading', { name: 'Live intake' });
+      const heading = await screen.findByRole('heading', { name: 'Library' });
       expect(heading).not.toHaveFocus();
       expect(screen.queryByText(/may be under Load more/u)).not.toBeInTheDocument();
       await waitFor(() => expect(router.state.location.state).toEqual({ source: state.source }));
@@ -3523,7 +3542,7 @@ describe('manager resource ownership', () => {
 });
 
 function previewSources() {
-  return Array.from(document.querySelectorAll('.moderation-grid img'), (image) => image.getAttribute('src'));
+  return Array.from(document.querySelectorAll('.gallery-photo-wall img'), (image) => image.getAttribute('src'));
 }
 
 describe('manager experience', () => {
@@ -3575,7 +3594,7 @@ describe('manager experience', () => {
     try {
       process.env.TZ = 'UTC';
       render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-      await screen.findByRole('heading', { name: 'Live intake' });
+      await screen.findByRole('heading', { name: 'Library' });
 
       expect(document.querySelector('.manager-title p')).toHaveTextContent('March 7, 2026');
       expect(screen.getByText(/Files delete/)).toHaveTextContent(
@@ -3609,7 +3628,7 @@ describe('manager experience', () => {
         : base(input)
     )));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     expect(document.querySelector('.manager-title p')).toHaveTextContent('Date unavailable');
     expect(screen.getByText(/Files delete/)).toHaveTextContent('Files delete Time unavailable');
@@ -3683,10 +3702,10 @@ describe('manager experience', () => {
   it('keeps appearance inside Settings between its form and account controls', async () => {
     vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
-    expect(within(navigation).getAllByRole('button')).toHaveLength(6);
+    expect(within(navigation).getAllByRole('button')).toHaveLength(5);
     await userEvent.setup().click(within(navigation).getByRole('button', { name: /settings/i }));
 
     const settingsForm = document.querySelector('form.settings-form');
@@ -3702,7 +3721,7 @@ describe('manager experience', () => {
   it('keeps an unsaved Settings edit while the host visits another destination', async () => {
     vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
 
@@ -3738,7 +3757,7 @@ describe('manager experience', () => {
       return fetchMock(input);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /settings/i }));
@@ -3899,15 +3918,11 @@ describe('manager experience', () => {
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    const navigation = await screen.findByRole('navigation', { name: 'Manager sections' });
-    await user.click(await screen.findByRole('button', {
-      name: 'Move trash-summary-row.jpg to Recently deleted',
-    }));
-    await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await user.click(await screen.findByRole('button', { name: "Open Audience boundary, from Avery" }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
     await waitFor(() => expect(trashStarted).toBe(true));
 
-    fireEvent.click(within(navigation).getByRole('button', { name: /gallery/i }));
     await waitFor(() => expect(summaryReads).toBe(1));
     releaseTrash();
 
@@ -3974,14 +3989,13 @@ describe('manager experience', () => {
     const gardenTheme = resolveEventTheme({ version: 1, presetId: 'garden-party', overrides: {} });
     let releaseRead: (() => void) | null = null;
     let reads = 0;
-    const interval = vi.spyOn(window, 'setInterval');
     const fetchMock = managerFetch({ first: { media: makeMedia(1), nextCursor: null } });
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = String(init?.method ?? 'GET').toUpperCase();
       if (url.endsWith('/api/manage/events/event-a') && method === 'GET') {
         reads += 1;
-    // Hold the read that the Intake poll opened, so a theme write can
+        // Hold the read that the Add photos close opened, so a theme write can
         // commit underneath it. It answers with the pre-write row.
         if (reads === 2) await new Promise<void>((resolve) => { releaseRead = resolve; });
         return json({ event: MANAGED_EVENT });
@@ -3993,12 +4007,12 @@ describe('manager experience', () => {
       return fetchMock(input);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     const navigation = screen.getByRole('navigation', { name: 'Manager sections' });
 
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0] as (() => void) | undefined;
-    poll?.();
+    await user.click(screen.getByRole('button', { name: 'Add photos' }));
+    await user.click(screen.getByRole('button', { name: 'Close Add photos' }));
     await waitFor(() => expect(reads).toBe(2));
 
     await user.click(within(navigation).getByRole('button', { name: /settings/i }));
@@ -4026,211 +4040,41 @@ describe('manager experience', () => {
       'page-two': { media: [rows[MANAGER_MEDIA_PAGE_SIZE - 1], rows[MANAGER_MEDIA_PAGE_SIZE]], nextCursor: null },
     }, mediaRequests));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(MANAGER_MEDIA_PAGE_SIZE));
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+    await waitFor(() => expect(document.querySelectorAll('.gallery-photo-wall img')).toHaveLength(MANAGER_MEDIA_PAGE_SIZE));
     expect(mediaRequests[0], 'an empty cursor is a 422, so the first page omits it').not.toContain('cursor');
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(MANAGER_MEDIA_PAGE_SIZE + 1));
+    await waitFor(() => expect(document.querySelectorAll('.gallery-photo-wall img')).toHaveLength(MANAGER_MEDIA_PAGE_SIZE + 1));
     expect(mediaRequests.at(-1)).toContain('cursor=page-two');
     expect(new Set(previewSources()).size).toBe(MANAGER_MEDIA_PAGE_SIZE + 1);
     expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
   });
 
-  it('manager previews use lazy loading and asynchronous decoding', async () => {
-    vi.stubGlobal('fetch', managerFetch({ first: { media: makeMedia(3), nextCursor: null } }));
+  it('manager previews prioritize the first four images and lazily decode the rest', async () => {
+    vi.stubGlobal('fetch', managerFetch({ first: { media: makeMedia(6), nextCursor: null } }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(3));
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+    await waitFor(() => expect(document.querySelectorAll('.gallery-photo-wall img')).toHaveLength(6));
 
-    for (const image of document.querySelectorAll('.moderation-grid img')) {
-      expect(image).toHaveAttribute('loading', 'lazy');
+    for (const [index, image] of Array.from(document.querySelectorAll('.gallery-photo-wall img')).entries()) {
+      expect(image).toHaveAttribute('loading', index < 4 ? 'eager' : 'lazy');
       expect(image).toHaveAttribute('decoding', 'async');
     }
-  });
-
-  it('merges the polled first page ahead of retained pages without dropping or duplicating rows', async () => {
-    // `Moment 2` … `Moment 8`; small pages keep the merge arithmetic legible.
-    const rows = makeMedia(8).slice(1);
-    const pages: Record<string, MediaPage> = {
-      first: { media: rows.slice(0, 3), nextCursor: 'page-two' },
-      'page-two': { media: rows.slice(3, 5), nextCursor: 'page-three' },
-      'page-three': { media: rows.slice(5, 6), nextCursor: null },
-    };
-    const mediaRequests: string[] = [];
-    const interval = vi.spyOn(window, 'setInterval');
-    vi.stubGlobal('fetch', managerFetch(pages, mediaRequests));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(3));
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(5));
-
-    // A new delivery lands, pushing `Moment 4` off the refreshed first page. The retained second page
-    // is untouched, and `Moment 2`/`Moment 3` are now in both the refreshed page and the retained list.
-    pages.first = { media: [rows[6], rows[0], rows[1]], nextCursor: 'page-two' };
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    expect(poll).toBeTypeOf('function');
-    await act(async () => { (poll as () => void)(); });
-
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(6));
-    expect(mediaRequests.at(-1), 'the poll asks for the first page only').not.toContain('cursor');
-    expect(previewSources()[0], 'refreshed rows lead the retained ones').toBe(mediaPreview(rows[6]!.id));
-    expect(screen.getByAltText('Moment 8'), 'the polled arrival merges ahead').toBeVisible();
-    expect(screen.getByAltText('Moment 4'), 'a row pushed off the first page is retained').toBeVisible();
-    expect(screen.getByAltText('Moment 6'), 'the retained second page survives the poll').toBeVisible();
-    expect(new Set(previewSources()).size).toBe(6);
-
-    // The poll must not rewind the continuation cursor to the first page's own `nextCursor`.
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(7));
-    expect(mediaRequests.at(-1)).toContain('cursor=page-three');
-  });
-
-  it('keeps an exhausted continuation cursor exhausted after an answered poll', async () => {
-    const rows = makeMedia(7).slice(1);
-    const mediaRequests: string[] = [];
-    const interval = vi.spyOn(window, 'setInterval');
-    vi.stubGlobal('fetch', managerFetch({
-      first: { media: rows.slice(0, 2), nextCursor: 'page-two' },
-      'page-two': { media: rows.slice(2, 4), nextCursor: 'page-three' },
-      'page-three': { media: rows.slice(4), nextCursor: null },
-    }, mediaRequests));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(4));
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(6));
-    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
-
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    expect(poll).toBeTypeOf('function');
-    await act(async () => { (poll as () => void)(); });
-    await waitFor(() => expect(mediaRequests.filter((request) => !request.includes('cursor'))).toHaveLength(2));
-
-    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(6);
-    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
-  });
-
-  it('keeps an appended page when a poll resolves before that append has committed', async () => {
-    const rows = makeMedia(6).slice(1);
-    const mediaRequests: string[] = [];
-    let releaseLoadMore!: () => void;
-    let releasePoll!: () => void;
-    const interval = vi.spyOn(window, 'setInterval');
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
-        mediaRequests.push(url);
-        if (url.includes('cursor=page-two')) {
-          return new Promise<Response>((resolve) => {
-            releaseLoadMore = () => resolve(json({ media: rows.slice(2, 4), nextCursor: 'page-three' }));
-          });
-        }
-        if (url.includes('cursor=page-three')) return json({ media: rows.slice(4), nextCursor: null });
-        const firstPage = { media: rows.slice(0, 2), nextCursor: 'page-two' };
-        // The second cursor-less request is the poll's; hold it so it can be interleaved with the append.
-        if (mediaRequests.filter((request) => !request.includes('cursor')).length === 2) {
-          return new Promise<Response>((resolve) => { releasePoll = () => resolve(json(firstPage)); });
-        }
-        return json(firstPage);
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    }));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2));
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    await act(async () => { (poll as () => void)(); });
-
-    // Both answers land in one microtask drain, so React has not committed the append — let alone run a
-    // passive effect — by the time the poll decides what the list contains.
-    await act(async () => { releaseLoadMore(); releasePoll(); });
-
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(4));
-    expect(screen.getByAltText('Moment 4'), 'the appended page survives the poll').toBeVisible();
-    expect(screen.getByAltText('Moment 5')).toBeVisible();
-
-    // The cursor still follows the rows on screen, so nothing has been left behind it.
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(5));
-    expect(mediaRequests.at(-1)).toContain('cursor=page-three');
-  });
-
-  it('drops an in-flight page onto a list the poll has already restarted', async () => {
-    const rows = makeMedia(8).slice(1);
-    const mediaRequests: string[] = [];
-    let releaseLoadMore!: () => void;
-    const interval = vi.spyOn(window, 'setInterval');
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
-        mediaRequests.push(url);
-        if (url.includes('cursor=page-two')) {
-          return new Promise<Response>((resolve) => {
-            releaseLoadMore = () => resolve(json({ media: rows.slice(2, 4), nextCursor: 'page-three' }));
-          });
-        }
-        if (url.includes('cursor=page-four')) return json({ media: rows.slice(6), nextCursor: null });
-        // The poll's first page is a burst that shares nothing with the rows on screen.
-        return mediaRequests.filter((request) => !request.includes('cursor')).length === 2
-          ? json({ media: rows.slice(4, 6), nextCursor: 'page-four' })
-          : json({ media: rows.slice(0, 2), nextCursor: 'page-two' });
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    }));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2));
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    await act(async () => { (poll as () => void)(); });
-    await waitFor(() => expect(screen.getByAltText('Moment 6')).toBeVisible());
-
-    await act(async () => { releaseLoadMore(); });
-    // The page in flight continues the keyset the restart abandoned, so appending it would splice rows
-    // from the old ordering into the new one and hand the cursor back to the list nobody can reach.
-    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2);
-    for (const caption of ['Moment 2', 'Moment 3', 'Moment 4', 'Moment 5']) {
-      expect(screen.queryByAltText(caption), caption).not.toBeInTheDocument();
-    }
-
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(3));
-    expect(mediaRequests.at(-1)).toContain('cursor=page-four');
   });
 
   it('never lets a superseded load reinstate its rows or its cursor', async () => {
     const rows = makeMedia(4).slice(1);
     let releaseFiltered!: () => void;
     let mediaRequests = 0;
-    const interval = vi.spyOn(window, 'setInterval');
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
+      if (url.includes('/gallery?')) {
         mediaRequests += 1;
         // Hold the filtered load so it lands after the host has already cleared the filter.
-        if (url.includes('guestName=')) {
+        if (url.includes('query=')) {
           return new Promise<Response>((resolve) => {
             releaseFiltered = () => resolve(json({ media: rows.slice(2), nextCursor: 'stale-page' }));
           });
@@ -4240,82 +4084,37 @@ describe('manager experience', () => {
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
+      return managerFetch({ first: { media: [], nextCursor: null } })(input);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(await screen.findByAltText('Moment 2')).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Open Moment 2, from Avery Stone' })).toBeVisible();
 
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
-    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await user.type(screen.getByLabelText('Find photos'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await user.click(screen.getByRole('button', { name: 'Clear search' }));
     await waitFor(() => expect(mediaRequests).toBe(3));
 
     await act(async () => { releaseFiltered(); });
-    // `refresh` replaces rather than merges, so before polling merged this was self-correcting. It is
-    // not any more: a stale list installed here sits behind every later poll for the rest of the session.
-    expect(screen.queryByAltText('Moment 4'), 'filtered rows do not return').not.toBeInTheDocument();
-    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2);
+    // A late replacement cannot reinstate either rows or its continuation.
+    expect(screen.queryByRole('button', { name: 'Open Moment 4, from Avery Stone' }), 'filtered rows do not return').not.toBeInTheDocument();
+    expect(document.querySelectorAll('.gallery-photo-wall img')).toHaveLength(2);
     expect(screen.queryByRole('button', { name: 'Load more photos' }), 'no stale cursor').not.toBeInTheDocument();
 
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    await act(async () => { (poll as () => void)(); });
-    expect(screen.queryByAltText('Moment 4'), 'and the poll cannot retain them').not.toBeInTheDocument();
-    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2);
   });
 
-  it('restarts from the polled first page when the keyset moved past everything on screen', async () => {
-    // Pages of two keep the burst arithmetic small: the host holds four rows, then six newer photos
-    // land inside one interval, so the refreshed first page shares no id with anything on screen.
-    const rows = makeMedia(8).slice(1);
-    const mediaRequests: string[] = [];
-    const pages: Record<string, MediaPage> = {
-      first: { media: rows.slice(0, 2), nextCursor: 'page-two' },
-      'page-two': { media: rows.slice(2, 4), nextCursor: 'page-three' },
-      'page-four': { media: rows.slice(6), nextCursor: null },
-    };
-    const interval = vi.spyOn(window, 'setInterval');
-    vi.stubGlobal('fetch', managerFetch(pages, mediaRequests));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2));
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(4));
-
-    pages.first = { media: rows.slice(4, 6), nextCursor: 'page-four' };
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    await act(async () => { (poll as () => void)(); });
-
-    // Merging would leave Moment 2 … Moment 5 on screen with the photos between them unreachable by
-    // any cursor. The discontinuity is provable, so the list restarts from the page the host can see.
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(2));
-    expect(screen.getByAltText('Moment 6')).toBeVisible();
-    expect(screen.getByAltText('Moment 7')).toBeVisible();
-    for (const caption of ['Moment 2', 'Moment 3', 'Moment 4', 'Moment 5']) {
-      expect(screen.queryByAltText(caption), caption).not.toBeInTheDocument();
-    }
-
-    // The restart adopts the new cursor rather than keeping one that points into the abandoned keyset.
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(3));
-    expect(mediaRequests.at(-1)).toContain('cursor=page-four');
-    expect(screen.getByAltText('Moment 8')).toBeVisible();
-  });
-
-  it('retires the continuation cursor the moment the guest filter changes', async () => {
+  it('retires the continuation cursor the moment the Library search changes', async () => {
     const rows = makeMedia(4).slice(1);
     let releaseFiltered!: () => void;
     let mediaRequests = 0;
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
+      if (url.includes('/gallery?')) {
         mediaRequests += 1;
         // Hold the filtered load open: this is the window in which the old cursor is still spendable.
-        if (url.includes('guestName=')) {
+        if (url.includes('query=')) {
           return new Promise<Response>((resolve) => {
             releaseFiltered = () => resolve(json({ media: rows.slice(2), nextCursor: null }));
           });
@@ -4325,25 +4124,23 @@ describe('manager experience', () => {
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
+      return managerFetch({ first: { media: [], nextCursor: null } })(input);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     expect(await screen.findByRole('button', { name: 'Load more photos' })).toBeVisible();
 
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await user.type(screen.getByLabelText('Find photos'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
 
-    // Query ownership clears old rows and its cursor immediately. Rendering
-    // unfiltered cards while the new question is pending would make its cursor
-    // spendable against the wrong filter.
-    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(0);
+    // Retain the confirmed rows while retiring their continuation until replacement settles.
+    expect(document.querySelectorAll('.gallery-photo-wall img')).toHaveLength(2);
     expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
     expect(mediaRequests).toBe(2);
 
     await act(async () => { releaseFiltered(); });
-    expect(await screen.findByAltText('Moment 4')).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Open Moment 4, from Avery Stone' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
   });
 
@@ -4355,7 +4152,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
+      if (url.includes('/gallery?')) {
         mediaRequests.push(url);
         if (url.includes('cursor=old-page-two')) {
           oldSignal = init?.signal ?? undefined;
@@ -4370,10 +4167,10 @@ describe('manager experience', () => {
             };
           });
         }
-        if (url.includes('guestName=Avery') && url.includes('cursor=filtered-page-two')) {
+        if (url.includes('query=Avery') && url.includes('cursor=filtered-page-two')) {
           return json({ media: rows.slice(6, 7), nextCursor: null });
         }
-        if (url.includes('guestName=Avery')) {
+        if (url.includes('query=Avery')) {
           return json({ media: rows.slice(4, 6), nextCursor: 'filtered-page-two' });
         }
         return json({ media: rows.slice(0, 2), nextCursor: 'old-page-two' });
@@ -4381,31 +4178,31 @@ describe('manager experience', () => {
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
+      return managerFetch({ first: { media: [], nextCursor: null } })(input);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
     await waitFor(() => expect(oldSignal).toBeDefined());
 
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
-    expect(await screen.findByAltText('Moment 6')).toBeVisible();
+    await user.type(screen.getByLabelText('Find photos'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByRole('button', { name: 'Open Moment 6, from Avery Stone' })).toBeVisible();
     const filteredMore = await screen.findByRole('button', { name: 'Load more photos' });
     expect(oldSignal?.aborted, 'the superseded request receives an abort').toBe(true);
     expect(filteredMore, 'the old request no longer owns the loading state').toBeEnabled();
 
     await user.click(filteredMore);
-    expect(await screen.findByAltText('Moment 8')).toBeVisible();
+    expect(await screen.findByRole('button', { name: 'Open Moment 8, from Avery Stone' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
     const filteredSources = previewSources();
 
     await act(async () => { releaseOldPage(); });
     expect(previewSources()).toEqual(filteredSources);
-    expect(screen.queryByAltText('Moment 4')).not.toBeInTheDocument();
-    expect(screen.queryByAltText('Moment 5')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open Moment 4, from Avery Stone' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open Moment 5, from Avery Stone' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(mediaRequests.at(-1)).toContain('cursor=filtered-page-two');
@@ -4417,7 +4214,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
+      if (url.includes('/gallery?')) {
         if (url.includes('cursor=page-two')) {
           pageSignal = init?.signal ?? undefined;
           return new Promise<Response>(() => undefined);
@@ -4427,187 +4224,16 @@ describe('manager experience', () => {
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
+      return managerFetch({ first: { media: [], nextCursor: null } })(input);
     }));
     const view = render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Load more photos' }));
     await waitFor(() => expect(pageSignal).toBeDefined());
     view.unmount();
 
     expect(pageSignal?.aborted).toBe(true);
-  });
-
-  it('silently drops a retired Intake continuation failure after a confirmed mutation', async () => {
-    const row: MediaView = {
-      id: 'intake-retire-row', originalFilename: 'intake-retire-row.jpg', guestName: 'Avery',
-      caption: 'Retire Intake', publicationStatus: 'unpublished', uploadState: 'stored',
-    };
-    let releaseStalePage!: () => void;
-    let trashed = false;
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = (init?.method ?? 'GET').toUpperCase();
-      if (url.includes('cursor=intake-retire-cursor')) {
-        return new Promise<Response>((resolve) => {
-          releaseStalePage = () => void errorJson({
-            code: 'INTERNAL_ERROR', message: 'Stale Intake continuation failed.', requestId: 'request-stale-intake',
-          }, 500).then(resolve);
-        });
-      }
-      if (url.endsWith('/media/intake-retire-row/trash') && method === 'POST') {
-        trashed = true;
-        return json({ media: {
-          ...row,
-          trashedAt: '2026-09-20T01:00:00.000Z',
-          restoreUntil: '2026-10-19T00:00:00.000Z',
-        } });
-      }
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.endsWith('/guestbook/summary')) return json({ summary: {
-        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
-      } });
-      if (url.includes('/media')) return json({
-        media: trashed ? [] : [row],
-        nextCursor: trashed ? null : 'intake-retire-cursor',
-      });
-      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
-      throw new Error(`Unexpected request ${method} ${url}`);
-    }));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
-    await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(releaseStalePage).toBeTypeOf('function'));
-
-    // A confirmed Intake mutation retires the page capture while the older
-    // continuation is still held. Its retryable answer must then be silent.
-    await user.click(screen.getByRole('button', { name: 'Move intake-retire-row.jpg to Recently deleted' }));
-    await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Move intake-retire-row.jpg to Recently deleted' }))
-      .not.toBeInTheDocument());
-    await act(async () => { releaseStalePage(); });
-
-    expect(screen.queryByText('Stale Intake continuation failed.')).not.toBeInTheDocument();
-    expect(screen.queryByText('Retire Intake')).not.toBeInTheDocument();
-  });
-
-  it('keeps newer Intake feedback when a retired continuation succeeds', async () => {
-    const row: MediaView = {
-      id: 'intake-success-row', originalFilename: 'intake-success-row.jpg', guestName: 'Avery',
-      caption: 'Retire Intake success', publicationStatus: 'unpublished', uploadState: 'stored',
-    };
-    let releaseStalePage!: () => void;
-    let trashed = false;
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = (init?.method ?? 'GET').toUpperCase();
-      if (url.includes('cursor=intake-success-cursor')) {
-        return new Promise<Response>((resolve) => {
-          releaseStalePage = () => void json({ media: [], nextCursor: null }).then(resolve);
-        });
-      }
-      if (url.endsWith('/media/intake-success-row/trash') && method === 'POST') {
-        trashed = true;
-        return json({ media: {
-          ...row,
-          trashedAt: '2026-09-20T01:00:00.000Z',
-          restoreUntil: '2026-10-19T00:00:00.000Z',
-        } });
-      }
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.endsWith('/guestbook/summary')) return json({ summary: {
-        needsReviewCount: 0, sharedCount: 0, hiddenCount: 0, deletedCount: 0, galleryVisible: true,
-      } });
-      if (url.includes('/media')) return json({
-        media: trashed ? [] : [row],
-        nextCursor: trashed ? null : 'intake-success-cursor',
-      });
-      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) {
-        return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      }
-      throw new Error(`Unexpected request ${method} ${url}`);
-    }));
-    vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('Clipboard rejected'));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
-    await user.click(await screen.findByRole('button', { name: 'Load more photos' }));
-    await waitFor(() => expect(releaseStalePage).toBeTypeOf('function'));
-
-    await user.click(screen.getByRole('button', { name: 'Move intake-success-row.jpg to Recently deleted' }));
-    await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Move intake-success-row.jpg to Recently deleted' }))
-      .not.toBeInTheDocument());
-
-    await user.click(screen.getAllByRole('button', { name: 'Copy event link' })[0]!);
-    expect(await screen.findByRole('alert')).toHaveTextContent('The event link could not be copied.');
-    await act(async () => { releaseStalePage(); });
-
-    // The page is retired by the trash projection, so its success cannot clear
-    // an unrelated action that happened after that mutation.
-    expect(screen.getByRole('alert')).toHaveTextContent('The event link could not be copied.');
-  });
-
-  it('discards media pages that resolve after the guest filter narrowed the list', async () => {
-    const rows = makeMedia(7).slice(1);
-    const held: Array<() => void> = [];
-    let mediaRequests = 0;
-    const interval = vi.spyOn(window, 'setInterval');
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
-        mediaRequests += 1;
-        // Requests two and three are the load-more page and the poll. Hold both open until the host
-        // has already refiltered, then answer them with rows that belong to the unfiltered query.
-        if (mediaRequests === 2 || mediaRequests === 3) {
-          const stale = mediaRequests === 2
-            ? { media: rows.slice(2, 4), nextCursor: null }
-            : { media: [rows[4], rows[0], rows[1]], nextCursor: 'page-two' };
-          return new Promise<Response>((resolve) => { held.push(() => resolve(json(stale))); });
-        }
-        return json(url.includes('guestName=')
-          ? { media: rows.slice(5), nextCursor: null }
-          : { media: rows.slice(0, 2), nextCursor: 'page-two' });
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    }));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(await screen.findByAltText('Moment 2')).toBeVisible();
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Load more photos' }));
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    await act(async () => { (poll as () => void)(); });
-    expect(held).toHaveLength(2);
-
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
-    expect(await screen.findByAltText('Moment 7')).toBeVisible();
-
-    await act(async () => { for (const release of held) release(); });
-    // Both answers belong to the unfiltered query. Appending or merging either would resurrect rows the
-    // host just filtered away, and the poll's cursor would reopen paging over the wrong list.
-    for (const caption of ['Moment 2', 'Moment 3', 'Moment 4', 'Moment 5', 'Moment 6']) {
-      expect(screen.queryByAltText(caption), caption).not.toBeInTheDocument();
-    }
-    expect(screen.getByAltText('Moment 7')).toBeVisible();
-    expect(document.querySelectorAll('.moderation-grid img')).toHaveLength(1);
-    expect(screen.queryByRole('button', { name: 'Load more photos' })).not.toBeInTheDocument();
   });
 
   it('keeps the manager view in place when a bulk publish, hide, or export fails', async () => {
@@ -4631,10 +4257,10 @@ describe('manager experience', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /gallery/i }));
+    await user.click(screen.getByRole('button', { name: /^Gallery$/i }));
     await user.click(await findGalleryMode('Guest gallery'));
     await waitFor(() => expect(document.querySelectorAll('.moderation-grid article')).toHaveLength(2));
 
@@ -4712,12 +4338,13 @@ describe('manager experience', () => {
     }));
 
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Share' }));
     const compact = await screen.findByRole('region', { name: 'Export progress' });
     expect(within(compact).getByText('Complete export · Queued')).toBeVisible();
     const liveHost = document.querySelector('[data-gallery-live-host]');
     expect(liveHost).not.toBeNull();
-    expect(liveHost?.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(liveHost?.querySelectorAll(':scope > p[role="status"]')).toHaveLength(1);
 
     const scheduled = await waitFor(() => {
       const index = interval.mock.calls.findLastIndex(([, delay]) => delay === 10_000);
@@ -4798,7 +4425,7 @@ describe('manager experience', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-      await screen.findByRole('heading', { name: 'Live intake' });
+      await screen.findByRole('heading', { name: 'Library' });
       const user = userEvent.setup();
       await user.click(screen.getByRole('button', { name: 'Gallery' }));
       await user.click(await findGalleryMode('Library'));
@@ -4817,7 +4444,7 @@ describe('manager experience', () => {
       )).toBeVisible();
 
       await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
-        .getByRole('button', { name: /^Intake/ }));
+        .getByRole('button', { name: 'Share' }));
       expect(within(await screen.findByRole('region', { name: 'Export progress' }))
         .getByText('Complete export · Queued')).toBeVisible();
     },
@@ -4927,7 +4554,7 @@ describe('manager experience', () => {
     }));
 
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Library'));
@@ -4974,7 +4601,7 @@ describe('manager experience', () => {
     }));
 
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Library'));
@@ -4991,7 +4618,7 @@ describe('manager experience', () => {
       .toHaveTextContent('Album export. Running');
 
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
-      .getByRole('button', { name: /^Intake/ }));
+      .getByRole('button', { name: 'Share' }));
     expect(within(await screen.findByRole('region', { name: 'Export progress' }))
       .getByText('Album export · Running')).toBeVisible();
   });
@@ -5034,7 +4661,7 @@ describe('manager experience', () => {
     }));
 
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
@@ -5090,7 +4717,7 @@ describe('manager experience', () => {
     }));
 
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Library'));
@@ -5173,7 +4800,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Library'));
@@ -5239,7 +4866,7 @@ describe('manager experience', () => {
       throw new Error(`Unexpected request ${method} ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
 
@@ -5293,7 +4920,7 @@ describe('manager experience', () => {
       throw new Error(`Unexpected request ${method} ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Album'));
@@ -5328,7 +4955,7 @@ describe('manager experience', () => {
       throw new Error(`Unexpected request ${method} ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
@@ -5359,235 +4986,13 @@ describe('manager experience', () => {
     expect(bulkBodies[0]!.ids).not.toContain(rows[MANAGER_BULK_SELECTION_MAX]!.id);
   }, 20_000);
 
-  it('polls live intake so a new private delivery appears without navigation', async () => {
-    let mediaRequests = 0;
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: {
-        ...MANAGED_EVENT,
-        storedMediaCount: mediaRequests > 0 ? 1 : 0, storedBytes: 128, recoverableMediaCount: 0, recoverableBytes: 0,
-      } });
-      if (url.includes('/media')) {
-        mediaRequests += 1;
-        return json({ media: mediaRequests > 1 ? [{
-          id: 'media-new', originalFilename: 'new-arrival.png', guestName: 'Avery',
-          publicationStatus: 'unpublished', uploadState: 'stored',
-        }] : [] });
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    });
-    const interval = vi.spyOn(window, 'setInterval');
-    vi.stubGlobal('fetch', fetchMock);
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(screen.queryByText('From Avery')).not.toBeInTheDocument();
-
-    const poll = interval.mock.calls.find(([, delay]) => delay === 5_000)?.[0];
-    expect(poll).toBeTypeOf('function');
-    await act(async () => { (poll as () => void)(); });
-
-    expect(await screen.findByText('From Avery')).toBeVisible();
-  });
-
-  it('keeps an older held Intake poll from overwriting the newer same-query poll', async () => {
-    const oldRow = {
-      id: 'poll-old', originalFilename: 'old.jpg', guestName: 'Avery', caption: 'Older poll',
-      publicationStatus: 'unpublished', uploadState: 'stored',
-    };
-    const newRow = {
-      id: 'poll-new', originalFilename: 'new.jpg', guestName: 'Jamie', caption: 'Newer poll',
-      publicationStatus: 'unpublished', uploadState: 'stored',
-    };
-    const releases: Array<() => void> = [];
-    let mediaReads = 0;
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
-        mediaReads += 1;
-        if (mediaReads === 1) return json({ media: makeMedia(2).slice(1), nextCursor: null });
-        const row = mediaReads === 2 ? oldRow : newRow;
-        return new Promise<Response>((resolve) => { releases.push(() => void json({ media: [row], nextCursor: null }).then(resolve)); });
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    }));
-    const interval = vi.spyOn(window, 'setInterval');
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByAltText('Moment 2')).toBeVisible();
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0] as () => void;
-
-    await act(async () => { poll(); });
-    await act(async () => { poll(); });
-    expect(releases).toHaveLength(2);
-    await act(async () => { releases[1]!(); });
-    expect(await screen.findByAltText('Newer poll')).toBeVisible();
-    await act(async () => { releases[0]!(); });
-
-    expect(screen.getByAltText('Newer poll')).toBeVisible();
-    expect(screen.queryByAltText('Older poll')).not.toBeInTheDocument();
-  });
-
-  it('keeps the last usable intake on screen when a poll fails', async () => {
-    let mediaRequests = 0;
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
-        mediaRequests += 1;
-        return mediaRequests > 1
-          ? errorJson({ code: 'INTERNAL_ERROR', message: 'The event manager could not be loaded.', requestId: 'request-a' }, 500)
-          : json({ media: makeMedia(2).slice(1), nextCursor: null });
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    }));
-    const interval = vi.spyOn(window, 'setInterval');
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(await screen.findByAltText('Moment 2')).toBeVisible();
-
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    expect(poll).toBeTypeOf('function');
-    await act(async () => { (poll as () => void)(); });
-
-    // Reception drops for one interval at the venue. The host keeps the intake already on screen
-    // rather than being thrown back to a whole-page dead end they never asked to leave for.
-    expect(screen.getByAltText('Moment 2')).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
-  });
-
-  it('keeps the last usable intake and offers both recovery routes when polling loses credentials', async () => {
-    let mediaRequests = 0;
-    const event = { ...MANAGED_EVENT, id: RECOVERY_EVENT_ID };
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith(`/api/manage/events/${RECOVERY_EVENT_ID}`)) return json({ event });
-      if (url.includes('/media')) {
-        mediaRequests += 1;
-        return mediaRequests > 1
-          ? errorJson({ code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' }, 401)
-          : json({ media: makeMedia(2).slice(1), nextCursor: null });
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    }));
-    const interval = vi.spyOn(window, 'setInterval');
-    render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(await screen.findByAltText('Moment 2')).toBeVisible();
-
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0];
-    expect(poll).toBeTypeOf('function');
-    await act(async () => { (poll as () => void)(); });
-
-    const notice = await screen.findByRole('alert');
-    expect(notice).toHaveTextContent('This session has expired.');
-    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(screen.getByAltText('Moment 2')).toBeVisible();
-    expect(screen.getByRole('link', { name: 'Sign in' }))
-      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
-    expect(screen.getByLabelText('Management link')).toBeVisible();
-  });
-
-  it('locks the Intake interval after a terminal poll failure even when its notice is dismissed', async () => {
-    let mediaReads = 0;
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) {
-        mediaReads += 1;
-        return mediaReads === 1
-          ? json({ media: makeMedia(2).slice(1), nextCursor: null })
-          : errorJson({ code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' }, 401);
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    }));
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByAltText('Moment 2')).toBeVisible();
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    expect(await screen.findByRole('alert')).toHaveTextContent('This session has expired.');
-    expect(mediaReads).toBe(2);
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Dismiss error' }));
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
-    expect(mediaReads).toBe(2);
-  });
-
-  it('does not resurface a dismissed terminal notice when a second Intake poll sibling settles', async () => {
-    let eventReads = 0;
-    let mediaReads = 0;
-    let releaseEventFailure!: () => void;
-    let releaseMediaFailure!: () => void;
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/api/manage/events/event-a')) {
-        eventReads += 1;
-        if (eventReads === 1) return json({ event: MANAGED_EVENT });
-        return new Promise<Response>((resolve) => {
-          releaseEventFailure = () => void errorJson({
-            code: 'SESSION_EXPIRED', message: 'The event poll lost access.', requestId: 'request-event',
-          }, 401).then(resolve);
-        });
-      }
-      if (url.includes('/media')) {
-        mediaReads += 1;
-        if (mediaReads === 1) return json({ media: makeMedia(2).slice(1), nextCursor: null });
-        return new Promise<Response>((resolve) => {
-          releaseMediaFailure = () => void errorJson({
-            code: 'SESSION_EXPIRED', message: 'The intake poll lost access.', requestId: 'request-media',
-          }, 401).then(resolve);
-        });
-      }
-      if (url.includes('/messages')) return json({ messages: [] });
-      if (url.endsWith('/exports')) return json({ exports: [] });
-      if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
-    }));
-    const interval = vi.spyOn(window, 'setInterval');
-    render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByAltText('Moment 2')).toBeVisible();
-
-    const poll = interval.mock.calls.filter(([, delay]) => delay === 5_000).at(-1)?.[0] as () => void;
-    await act(async () => { poll(); });
-    await waitFor(() => {
-      expect(releaseEventFailure).toBeTypeOf('function');
-      expect(releaseMediaFailure).toBeTypeOf('function');
-    });
-    await act(async () => { releaseEventFailure(); });
-    expect(await screen.findByRole('alert')).toHaveTextContent('The event poll lost access.');
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Dismiss error' }));
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-
-    await act(async () => { releaseMediaFailure(); });
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByAltText('Moment 2')).toBeVisible();
-  });
-
   it('names the way out when a load fails after the manager has already rendered', async () => {
     let mediaRequests = 0;
     const event = { ...MANAGED_EVENT, id: RECOVERY_EVENT_ID };
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith(`/api/manage/events/${RECOVERY_EVENT_ID}`)) return json({ event });
-      if (url.includes('/media')) {
+      if (/\/media(?:\?|$)/u.test(url)) {
         mediaRequests += 1;
         // A manager session lasts twelve hours. The one that expires overnight expires against a page
         // that has been rendered for hours, so the failure lands on the `loadedOnce` path.
@@ -5598,16 +5003,16 @@ describe('manager experience', () => {
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
+      return managerLocationFetch()(input);
     }));
     render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+    await userEvent.setup().click(await findGalleryMode('Guest gallery'));
     expect(await screen.findByAltText('Moment 2')).toBeVisible();
 
     // Any host action that reloads the manager will do; filtering is the one that needs no write.
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await user.click(within(screen.getByRole('group', { name: 'Publication status' })).getByRole('button', { name: 'Hidden' }));
 
     // Pressing a button cannot mint a session, so the notice has to name the management link. A bare
     // "This session has expired." leaves the host with no stated way back into their own event.
@@ -5615,9 +5020,9 @@ describe('manager experience', () => {
     expect(notice).toHaveTextContent('This session has expired.');
     expect(notice).toHaveTextContent('Open the latest management link you saved to start again.');
     // Still the inline, dismissible notice: the manager the host was working in survives.
-    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Gallery', level: 2 })).toBeVisible();
     expect(screen.getByRole('link', { name: 'Sign in' }))
-      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
+      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID, `/manage/event/${RECOVERY_EVENT_ID}?section=gallery&mode=guest-gallery`));
     expect(screen.getByLabelText('Management link')).toBeVisible();
     expect(screen.queryByRole('link', { name: 'Create account' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
@@ -5633,20 +5038,19 @@ describe('manager experience', () => {
         return errorJson({ code: 'RESOURCE_FORBIDDEN', message: 'This photo belongs to a different event.', requestId: 'request-a' }, 403);
       }
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (/\/media(?:\?|$)/u.test(url)) return json({ media: makeMedia(2).slice(1), nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
+      return managerLocationFetch()(input);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+    await userEvent.setup().click(await findGalleryMode('Guest gallery'));
     expect(await screen.findByAltText('Moment 2')).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Move moment-2.jpg to Recently deleted' }));
-    await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await user.click(screen.getByRole('button', { name: 'Hide moment-2.jpg' }));
 
     // A refused write is retryable by definition — the control is still under the host's thumb — so
     // the notice carries the failure and nothing else. The recovery line belongs to load failures.
@@ -5670,7 +5074,7 @@ describe('manager experience', () => {
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
 
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     // A disabled entry is a permanent event state, not a credential problem, so
     // it must not offer sign-in or link recovery.
     expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
@@ -5689,7 +5093,7 @@ describe('manager experience', () => {
       .not.toBeInTheDocument();
   });
 
-  it('does not reload the event entry when an Intake query changes', async () => {
+  it('does not reload the event entry when a Library query changes', async () => {
     let disabled = false;
     let resolveFirstQr!: (value: string) => void;
     qrToDataURL.mockImplementationOnce(() => new Promise<string>((resolve) => {
@@ -5698,7 +5102,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: MANAGED_EVENT });
-      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (url.includes('/gallery?')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) {
@@ -5712,12 +5116,12 @@ describe('manager experience', () => {
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
 
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     const user = userEvent.setup();
-    // Intake has its own query owner; filtering must not re-read entry or
+    // Library has its own query owner; filtering must not re-read entry or
     // replace the independent QR input.
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await user.type(screen.getByLabelText('Find photos'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
 
     await user.click(screen.getByRole('button', { name: 'Share' }));
     expect(screen.getByText('https://example.test/join#entry-id.entry-secret')).toBeVisible();
@@ -5740,7 +5144,7 @@ describe('manager experience', () => {
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
 
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     await waitFor(() => expect(qrToDataURL).toHaveBeenCalledTimes(1));
     expect(screen.queryByAltText('Event QR code')).not.toBeInTheDocument();
 
@@ -5756,7 +5160,7 @@ describe('manager experience', () => {
     const fetchMock = managerFetch({ first: { media: [], nextCursor: null } });
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     // Guest-list data is its own destination: it must not join the initial
     // `Promise.all` that every manager arrival pays for.
@@ -5773,7 +5177,7 @@ describe('manager experience', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a?section=rsvp'])} />);
 
     expect(await screen.findByRole('heading', { name: 'Guest list and RSVPs' })).toBeVisible();
-    expect(screen.queryByRole('heading', { name: 'Live intake' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Library' })).not.toBeInTheDocument();
   });
 
   it('signs guest devices out without changing the printed event link', async () => {
@@ -5792,7 +5196,7 @@ describe('manager experience', () => {
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Share' }));
@@ -5837,7 +5241,7 @@ describe('manager experience', () => {
       throw new Error(`Unexpected request ${url}`);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Share' }));
@@ -5887,7 +5291,7 @@ describe('manager experience', () => {
       }));
       render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
       const user = userEvent.setup();
-      expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+      expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
       await user.click(screen.getByRole('button', { name: 'Settings' }));
 
       await user.click(screen.getByRole('button', { name: 'Pause guest uploads' }));
@@ -5943,7 +5347,7 @@ describe('manager experience', () => {
         vi.stubGlobal('fetch', fetchMock);
         render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
         const user = userEvent.setup();
-        expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+        expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
         await user.click(screen.getByRole('button', { name: ui.section }));
         const trigger = screen.getByRole('button', { name: ui.trigger });
 
@@ -6011,7 +5415,7 @@ describe('manager experience', () => {
       }));
       render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
       const user = userEvent.setup();
-      expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+      expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
       await user.click(screen.getByRole('button', { name: 'Share' }));
       const trigger = screen.getByRole('button', { name: 'Sign out guest devices' });
       await user.click(trigger);
@@ -6064,7 +5468,7 @@ describe('manager experience', () => {
       }));
       render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
       const user = userEvent.setup();
-      expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+      expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
       await user.click(screen.getByRole('button', { name: 'Share' }));
       await user.click(screen.getByRole('button', { name: 'Disable printed event QR' }));
       const confirmation = within(await screen.findByRole('dialog'))
@@ -6100,7 +5504,7 @@ describe('manager experience', () => {
       }));
       render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
       const user = userEvent.setup();
-      expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+      expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
       await user.click(screen.getByRole('button', { name: 'Share' }));
       await user.click(screen.getByRole('button', { name: 'Disable printed event QR' }));
       const confirmation = within(await screen.findByRole('dialog'))
@@ -6133,7 +5537,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     const rotate = screen.getByRole('button', { name: 'Rotate manager link' });
@@ -6157,7 +5561,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     const trigger = screen.getByRole('button', { name: 'Rotate manager link' });
 
@@ -6193,7 +5597,7 @@ describe('manager experience', () => {
     const router = createAppRouter(['/host/events', '/manage/event/event-a']);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     const trigger = screen.getByRole('button', { name: 'Rotate manager link' });
     await user.click(trigger);
@@ -6290,7 +5694,7 @@ describe('manager experience', () => {
     }));
     vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
 
     const name = screen.getByLabelText('Event name');
@@ -6355,17 +5759,21 @@ describe('manager experience', () => {
         restoreStarted = true;
         return restore;
       }
+      if (url.pathname.endsWith('/gallery')) {
+        base.calls.push({ method, path: `${url.pathname}${url.search}`, body: null });
+        return json({ media: [row], nextCursor: null, snapshotSequence: 0 });
+      }
+      if (url.pathname.endsWith('/gallery/arrivals')) return json({ afterSequence: 0, snapshotSequence: 0, count: 0 });
+      if (url.pathname.endsWith('/photo-exports/capabilities')) return json({ enabled: false, destinations: [], activeJob: null });
+      if (url.pathname.endsWith('/media/trash')) return json({ media: [], nextCursor: null });
       return base.fetchMock(input, init);
     }));
     vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    expect(await screen.findByAltText(row.caption || row.originalFilename)).toBeVisible();
 
-    await user.click(screen.getByRole('button', {
-      name: `Move ${row.originalFilename} to Recently deleted`,
-    }));
-    await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await user.click(await screen.findByRole('button', { name: "Open Moment 2, from Avery Stone" }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
     await user.click(await screen.findByRole('button', { name: 'Undo' }));
     await waitFor(() => expect(restoreStarted).toBe(true));
 
@@ -6377,13 +5785,13 @@ describe('manager experience', () => {
     const result = screen.getByRole('dialog');
     const reconciledPaths = [
       '/api/manage/events/event-a',
-      '/api/manage/events/event-a/media',
+      '/api/manage/events/event-a/gallery?',
       '/api/manage/events/event-a/gallery/summary',
       '/api/manage/events/event-a/guestbook/summary',
     ];
     const readsWhilePaused = new Map(reconciledPaths.map((path) => [
       path,
-      base.calls.filter((call) => call.method === 'GET' && call.path === path).length,
+      base.calls.filter((call) => call.method === 'GET' && (call.path === path || (path.endsWith('/gallery?') && call.path.startsWith(path)))).length,
     ]));
 
     await act(async () => {
@@ -6391,17 +5799,22 @@ describe('manager experience', () => {
       await Promise.resolve();
     });
     for (const path of reconciledPaths) {
-      expect(base.calls.filter((call) => call.method === 'GET' && call.path === path))
+      expect(base.calls.filter((call) => call.method === 'GET' && (call.path === path || (path.endsWith('/gallery?') && call.path.startsWith(path)))))
         .toHaveLength(readsWhilePaused.get(path) ?? 0);
     }
 
     await user.click(within(result).getByRole('button', { name: 'Copy management link' }));
     await user.click(within(result).getByRole('button', { name: 'Continue managing' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    for (const path of reconciledPaths) {
-      await waitFor(() => expect(base.calls.filter((call) => call.method === 'GET' && call.path === path))
+    for (const path of reconciledPaths.filter(path => !path.endsWith('/gallery?'))) {
+      await waitFor(() => expect(base.calls.filter((call) => call.method === 'GET' && (call.path === path || (path.endsWith('/gallery?') && call.path.startsWith(path)))))
         .toHaveLength((readsWhilePaused.get(path) ?? 0) + 1));
     }
+    // Library owns its page read only while Gallery is mounted.
+    await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await screen.findByRole('button', { name: 'Open Moment 2, from Avery Stone' });
+    expect(base.calls.filter(call => call.method === 'GET' && call.path.startsWith('/api/manage/events/event-a/gallery?')))
+      .toHaveLength((readsWhilePaused.get('/api/manage/events/event-a/gallery?') ?? 0) + 1);
   });
 
   it('distinguishes a rejected rotate from an ambiguous one and rerotates from the refreshed revision', async () => {
@@ -6429,7 +5842,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     const trigger = screen.getByRole('button', { name: 'Rotate manager link' });
 
@@ -6493,7 +5906,7 @@ describe('manager experience', () => {
     vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new Error('Clipboard unavailable'));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     const trigger = screen.getByRole('button', { name: 'Rotate manager link' });
     await user.click(trigger);
@@ -6526,7 +5939,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith(`/api/manage/events/${RECOVERY_EVENT_ID}`)) return json({ event });
-      if (url.includes('/media')) {
+      if (/\/media(?:\?|$)/u.test(url)) {
         return url.includes('cursor=page-two')
           ? errorJson({ code: 'SESSION_EXPIRED', message: 'This session has expired.', requestId: 'request-a' }, 401)
           : json({ media: makeMedia(2).slice(1), nextCursor: 'page-two' });
@@ -6534,9 +5947,10 @@ describe('manager experience', () => {
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
+      return managerLocationFetch()(input);
     }));
     render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
+    await userEvent.setup().click(await findGalleryMode('Guest gallery'));
     expect(await screen.findByAltText('Moment 2')).toBeVisible();
 
     await userEvent.setup().click(screen.getByRole('button', { name: 'Load more photos' }));
@@ -6544,7 +5958,7 @@ describe('manager experience', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('This session has expired.');
     expect(screen.getByAltText('Moment 2')).toBeVisible();
     expect(screen.getByRole('link', { name: 'Sign in' }))
-      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
+      .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID, `/manage/event/${RECOVERY_EVENT_ID}?section=gallery&mode=guest-gallery`));
     expect(screen.getByLabelText('Management link')).toBeVisible();
   });
 
@@ -6556,22 +5970,22 @@ describe('manager experience', () => {
         return errorJson({ code: 'TOKEN_REVOKED', message: 'This link was replaced with a new one.', requestId: 'request-a' }, 403);
       }
       if (url.endsWith(`/api/manage/events/${RECOVERY_EVENT_ID}`)) return json({ event });
-      if (url.includes('/media')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
+      if (url.includes('/gallery?')) return json({ media: makeMedia(2).slice(1), nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
-      throw new Error(`Unexpected request ${url}`);
+      return managerLocationFetch()(input);
     }));
     render(<RouterProvider router={createAppRouter([`/manage/event/${RECOVERY_EVENT_ID}`])} />);
-    expect(await screen.findByAltText('Moment 2')).toBeVisible();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Move moment-2.jpg to Recently deleted' }));
-    await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await user.click(await screen.findByRole('button', { name: "Open Moment 2, from Avery Stone" }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
 
+    await user.click(screen.getByRole('button', { name: 'Close viewer' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('This link was replaced with a new one.');
-    expect(screen.getByAltText('Moment 2')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Open Moment 2, from Avery Stone' })).toBeVisible();
     expect(screen.getByRole('link', { name: 'Sign in' }))
       .toHaveAttribute('href', hostSignInHref(RECOVERY_EVENT_ID));
     expect(screen.getByLabelText('Management link')).toBeVisible();
@@ -6582,7 +5996,7 @@ describe('manager experience', () => {
     ['trash', 'manager action'],
   ] as const)('does not re-escalate dismissed terminal recovery when %s settles before %s', async (first, second) => {
     const row: MediaView = {
-      id: 'terminal-row', originalFilename: 'terminal-row.jpg', guestName: 'Avery', caption: 'Terminal row',
+      ...historyMedia(['terminal-row'])[0]!, id: 'terminal-row', originalFilename: 'terminal-row.jpg', guestName: 'Avery', caption: 'Terminal row',
       publicationStatus: 'unpublished', uploadState: 'stored',
     };
     let exportWrites = 0;
@@ -6611,7 +6025,7 @@ describe('manager experience', () => {
       } });
       if (url.endsWith('/api/manage/events/event-a/media')) return json({ media: [row], nextCursor: null });
       if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
-      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/gallery')) return json({ media: [row], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
@@ -6623,7 +6037,7 @@ describe('manager experience', () => {
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
 
     const trigger = async (source: 'manager action' | 'trash') => {
       if (source === 'manager action') {
@@ -6632,11 +6046,12 @@ describe('manager experience', () => {
         await waitFor(() => expect(exportWrites).toBeGreaterThan(0));
         return;
       }
-      await user.click(screen.getByRole('button', { name: /^Intake/ }));
-      await user.click(await screen.findByRole('button', { name: 'Move terminal-row.jpg to Recently deleted' }));
-      await user.click(within(await screen.findByRole('dialog'))
-        .getByRole('button', { name: 'Move to Recently deleted' }));
+      await user.click(screen.getByRole('button', { name: 'Gallery' }));
+      await user.click(await screen.findByRole('button', { name: 'Open Terminal row, from Avery' }));
+      await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+      await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
       await waitFor(() => expect(trashWrites).toBeGreaterThan(0));
+      await user.click(screen.getByRole('button', { name: 'Close viewer' }));
     };
 
     await trigger(first);
@@ -6691,14 +6106,14 @@ describe('manager experience', () => {
     const router = createAppRouter(['/manage/event/event-a']);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Guest gallery'));
     await user.click(await screen.findByRole('button', { name: 'Publish a-row.jpg' }));
     await waitFor(() => expect(releaseAWrite).toBeTypeOf('function'));
 
     await router.navigate('/manage/event/event-b');
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     expect(screen.getByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
     await act(async () => { releaseAWrite(); });
 
@@ -6711,7 +6126,7 @@ describe('manager experience', () => {
     const eventA = { ...MANAGED_EVENT, id: 'event-a', name: 'Event A' };
     const eventB = { ...MANAGED_EVENT, id: 'event-b', name: 'Event B', storedMediaCount: 0 };
     const aRow: MediaView = {
-      id: 'stale-undo', originalFilename: 'stale-undo.jpg', guestName: 'Avery',
+      ...historyMedia(['stale-undo'])[0]!, id: 'stale-undo', originalFilename: 'stale-undo.jpg', guestName: 'Avery',
       caption: 'Event A undo', publicationStatus: 'unpublished', uploadState: 'stored',
     };
     let aRowActive = true;
@@ -6744,22 +6159,20 @@ describe('manager experience', () => {
       if (url.includes('/media')) {
         return json({ media: event.id === 'event-a' && aRowActive ? [aRow] : [], nextCursor: null });
       }
-      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/gallery')) return json({ media: event.id === 'event-a' && aRowActive ? [aRow] : [], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
-      throw new Error(`Unexpected request ${method} ${url}`);
+      return managerLocationFetch()(input);
     });
     vi.stubGlobal('fetch', fetchMock);
     const router = createAppRouter(['/manage/event/event-a']);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
-    await user.click(await screen.findByRole('button', {
-      name: 'Move stale-undo.jpg to Recently deleted',
-    }));
-    await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
+    await screen.findByRole('heading', { name: 'Library' });
+    await user.click(await screen.findByRole('button', { name: "Open Event A undo, from Avery" }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
     await user.click(await screen.findByRole('button', { name: 'Undo' }));
     await waitFor(() => expect(releaseRestore).toBeTypeOf('function'));
 
@@ -6814,13 +6227,13 @@ describe('manager experience', () => {
     const router = createAppRouter(['/manage/event/event-a']);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     await waitFor(() => expect(releaseAExport).toBeTypeOf('function'));
 
     await router.navigate('/manage/event/event-b');
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     expect(screen.getByRole('heading', { level: 1, name: 'Event B' })).toBeVisible();
     const eventAExportReads = () => fetchMock.mock.calls.filter(([requested, request]) => (
       String(requested).endsWith('/api/manage/events/event-a/exports')
@@ -6880,7 +6293,7 @@ describe('manager experience', () => {
     }], { initialEntries: ['/manage/event/event-a'] });
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     await waitFor(() => expect(releaseAExport).toBeTypeOf('function'));
@@ -6910,22 +6323,20 @@ describe('manager experience', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('opens on live intake, filters by guest name, and keeps the shared gallery secondary', async () => {
+  it('opens on Library, searches private photos, and keeps the Guest gallery secondary', async () => {
+    const [toast, dance] = historyMedia(['media-a', 'media-b']);
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/api/manage/events/event-a')) return json({ event: {
         ...MANAGED_EVENT,
         storedMediaCount: 2,
       } });
-      if (url.includes('/media')) {
-        if (init?.method === 'POST') return json({ changed: ['media-a'] });
-        return json({ media: [
-          { id: 'media-a', originalFilename: 'toast.png', guestName: 'Avery', caption: 'The toast', publicationStatus: 'unpublished', uploadState: 'stored' },
-          { id: 'media-b', originalFilename: 'dance.png', guestName: 'Jamie', caption: 'First dance', publicationStatus: 'unpublished', uploadState: 'stored' },
-        ] });
-      }
+      if (url.includes('/media') && init?.method === 'POST') return json({ changed: ['media-a'] });
       if (url.endsWith('/gallery/summary')) return galleryAudienceSummaryJson();
-      if (url.includes('/gallery')) return json({ media: [], nextCursor: null });
+      if (url.includes('/gallery') || url.includes('/media')) return json({ media: [
+          { ...toast, originalFilename: 'toast.png', guestName: 'Avery', caption: 'The toast', publicationStatus: 'unpublished' },
+          { ...dance, originalFilename: 'dance.png', guestName: 'Jamie', caption: 'First dance', publicationStatus: 'unpublished' },
+        ], nextCursor: null });
       if (url.includes('/messages')) return json({ messages: [] });
       if (url.endsWith('/exports')) return json({ exports: [] });
       if (url.endsWith('/entry')) return json({ eventLink: 'https://example.test/join#entry-id.entry-secret', disabledAt: null });
@@ -6934,26 +6345,19 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     expect(await screen.findByRole('heading', { name: 'Maya & Theo' })).toBeVisible();
-    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
-    expect(screen.getByText('From Avery')).toBeVisible();
-    expect(screen.getByRole('link', { name: /download original toast.png/i })).toHaveAttribute('href', '/api/media/media-a/original');
+    expect(screen.getByRole('heading', { name: 'Library' })).toBeVisible();
+    expect(await screen.findByText('Avery')).toBeVisible();
     const managerNavigation = screen.getByRole('navigation', { name: 'Manager sections' });
-    const intakeNavigation = within(managerNavigation).getByRole('button', { name: /intake/i });
     const galleryNavigation = within(managerNavigation).getByRole('button', { name: /gallery/i });
-    expect(intakeNavigation).toHaveAttribute('aria-pressed', 'true');
-    expect(galleryNavigation).toHaveAttribute('aria-pressed', 'false');
+    expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await user.type(screen.getByLabelText('Find photos'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining('guestName=Avery'),
+      expect.stringContaining('query=Avery'),
       expect.anything(),
     ));
 
-    await user.click(galleryNavigation);
-    expect(intakeNavigation).toHaveAttribute('aria-pressed', 'false');
-    expect(galleryNavigation).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('heading', { name: 'Library' })).toBeVisible();
     await user.click(await findGalleryMode('Guest gallery'));
     // The mode change settles through the Manager's own navigation, so the workspace has to be
     // waited for: reached too early, `Select photos` is Library's, which stays mounted behind
@@ -7041,7 +6445,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Guest gallery'));
 
@@ -7134,7 +6538,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Guest gallery'));
     const shared = document.querySelector('.gallery-shared') as HTMLElement;
@@ -7196,7 +6600,7 @@ describe('manager experience', () => {
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Guest gallery'));
     const shared = document.querySelector('.gallery-shared') as HTMLElement;
@@ -7558,7 +6962,7 @@ describe('manager experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Guest gallery'));
     const shared = document.querySelector('.gallery-shared') as HTMLElement;
@@ -7689,8 +7093,8 @@ describe('manager experience', () => {
 
     await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
     await user.click(await findGalleryMode('Album'));
-    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Before Intake' } });
-    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    fireEvent.change(await screen.findByLabelText('Album title'), { target: { value: 'Before Share' } });
+    await user.click(within(managerNavigation).getByRole('button', { name: 'Share' }));
     expect(screen.getByLabelText('Album title')).toBeVisible();
     const sectionPrompt = await screen.findByRole('region', {
       name: 'Album changes are not saved yet',
@@ -7701,7 +7105,7 @@ describe('manager experience', () => {
     })).toBeDisabled();
     expect(sectionPrompt).toHaveTextContent('A change already sent may still finish saving');
     await act(async () => { resolveFirstSave(); });
-    expect(await screen.findByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Share your event' })).toBeVisible();
 
     await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
     await user.click(await findGalleryMode('Album'));
@@ -7948,7 +7352,7 @@ describe('manager experience', () => {
 
     await user.click(within(notice).getByRole('button', { name: 'Dismiss error' }));
     expect(screen.queryByLabelText('Manager notice')).not.toBeInTheDocument();
-    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    await user.click(within(managerNavigation).getByRole('button', { name: 'Share' }));
     const restored = await screen.findByLabelText('Manager notice');
     expect(restored).toHaveTextContent('This session has expired.');
     expect(restored).toHaveFocus();
@@ -7995,14 +7399,14 @@ describe('manager experience', () => {
     await user.click(within(notice).getByRole('button', { name: 'Dismiss error' }));
     expect(screen.queryByLabelText('Manager notice')).not.toBeInTheDocument();
 
-    await user.click(within(managerNavigation).getByRole('button', { name: /intake/i }));
+    await user.click(within(managerNavigation).getByRole('button', { name: 'Share' }));
     const restored = await screen.findByLabelText('Manager notice');
     expect(restored).toHaveTextContent('This management session has expired.');
     expect(restored).toHaveFocus();
   });
 });
 
-describe('Manager Intake empty states', () => {
+describe('Manager Library empty states', () => {
   class SuccessfulEmptyStateUploadRequest {
     status = 204;
     responseText = '';
@@ -8026,58 +7430,43 @@ describe('Manager Intake empty states', () => {
     }
   }
 
-  it('Intake true empty keeps the printable QR and opens the existing Share surface', async () => {
+  it('Library true empty keeps Add photos, Trash, and Share reachable', async () => {
     vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    const emptyHeading = await screen.findByRole('heading', { name: 'No photos yet' });
+    const emptyHeading = await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
     const emptyState = emptyHeading.closest('.empty-state') as HTMLElement;
-    expect(within(emptyState).getByText("Guests' photos arrive privately here.")).toBeVisible();
-    expect(await screen.findAllByRole('img', { name: 'Event QR code' })).toHaveLength(1);
-
-    const share = within(emptyState).getByRole('button', { name: 'Share event' });
-    const addPhotos = within(emptyState).getByRole('button', { name: 'Add photos' });
-    expect(share).toHaveClass('button--primary');
-    expect(addPhotos).toHaveClass('button--secondary');
+    expect(within(emptyState).getByText('Photos added by you or your guests appear here.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Add photos' })).toHaveClass('button--primary');
 
     await user.click(screen.getByRole('button', { name: 'Trash' }));
-    expect(await screen.findByRole('heading', { name: 'Nothing in Recently deleted.' })).toBeVisible();
-    expect(screen.queryByRole('heading', { name: 'No photos yet' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Nothing in Trash.' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'No photos have been delivered yet.' })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Live intake' }));
-    const restoredEmpty = (await screen.findByRole('heading', { name: 'No photos yet' }))
-      .closest('.empty-state') as HTMLElement;
-    await user.click(within(restoredEmpty).getByRole('button', { name: 'Share event' }));
+    await user.click(screen.getByRole('button', { name: 'Back to Library' }));
+    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    await user.click(screen.getByRole('button', { name: 'Share' }));
     expect(await screen.findByRole('heading', { name: 'Share your event' })).toBeVisible();
-    expect(screen.getAllByRole('img', { name: 'Event QR code' })).toHaveLength(2);
   });
 
-  it('Intake true empty returns Add photos focus to the actual toolbar or secondary invoker', async () => {
+  it('Library true empty returns Add photos focus to the Library trigger', async () => {
     vi.stubGlobal('fetch', managerFetch({ first: { media: [], nextCursor: null } }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    const emptyState = (await screen.findByRole('heading', { name: 'No photos yet' }))
-      .closest('.empty-state') as HTMLElement;
-    const secondaryInvoker = within(emptyState).getByRole('button', { name: 'Add photos' });
-    await user.click(secondaryInvoker);
+    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    const libraryInvoker = screen.getByRole('button', { name: 'Add photos' });
+    await user.click(libraryInvoker);
     await user.click(within(screen.getByRole('dialog', { name: 'Add photos' }))
       .getByRole('button', { name: 'Close Add photos' }));
-    await waitFor(() => expect(secondaryInvoker).toHaveFocus());
-
-    const toolbar = document.querySelector('.intake-upload-action') as HTMLElement;
-    const toolbarInvoker = within(toolbar).getByRole('button', { name: 'Add photos' });
-    await user.click(toolbarInvoker);
-    await user.click(within(screen.getByRole('dialog', { name: 'Add photos' }))
-      .getByRole('button', { name: 'Close Add photos' }));
-    await waitFor(() => expect(toolbarInvoker).toHaveFocus());
+    await waitFor(() => expect(libraryInvoker).toHaveFocus());
   });
 
   it.each([
     ['with upload availability remaining', false],
     ['after filling the last slot', true],
-  ] as const)('Intake true empty returns receipt focus to the connected toolbar %s', async (
+  ] as const)('Library true empty returns receipt focus to its connected Add photos trigger %s', async (
     _label,
     fillsLastSlot,
   ) => {
@@ -8109,7 +7498,7 @@ describe('Manager Intake empty states', () => {
         eventReads += 1;
         return json({ event });
       }
-      if (url.pathname === '/api/manage/events/event-a/media' && method === 'GET') {
+      if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
         const media = mediaReads === 0 ? [] : [uploaded];
         mediaReads += 1;
         return json({ media, nextCursor: null });
@@ -8134,12 +7523,9 @@ describe('Manager Intake empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    const emptyState = (await screen.findByRole('heading', { name: 'No photos yet' }))
-      .closest('.empty-state') as HTMLElement;
-    const emptyInvoker = within(emptyState).getByRole('button', { name: 'Add photos' });
-    const toolbar = document.querySelector('.intake-upload-action') as HTMLElement;
-    const toolbarInvoker = within(toolbar).getByRole('button', { name: 'Add photos' });
-    await user.click(emptyInvoker);
+    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    const libraryInvoker = screen.getByRole('button', { name: 'Add photos' });
+    await user.click(libraryInvoker);
     const dialog = screen.getByRole('dialog', { name: 'Add photos' });
     fireEvent.change(within(dialog).getByLabelText('Choose recent photos from your library'), {
       target: { files: [new File(['photo'], 'first-host.jpg', { type: 'image/jpeg' })] },
@@ -8147,20 +7533,19 @@ describe('Manager Intake empty states', () => {
     await user.click(await within(dialog).findByRole('button', { name: 'Send 1 photo' }));
     expect(await within(dialog).findByRole('heading', { name: '1 photo was added.' })).toBeVisible();
 
-    await waitFor(() => expect(emptyInvoker).not.toBeInTheDocument());
-    expect(toolbarInvoker).toBeInTheDocument();
+    expect(libraryInvoker).toBeInTheDocument();
     if (fillsLastSlot) {
-      await waitFor(() => expect(toolbarInvoker).toHaveAttribute('aria-disabled', 'true'));
-      expect(toolbarInvoker).toHaveAccessibleDescription('This event has reached its photo limit.');
+      await waitFor(() => expect(libraryInvoker).toHaveAttribute('aria-disabled', 'true'));
+      expect(screen.getByText('This event has reached its photo limit.')).toBeVisible();
     } else {
-      expect(toolbarInvoker).not.toHaveAttribute('aria-disabled', 'true');
+      expect(libraryInvoker).not.toHaveAttribute('aria-disabled', 'true');
     }
 
-    await user.click(within(dialog).getByRole('button', { name: 'Done' }));
-    await waitFor(() => expect(toolbarInvoker).toHaveFocus());
+    await user.click(within(dialog).getByRole('button', { name: 'Return to Library' }));
+    await waitFor(() => expect(libraryInvoker).toHaveFocus());
   });
 
-  it('Intake true empty keeps finalized receipt focus on the toolbar while Intake refresh is pending', async () => {
+  it('Library true empty keeps finalized receipt focus on Add photos while event refresh is pending', async () => {
     vi.stubGlobal('XMLHttpRequest', SuccessfulEmptyStateUploadRequest);
     const initialEvent: EventView = {
       ...MANAGED_EVENT,
@@ -8176,16 +7561,16 @@ describe('Manager Intake empty states', () => {
       id: 'media-held-host', originalFilename: 'held-host.jpg', guestName: 'Host',
       caption: '', publicationStatus: 'unpublished', uploadState: 'stored',
     };
-    let releaseIntakeRefresh = () => {};
-    const intakeRefreshGate = new Promise<void>((resolve) => {
+    let releaseEventRefresh = () => {};
+    const eventRefreshGate = new Promise<void>((resolve) => {
       let released = false;
-      releaseIntakeRefresh = () => {
+      releaseEventRefresh = () => {
         if (released) return;
         released = true;
         resolve();
       };
     });
-    onTestFinished(releaseIntakeRefresh);
+    onTestFinished(releaseEventRefresh);
     const base = managerFetch({ first: { media: [], nextCursor: null } });
     let eventReads = 0;
     let mediaReads = 0;
@@ -8195,12 +7580,12 @@ describe('Manager Intake empty states', () => {
       if (url.pathname === '/api/manage/events/event-a' && method === 'GET') {
         const event = eventReads === 0 ? initialEvent : refreshedEvent;
         eventReads += 1;
-        return json({ event });
+        return eventReads > 2 ? eventRefreshGate.then(() => json({ event })) : json({ event });
       }
-      if (url.pathname === '/api/manage/events/event-a/media' && method === 'GET') {
+      if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
         mediaReads += 1;
         if (mediaReads === 1) return json({ media: [], nextCursor: null });
-        return intakeRefreshGate.then(() => json({ media: [uploaded], nextCursor: null }));
+        return json({ media: [uploaded], nextCursor: null });
       }
       if (url.pathname === '/api/manage/events/event-a/uploads/batch' && method === 'POST') {
         const body = JSON.parse(String(init?.body)) as {
@@ -8222,12 +7607,9 @@ describe('Manager Intake empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    const emptyState = (await screen.findByRole('heading', { name: 'No photos yet' }))
-      .closest('.empty-state') as HTMLElement;
-    const emptyInvoker = within(emptyState).getByRole('button', { name: 'Add photos' });
-    const toolbar = document.querySelector('.intake-upload-action') as HTMLElement;
-    const toolbarInvoker = within(toolbar).getByRole('button', { name: 'Add photos' });
-    await user.click(emptyInvoker);
+    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    const libraryInvoker = screen.getByRole('button', { name: 'Add photos' });
+    await user.click(libraryInvoker);
     const dialog = screen.getByRole('dialog', { name: 'Add photos' });
     fireEvent.change(within(dialog).getByLabelText('Choose recent photos from your library'), {
       target: { files: [new File(['photo'], 'held-host.jpg', { type: 'image/jpeg' })] },
@@ -8235,25 +7617,25 @@ describe('Manager Intake empty states', () => {
     await user.click(await within(dialog).findByRole('button', { name: 'Send 1 photo' }));
     expect(await within(dialog).findByRole('heading', { name: '1 photo was added.' })).toBeVisible();
 
-    await waitFor(() => expect(mediaReads).toBe(2));
-    expect(emptyInvoker).toBeInTheDocument();
-    await waitFor(() => expect(toolbarInvoker).toHaveAttribute('aria-disabled', 'true'));
-    expect(toolbarInvoker).toHaveAccessibleDescription('This event has reached its photo limit.');
+    await waitFor(() => expect(eventReads).toBe(2));
+    expect(libraryInvoker).toBeInTheDocument();
+    await waitFor(() => expect(libraryInvoker).toHaveAttribute('aria-disabled', 'true'));
+    expect(screen.getByText('This event has reached its photo limit.')).toBeVisible();
 
-    await user.click(within(dialog).getByRole('button', { name: 'Done' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Return to Library' }));
+    await waitFor(() => expect(eventReads).toBe(3));
     try {
-      expect(toolbarInvoker).toHaveFocus();
+      expect(libraryInvoker).toHaveFocus();
     } finally {
       await act(async () => {
-        releaseIntakeRefresh();
-        await intakeRefreshGate;
+        releaseEventRefresh();
+        await eventRefreshGate;
       });
     }
-    await waitFor(() => expect(emptyInvoker).not.toBeInTheDocument());
-    expect(toolbarInvoker).toHaveFocus();
+    expect(libraryInvoker).toHaveFocus();
   });
 
-  it('Intake true empty keeps both unavailable Add photos invokers focusable with one resolved reason', async () => {
+  it('Library true empty keeps its unavailable Add photos trigger focusable with the resolved reason', async () => {
     const unavailable: EventView = {
       ...MANAGED_EVENT,
       hostUploadAvailability: { enabled: false, reason: 'storage-cap' },
@@ -8267,32 +7649,32 @@ describe('Manager Intake empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    await screen.findByRole('heading', { name: 'No photos yet' });
+    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
     const invokers = screen.getAllByRole('button', { name: 'Add photos' });
-    expect(invokers).toHaveLength(2);
+    expect(invokers).toHaveLength(1);
     for (const invoker of invokers) {
       invoker.focus();
       expect(invoker).toHaveFocus();
       expect(invoker).toHaveAttribute('aria-disabled', 'true');
-      expect(invoker).toHaveAccessibleDescription('This event has reached its storage limit.');
+      expect(screen.getByText('This event has reached its storage limit.')).toBeVisible();
       await user.click(invoker);
       expect(screen.queryByRole('dialog', { name: 'Add photos' })).not.toBeInTheDocument();
     }
   });
 
-  it('Intake filtered empty clears the contributor filter and reloads an unfiltered first page', async () => {
+  it('Library filtered empty clears the search and reloads an unfiltered first page', async () => {
     const row: MediaView = {
-      id: 'media-a', originalFilename: 'toast.jpg', guestName: 'Avery',
+      ...historyMedia(['media-a'])[0]!, id: 'media-a', originalFilename: 'toast.jpg', guestName: 'Avery',
       caption: 'The toast', publicationStatus: 'unpublished', uploadState: 'stored',
     };
     const mediaRequests: string[] = [];
     const base = managerFetch({ first: { media: [row], nextCursor: null } });
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = new URL(String(input), window.location.origin);
-      if (url.pathname === '/api/manage/events/event-a/media') {
+      if (url.pathname === '/api/manage/events/event-a/gallery') {
         mediaRequests.push(`${url.pathname}${url.search}`);
         return json({
-          media: url.searchParams.has('guestName') ? [] : [row],
+          media: url.searchParams.has('query') ? [] : [row],
           nextCursor: null,
         });
       }
@@ -8301,29 +7683,27 @@ describe('Manager Intake empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    expect(await screen.findByText('The toast')).toBeVisible();
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Nobody');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    expect(await screen.findByRole('button', { name: 'Open The toast, from Avery' })).toBeVisible();
+    await user.type(screen.getByLabelText('Find photos'), 'Nobody');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
 
-    const emptyState = (await screen.findByRole('heading', { name: 'No matching photos' }))
+    const emptyState = (await screen.findByRole('heading', { name: 'No photos match this search.' }))
       .closest('.empty-state') as HTMLElement;
-    expect(within(emptyState).queryByRole('button', { name: 'Share event' })).not.toBeInTheDocument();
-    await user.click(within(emptyState).getByRole('button', { name: 'Clear filters' }));
+    await user.click(within(emptyState).getByRole('button', { name: 'Clear search' }));
 
-    expect(await screen.findByText('The toast')).toBeVisible();
-    expect(screen.getByLabelText('Filter by guest name')).toHaveValue('');
+    expect(await screen.findByRole('button', { name: 'Open The toast, from Avery' })).toBeVisible();
+    expect(screen.getByLabelText('Find photos')).toHaveValue('');
     expect(mediaRequests).toEqual([
-      '/api/manage/events/event-a/media',
-      '/api/manage/events/event-a/media?guestName=Nobody',
-      '/api/manage/events/event-a/media',
+      '/api/manage/events/event-a/gallery?live=1&order=newest',
+      '/api/manage/events/event-a/gallery?live=1&query=Nobody&order=newest',
+      '/api/manage/events/event-a/gallery?live=1&order=newest',
     ]);
   });
 });
 
 describe('Manager Add photos integration', () => {
   function toolbarAddPhotos(): HTMLButtonElement {
-    const toolbar = document.querySelector('.intake-upload-action') as HTMLElement;
-    return within(toolbar).getByRole('button', { name: 'Add photos' });
+    return screen.getByRole('button', { name: 'Add photos' });
   }
 
   class SuccessfulManagerUploadRequest {
@@ -8402,7 +7782,7 @@ describe('Manager Add photos integration', () => {
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
 
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const trigger = toolbarAddPhotos();
     expect(trigger).not.toHaveAttribute('aria-disabled', 'true');
     await user.click(trigger);
@@ -8415,21 +7795,22 @@ describe('Manager Add photos integration', () => {
     await user.click(await within(dialog).findByRole('button', { name: 'Send 1 photo' }));
     expect(await within(dialog).findByRole('heading', { name: '1 photo was added.' })).toBeVisible();
     await waitFor(() => expect(eventReads).toBe(2));
-    await user.click(within(dialog).getByRole('button', { name: 'Done' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Return to Library' }));
 
     await waitFor(() => expect(trigger).toHaveAttribute('aria-disabled', 'true'));
     expect(trigger).toHaveFocus();
-    expect(trigger).toHaveAccessibleDescription('This event has reached its photo limit.');
+    expect(screen.getByText('This event has reached its photo limit.')).toBeVisible();
 
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /Gallery/ }));
+    await user.click(screen.getByText('Exports', { selector: 'summary' }));
     expect(await screen.findByText('Current collection: 10,000 photos (+1 photo).')).toBeVisible();
 
     const count = (suffix: string) => calls.filter((call) => call.endsWith(suffix)).length;
-    expect(count('/api/manage/events/event-a')).toBe(2);
-    expect(count('/guestbook/summary')).toBe(2);
-    expect(calls.filter((call) => call.includes('/media') && !call.includes('/uploads/'))).toHaveLength(2);
-    expect(count('/gallery/summary')).toBe(1);
+    expect(count('/api/manage/events/event-a')).toBe(3);
+    expect(count('/guestbook/summary')).toBe(3);
+    expect(calls.filter((call) => call.includes('/gallery?'))).toHaveLength(1);
+    expect(count('/gallery/summary')).toBe(3);
     expect(count('/exports')).toBe(1);
     expect(count('/entry')).toBe(1);
   });
@@ -8448,12 +7829,12 @@ describe('Manager Add photos integration', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const trigger = toolbarAddPhotos();
     trigger.focus();
     expect(trigger).toHaveFocus();
     expect(trigger).toHaveAttribute('aria-disabled', 'true');
-    expect(trigger).toHaveAccessibleDescription('This event has reached its storage limit.');
+    expect(screen.getByText('This event has reached its storage limit.')).toBeVisible();
     await user.click(trigger);
     expect(screen.queryByRole('dialog', { name: 'Add photos' })).not.toBeInTheDocument();
   });
@@ -8469,7 +7850,6 @@ describe('Manager Add photos integration', () => {
   ) => {
     // Mutations caught: reading the stale projection without the shared lifecycle
     // selector, or treating a retryable outage as proof that the event ended.
-    const intervals = vi.spyOn(window, 'setInterval');
     const base = managerFetch({ first: { media: [], nextCursor: null } });
     let eventReads = 0;
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
@@ -8486,23 +7866,21 @@ describe('Manager Add photos integration', () => {
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     const trigger = toolbarAddPhotos();
-    const intakePoll = intervals.mock.calls.find(([, delay]) => delay === 5_000)?.[0];
-    expect(intakePoll).toBeTypeOf('function');
-
-    await act(async () => { (intakePoll as () => void)(); });
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: 'Close Add photos' }));
     await waitFor(() => expect(eventReads).toBe(2));
 
-    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Library' })).toBeVisible();
     if (disabled) {
       expect(await screen.findByRole('alert')).toHaveTextContent('This event has ended.');
       expect(trigger).toHaveAttribute('aria-disabled', 'true');
-      expect(trigger).toHaveAccessibleDescription(description);
+      expect(screen.getByText(description!)).toBeVisible();
       await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
       expect(trigger).toHaveAttribute('aria-disabled', 'true');
-      expect(trigger).toHaveAccessibleDescription(description);
+      expect(screen.getByText(description!)).toBeVisible();
       await user.click(trigger);
       expect(screen.queryByRole('dialog', { name: 'Add photos' })).not.toBeInTheDocument();
     } else {
@@ -8550,18 +7928,20 @@ describe('Manager Add photos integration', () => {
               media: { id: mediaIds[index], mimeType: file.mimeType, uploadState: 'stored' },
             }) }, 201);
       }
+      if (path.includes('/gallery/arrivals?')) return json({ afterSequence: 0, snapshotSequence: eventReads > 1 ? 1 : 0, count: eventReads > 1 ? 1 : 0 });
       if (path.includes('/gallery?') && method === 'GET') {
         libraryReads += 1;
         return json({
           media: libraryReads === 1 ? [] : [uploadedLibraryRow],
-          nextCursor: null,
+          nextCursor: null, snapshotSequence: libraryReads === 1 ? 0 : 1,
         });
       }
       return base(input);
     }));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
+    const mediaReadsBeforeUpload = calls.filter(call => call.includes('/media') && !call.includes('/uploads/')).length;
     await user.click(toolbarAddPhotos());
     const dialog = screen.getByRole('dialog', { name: 'Add photos' });
     fireEvent.change(within(dialog).getByLabelText('Choose recent photos from your library'), {
@@ -8575,17 +7955,19 @@ describe('Manager Add photos integration', () => {
     await waitFor(() => {
       expect(calls.filter((call) => call.endsWith('/api/manage/events/event-a'))).toHaveLength(3);
       expect(count('/guestbook/summary')).toBe(3);
-      expect(calls.filter((call) => call.includes('/media') && !call.includes('/uploads/'))).toHaveLength(3);
+      expect(calls.filter((call) => call.includes('/media') && !call.includes('/uploads/'))).toHaveLength(mediaReadsBeforeUpload);
     });
-    expect(count('/gallery/summary')).toBe(1);
+    expect(count('/gallery/summary')).toBe(3);
     expect(count('/exports')).toBe(1);
     expect(count('/entry')).toBe(1);
-    expect(calls.some((call) => call.includes('/media/trash'))).toBe(false);
+    expect(calls.filter(call => call.includes('/media/trash'))).toHaveLength(mediaReadsBeforeUpload);
     expect(calls.some((call) => call.includes('mode=guest-gallery'))).toBe(false);
 
     await user.click(within(dialog).getByRole('button', { name: 'Close Add photos' }));
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /Gallery/ }));
+    expect(libraryReads).toBe(1);
+    await user.click(await screen.findByRole('button', { name: '1 new photo' }));
     expect(await screen.findByRole('button', { name: 'Open Host Library B, from Host' })).toBeVisible();
     expect(libraryReads).toBe(2);
   });
@@ -8637,7 +8019,7 @@ describe('Manager Add photos integration', () => {
     const router = createAppRouter(['/manage/event/event-a']);
     render(<RouterProvider router={router} />);
     const user = userEvent.setup();
-    await screen.findByRole('heading', { name: 'Live intake' });
+    await screen.findByRole('heading', { name: 'Library' });
     await user.click(toolbarAddPhotos());
     const dialog = screen.getByRole('dialog', { name: 'Add photos' });
     fireEvent.change(within(dialog).getByLabelText('Choose recent photos from your library'), {

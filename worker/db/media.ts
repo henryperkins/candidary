@@ -23,6 +23,7 @@ import {
   type SupportedImageType,
 } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
+import type { LibraryMediaView, LibraryQuery } from '../../shared/library-arrivals';
 import type { GalleryCursor } from '../http/gallery-cursor';
 import type { GuestGalleryCursor } from '../http/guest-gallery-cursor';
 import type { ManagerMediaCursor } from '../http/media-cursor';
@@ -750,11 +751,30 @@ export interface GalleryTimelineOptions {
   cursor?: GalleryCursor;
   limit?: number;
   order?: GalleryTimelineOrder;
+  snapshotSequence?: number;
 }
 
 export interface GalleryTimelinePage {
-  media: ManagerGalleryMediaView[];
+  media: LibraryMediaView[];
   nextCursor: GalleryCursor | null;
+}
+
+function appendLibraryFilters(
+  predicates: string[],
+  bindings: unknown[],
+  query: Pick<LibraryQuery, 'query' | 'favorites'>,
+): void {
+  if (query.query) {
+    predicates.push(`(
+      instr(lower(guest_name), lower(?)) > 0
+      OR instr(lower(COALESCE(caption, '')), lower(?)) > 0
+      OR instr(lower(original_filename), lower(?)) > 0
+    )`);
+    bindings.push(query.query, query.query, query.query);
+  }
+  if (query.favorites) {
+    predicates.push('favorited_at IS NOT NULL');
+  }
 }
 
 /**
@@ -880,16 +900,13 @@ export class MediaRepository {
     ];
     const bindings: unknown[] = [eventId];
 
-    if (options.query) {
-      predicates.push(`(
-        instr(lower(guest_name), lower(?)) > 0
-        OR instr(lower(COALESCE(caption, '')), lower(?)) > 0
-        OR instr(lower(original_filename), lower(?)) > 0
-      )`);
-      bindings.push(options.query, options.query, options.query);
-    }
-    if (options.favorites) {
-      predicates.push('favorited_at IS NOT NULL');
+    appendLibraryFilters(predicates, bindings, {
+      query: options.query ?? '',
+      favorites: options.favorites ?? false,
+    });
+    if (options.snapshotSequence !== undefined) {
+      predicates.push('delivery_sequence <= ?');
+      bindings.push(options.snapshotSequence);
     }
     if (options.cursor) {
       predicates.push(ascending
@@ -904,21 +921,48 @@ export class MediaRepository {
       SELECT
         id, original_filename, guest_name, caption, publication_status,
         upload_state, preview_object_key, width, height, created_at, stored_at,
-        captured_at, timeline_at, favorited_at
+        captured_at, timeline_at, favorited_at, delivery_sequence
       FROM media
       WHERE ${predicates.join(' AND ')}
       ORDER BY timeline_at ${direction}, id ${direction}
       LIMIT ?
-    `).bind(...bindings).all<MediaRow>();
+    `).bind(...bindings).all<MediaRow & { delivery_sequence: number }>();
     const pageRows = result.results.slice(0, limit);
     const last = pageRows[pageRows.length - 1];
     const hasMore = result.results.length > limit;
     return {
-      media: pageRows.map(mapGalleryMediaRow),
+      media: pageRows.map(row => ({ ...mapGalleryMediaRow(row), deliverySequence: row.delivery_sequence })),
       nextCursor: hasMore && last
         ? { timelineAt: last.timeline_at, id: last.id }
         : null,
     };
+  }
+
+  async currentDeliverySequence(eventId: string): Promise<number> {
+    return await this.db.prepare(`
+      SELECT last_delivery_sequence FROM events WHERE id = ?
+    `).bind(eventId).first<number>('last_delivery_sequence') ?? 0;
+  }
+
+  async countLibraryArrivals(
+    eventId: string,
+    query: LibraryQuery,
+    after: number,
+    through: number,
+  ): Promise<number> {
+    const predicates = [
+      'event_id = ?',
+      "upload_state = 'stored'",
+      'deleted_at IS NULL',
+      'trashed_at IS NULL',
+      'delivery_sequence > ?',
+      'delivery_sequence <= ?',
+    ];
+    const bindings: unknown[] = [eventId, after, through];
+    appendLibraryFilters(predicates, bindings, query);
+    return await this.db.prepare(`
+      SELECT COUNT(*) AS count FROM media WHERE ${predicates.join(' AND ')}
+    `).bind(...bindings).first<number>('count') ?? 0;
   }
 
   async setFavorite(eventId: string, mediaId: string, favoritedAt: string | null): Promise<MediaRecord> {

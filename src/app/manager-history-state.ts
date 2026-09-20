@@ -6,6 +6,7 @@ export type GalleryAnchor =
   | { kind: 'album-entry'; entryId: string; viewportOffset: number; fallbackScrollY: number; before: string[]; after: string[] };
 export type ManagerNavigationIntent =
   | { kind: 'focus-complete-export' }
+  | { kind: 'focus-library-heading' }
   | { kind: 'focus-intake-heading' }
   | { kind: 'open-recently-deleted'; focusMediaId: string }
   | { kind: 'edit-guest-gallery-availability'; returnTo: { section: 'gallery'; mode: 'guest-gallery'; publicationFilter: PublicationFilter } };
@@ -44,8 +45,8 @@ function readAnchor(value: unknown): GalleryAnchor | null {
 
 function readIntent(value: unknown): ManagerNavigationIntent | null {
   if (!isRecord(value) || typeof value.kind !== 'string') return null;
-  if (value.kind === 'focus-complete-export' || value.kind === 'focus-intake-heading') {
-    return Object.keys(value).length === 1 ? { kind: value.kind } : null;
+  if (value.kind === 'focus-complete-export' || value.kind === 'focus-intake-heading' || value.kind === 'focus-library-heading') {
+    return Object.keys(value).length === 1 ? { kind: value.kind === 'focus-intake-heading' ? 'focus-library-heading' : value.kind } : null;
   }
   if (value.kind === 'open-recently-deleted' && nonempty(value.focusMediaId)
     && Object.keys(value).length === 2) return { kind: value.kind, focusMediaId: value.focusMediaId };
@@ -59,7 +60,7 @@ function readIntent(value: unknown): ManagerNavigationIntent | null {
 }
 
 function compatible(intent: ManagerNavigationIntent, location: ManagerLocation): boolean {
-  if (intent.kind === 'focus-intake-heading' || intent.kind === 'open-recently-deleted') return location.section === 'intake';
+  if (intent.kind === 'focus-intake-heading' || intent.kind === 'focus-library-heading' || intent.kind === 'open-recently-deleted') return location.section === 'gallery' && location.mode === 'library';
   if (intent.kind === 'edit-guest-gallery-availability') return location.section === 'settings' || (location.section === 'gallery' && location.mode === 'guest-gallery');
   return location.section === 'gallery' && location.mode === 'library';
 }
@@ -133,7 +134,7 @@ function sameAnchor(raw: unknown, target: GalleryAnchor): boolean {
 
 function sameIntent(raw: unknown, target: ManagerNavigationIntent): boolean {
   const source = readIntent(raw);
-  return !!source && JSON.stringify(source) === JSON.stringify(target);
+  return !!source && isRecord(raw) && raw.kind === target.kind && JSON.stringify(source) === JSON.stringify(target);
 }
 
 export function withGalleryAnchor(rawState: unknown, eventId: string, mode: GalleryMode, anchor: GalleryAnchor | null): RouterHistoryState {

@@ -279,15 +279,17 @@ The system is narrow-first. At 320–390px, public, guest, and Manager surfaces 
 
 Public shells cap at 1504px. The landing hero stacks copy before imagery on phones and becomes an editorial two-column composition on larger screens. Reading surfaces hold approximately 62 characters; FAQ content caps at 760px. Guest RSVP and photo delivery use a centered 620px maximum frame so event identity and the current action stay visually inseparable.
 
-Manager begins as a two-tier phone header over one workspace column. At 761px it becomes a compact 104px labelled rail with a two-column utility region below the workspace. At 1101px it resolves into the defining 184px navigation rail, fluid workspace, and 330px utility rail. Six Manager destinations remain labelled at every width. Media grids expand only after each card can retain its name, state, and touch controls.
+Manager begins with a compact phone header containing the home link and current section. A disclosure opens all five labelled destinations in a bounded, scrollable panel, with the Guestbook review count also visible while closed. The event heading stays compact across mobile sections; Event details holds the date, upload status, and retention deadlines. At 761px navigation becomes a compact 104px labelled rail with a two-column utility region below the workspace. At 1101px it resolves into the defining 184px navigation rail, fluid workspace, and 330px utility rail. Media grids expand only after each card can retain its name, state, and touch controls.
 
 Spacing follows a 4px base and the staged 8, 12, 16, 24, 32, 48, 64, and 88px rhythm. Dense operational groups use rules and small gaps; public and terminal moments use larger vertical intervals. Safe-area padding belongs at mobile page endings and sticky action regions.
+
+On phones, Library groups its title and count above a single row of Add photos, Trash, and Exports. That action row wraps when counts or enlarged text need more space. Compact spacing around the mode switch, search, and filters brings the Photo Wall into view while preserving 44–48px controls and the reserved arrival-notice row that prevents incoming photos from shifting the collection.
 
 **The Narrow-First Rule.** Resolve the complete task at 320px before opening columns, rails, or decorative breathing room.
 
 **The One Primary Canvas Rule.** RSVP, before-start, waiting, and photo delivery share one narrow guest frame; secondary gallery, notes, and prior deliveries never compete with the current task.
 
-**The Labeled Navigation Rule.** Every Manager destination remains visibly named at every width; icon-only navigation is not part of this system.
+**The Labeled Navigation Rule.** Every Manager destination has a visible name in the open phone menu and persistent desktop rails. The closed phone menu names the current section; icon-only navigation is not part of this system.
 
 ## Elevation & Depth
 

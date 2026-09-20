@@ -129,7 +129,7 @@ export function GuestUploadFlow({
   const eventDate = formatEventDate(event.eventDate, 'compact') ?? DATE_UNAVAILABLE;
 
   if (receiptCount > 0) {
-    return <section className="photo-drop photo-drop--receipt" aria-live="polite">
+    return <section className={`photo-drop photo-drop--receipt${manager ? ' photo-drop--manager' : ''}`} aria-live="polite">
       <div className="delivery-receipt">
         <span className="delivery-receipt__check"><Check aria-hidden="true" /></span>
         <p className="delivery-receipt__eyebrow">
@@ -143,7 +143,7 @@ export function GuestUploadFlow({
           {validationFailureCount} {plural(validationFailureCount, 'photo')} could not be added.
         </p>}
         <p>{manager
-          ? 'The delivered photos are now in Intake.'
+          ? 'The delivered photos are now in Library.'
           : <>Thanks, {name}. You’re all done and can close this page.</>}
         </p>
         {!manager && onLeaveGuestbook && <button
@@ -156,7 +156,7 @@ export function GuestUploadFlow({
     </section>;
   }
 
-  return <section className={`photo-drop${reviewMode ? ' photo-drop--review' : ''}`}>
+  return <section className={`photo-drop${manager ? ' photo-drop--manager' : ''}${reviewMode ? ' photo-drop--review' : ''}`}>
     {!manager && !reviewMode && <GuestEventHero
       event={event}
       sourceFor={(slot) => guestEventCoverSlotPath(slug, slot)}
@@ -221,7 +221,7 @@ export function GuestUploadFlow({
           onClick={() => openSource(libraryInput.current)}
         ><Images aria-hidden="true" /> Choose recent photos</button>
         <p>{uploadsAvailable
-          ? manager ? 'Photos are added privately to Intake.' : 'No account needed. Your name is remembered here.'
+          ? manager ? 'Photos are added privately to Library.' : 'No account needed. Your name is remembered here.'
           : unavailableMessage}
         </p>
       </div> : <>

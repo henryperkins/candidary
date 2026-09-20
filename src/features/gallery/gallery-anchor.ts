@@ -4,6 +4,14 @@ const MAX_NEIGHBORS = 20;
 
 export type GalleryAnchorRestoreOutcome = 'pending' | 'item' | 'fallback';
 
+// A desktop rail stretches beside the whole document; only a pinned top bar
+// obscures the gallery. Counting the rail's bottom leaves no capturable photo.
+export function galleryEffectiveVisibleTop(): number {
+  const nav = document.querySelector<HTMLElement>('.manager-nav');
+  if (!nav || !['sticky', 'fixed'].includes(getComputedStyle(nav).position)) return 0;
+  return Math.max(0, nav.getBoundingClientRect().bottom);
+}
+
 function renderedAnchorElements(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>('[data-gallery-anchor-id]'));
 }

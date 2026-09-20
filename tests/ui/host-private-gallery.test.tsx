@@ -169,6 +169,7 @@ function managerFetch(overrides: {
     if (url.pathname === '/api/manage/events/event-a/photo-exports/capabilities' && method === 'GET') {
       return success({ enabled: false, destinations: [], activeJob: null });
     }
+    if (url.pathname === '/api/manage/events/event-a/gallery/arrivals') return success({afterSequence: Number(url.searchParams.get('after')), snapshotSequence: 4, count: 0});
     if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
       const query = url.searchParams.get('query');
       const favorites = url.searchParams.get('favorites') === '1';
@@ -179,7 +180,7 @@ function managerFetch(overrides: {
         || item.originalFilename.toLowerCase().includes(query.toLowerCase())
       ));
       if (favorites) result = result.filter((item) => item.isFavorite);
-      return success({ media: result, nextCursor: overrides.nextCursor ?? null });
+      return success({ media: result, nextCursor: overrides.nextCursor ?? null, ...(url.searchParams.get('live') === '1' ? { snapshotSequence: Number(url.searchParams.get('snapshot') ?? 4) } : {}) });
     }
     if (url.pathname === '/api/manage/events/event-a/gallery/summary' && method === 'GET') {
       return gallerySummary(galleryRows, overrides.guestGalleryVisible);
@@ -251,7 +252,7 @@ interface GalleryRenderOverrides {
 }
 
 function renderGalleryWithFetch(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: ReturnType<typeof managerFetch>,
   overrides: GalleryRenderOverrides = {},
 ) {
   const implementation = fetchMock.getMockImplementation();
@@ -263,7 +264,7 @@ function renderGalleryWithFetch(
     }
     if (!implementation) throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
     try {
-      return (implementation as (request: RequestInfo | URL, options?: RequestInit) => unknown)(input, init);
+      return implementation(input, init);
     } catch (caught) {
       if (url.pathname === '/api/manage/events/event-a/photo-exports/capabilities'
         && method === 'GET'
@@ -274,12 +275,24 @@ function renderGalleryWithFetch(
       throw caught;
     }
   });
-  vi.stubGlobal('fetch', fetchMock);
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'https://candidary.test');
+    if (url.pathname.endsWith('/gallery/arrivals')) return success({ afterSequence: Number(url.searchParams.get('after')), snapshotSequence: Number(url.searchParams.get('after')), count: 0 });
+    const response = await fetchMock(input, init);
+    if (url.pathname.endsWith('/gallery') && url.searchParams.get('live') === '1' && response.ok) {
+      const body = await response.clone().json();
+      return new Response(JSON.stringify({ ...body, data: { ...body.data, snapshotSequence: Number(url.searchParams.get('snapshot') ?? 4) } }), { status: response.status, headers: response.headers });
+    }
+    return response;
+  });
   const onPrepare = overrides.onPrepare ?? vi.fn(noop);
   const onStatusChange = vi.fn();
   const onGalleryInvalidated = overrides.onGalleryInvalidated ?? vi.fn();
   const authority = overrides.audience ?? audienceAuthority(overrides.galleryRows);
-  function TestGalleryOwner({ workspaceMounted }: { workspaceMounted: boolean }) {
+  function TestGalleryOwner({ workspaceMounted, librarySuspended }: {
+    workspaceMounted: boolean;
+    librarySuspended: boolean;
+  }) {
     const [announcement, setAnnouncement] = useState('');
     const [galleryMutationEpoch, setGalleryMutationEpoch] = useState(0);
     const invalidateGalleryAfterMutation = useCallback(() => {
@@ -303,6 +316,8 @@ function renderGalleryWithFetch(
       {workspaceMounted && <ControlledGalleryWorkspace
         event={event}
         eventId="event-a"
+        librarySuspended={librarySuspended}
+        trashContent={<section><h2>Trash</h2></section>}
         galleryMutationEpoch={galleryMutationEpoch}
         invalidateGalleryAfterMutation={invalidateGalleryAfterMutation}
         audience={authority}
@@ -335,20 +350,26 @@ function renderGalleryWithFetch(
       />}
     </>;
   }
-  function TestGalleryHarness({ workspaceMounted }: { workspaceMounted: boolean }) {
+  function TestGalleryHarness({ workspaceMounted, librarySuspended }: {
+    workspaceMounted: boolean;
+    librarySuspended: boolean;
+  }) {
     return <ManagerUndoProvider eventId="event-a">
-      <TestGalleryOwner workspaceMounted={workspaceMounted} />
+      <TestGalleryOwner workspaceMounted={workspaceMounted} librarySuspended={librarySuspended} />
       <ManagerUndoBar />
     </ManagerUndoProvider>;
   }
-  const rendered = render(<TestGalleryHarness workspaceMounted />);
+  const rendered = render(<TestGalleryHarness workspaceMounted librarySuspended={false} />);
   return {
     fetchMock,
     onPrepare,
     onStatusChange,
     onGalleryInvalidated,
     setWorkspaceMounted(workspaceMounted: boolean) {
-      rendered.rerender(<TestGalleryHarness workspaceMounted={workspaceMounted} />);
+      rendered.rerender(<TestGalleryHarness workspaceMounted={workspaceMounted} librarySuspended={false} />);
+    },
+    setLibrarySuspended(librarySuspended: boolean) {
+      rendered.rerender(<TestGalleryHarness workspaceMounted librarySuspended={librarySuspended} />);
     },
   };
 }
@@ -755,8 +776,8 @@ describe('host private gallery', () => {
     await user.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByRole('button', { name: 'Open Replacement photo, from Maya' })).toBeVisible();
     expect(replacementRequests).toEqual([
-      '/api/manage/events/event-a/gallery?query=Maya&order=newest',
-      '/api/manage/events/event-a/gallery?query=Maya&order=newest',
+      '/api/manage/events/event-a/gallery?live=1&query=Maya&order=newest',
+      '/api/manage/events/event-a/gallery?live=1&query=Maya&order=newest',
     ]);
   });
 
@@ -838,6 +859,32 @@ describe('host private gallery', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await waitFor(() => expect(origin).toHaveFocus());
     expect(screen.getByRole('button', { name: 'Open Second photo, from Jose' })).not.toHaveFocus();
+  });
+
+  it('retires an open viewer when Library suspends without clearing retained browsing state', async () => {
+    const rendered = renderGallery();
+    const user = userEvent.setup();
+
+    await user.selectOptions(await screen.findByLabelText('Photos shown'), 'album');
+    await user.type(screen.getByPlaceholderText('Search photos'), 'p4');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await user.selectOptions(screen.getByLabelText('Photo order'), 'earliest');
+    const origin = await screen.findByRole('button', { name: 'Open p4.jpg, from Jose' });
+    await user.click(origin);
+    expect(screen.getByRole('dialog', { name: 'p4.jpg' })).toBeVisible();
+
+    rendered.setLibrarySuspended(true);
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: 'Trash' })).toBeVisible();
+    expect(screen.getByPlaceholderText('Search photos')).toHaveValue('p4');
+    expect(screen.getByLabelText('Photos shown')).toHaveValue('album');
+    expect(screen.getByLabelText('Photo order')).toHaveValue('earliest');
+    expect(document.querySelectorAll('[data-photo-id="p4"]')).toHaveLength(1);
+
+    rendered.setLibrarySuspended(false);
+
+    expect(screen.getByRole('button', { name: 'Open p4.jpg, from Jose' })).toBeVisible();
   });
 
   it('keeps the viewer photo and focuses Try again after a continuation failure', async () => {
@@ -1933,7 +1980,16 @@ describe('host private gallery', () => {
       }
       return base(input, init);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'https://candidary.test');
+    if (url.pathname.endsWith('/gallery/arrivals')) return success({ afterSequence: Number(url.searchParams.get('after')), snapshotSequence: Number(url.searchParams.get('after')), count: 0 });
+    const response = await fetchMock(input, init);
+    if (url.pathname.endsWith('/gallery') && url.searchParams.get('live') === '1' && response.ok) {
+      const body = await response.clone().json();
+      return new Response(JSON.stringify({ ...body, data: { ...body.data, snapshotSequence: Number(url.searchParams.get('snapshot') ?? 4) } }), { status: response.status, headers: response.headers });
+    }
+    return response;
+  });
     renderWorkspaceWithUndo(<ControlledGalleryWorkspace
       event={{ ...event, galleryVisible: false }}
       eventId="event-a"
@@ -2189,7 +2245,7 @@ describe('host private gallery', () => {
     const user = userEvent.setup();
 
     expect(await screen.findByText(
-      'New delivered photos appear in Live intake as event guests send them.',
+      'Photos added by you or your guests appear here.',
     )).toBeVisible();
     expect(document.body).not.toHaveTextContent(/private deliveries/iu);
     await user.selectOptions(await screen.findByRole('combobox', { name: 'Photos shown' }), 'album');

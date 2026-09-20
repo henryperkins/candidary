@@ -60,6 +60,10 @@ function managerFetch(events: readonly EventView[]) {
       eventReads += 1;
       return json({ event: answered });
     }
+    if (url.includes('/gallery/arrivals')) return json({ afterSequence: 0, snapshotSequence: 0, count: 0 });
+    if (url.includes('/gallery/summary')) return json({ summary: { albumPhotoCount: 0, albumEntryCount: 0, albumLink: { active: false }, guestGalleryVisible: true, guestGalleryPublishedCount: 0 } });
+    if (url.includes('/gallery')) return json({ media: [], nextCursor: null, snapshotSequence: 0 });
+    if (url.includes('/photo-exports/capabilities')) return json({ enabled: false });
     if (url.includes('/media')) return json({ media: [], nextCursor: null });
     if (url.includes('/messages')) return json({ messages: [] });
     if (url.endsWith('/exports')) return json({ exports: [] });
@@ -71,7 +75,7 @@ function managerFetch(events: readonly EventView[]) {
 }
 
 async function openSettings(user: ReturnType<typeof userEvent.setup>) {
-  await screen.findByRole('heading', { name: 'Live intake' });
+  await screen.findByRole('heading', { name: 'Library' });
   await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
     .getByRole('button', { name: /settings/i }));
 }
@@ -125,6 +129,7 @@ describe('manager guest uploads', () => {
       const header = heading.closest('header');
 
       expect(header).not.toBeNull();
+      fireEvent.click(within(header!).getByText('Event details', { exact: true }));
       expect(within(header!).getByText(label, { exact: true })).toBeVisible();
       expect(header).not.toHaveTextContent(/photo delivery/iu);
 
@@ -229,9 +234,9 @@ describe('manager guest uploads', () => {
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    const intakeHeading = await screen.findByRole('heading', { name: 'Live intake' });
+    const intakeHeading = await screen.findByRole('heading', { name: 'Library' });
     const intakeSection = intakeHeading.closest('section');
-    expect(intakeSection).toHaveTextContent('Delivered photos');
+    expect(intakeSection).toHaveTextContent('Library');
     expect(intakeSection).not.toHaveTextContent('Private collection');
     await openSettings(user);
 

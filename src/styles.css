@@ -240,7 +240,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .fullscreen { min-height: 100svh; background: var(--event-fullscreen-backdrop); color: var(--event-fullscreen-foreground); }.fullscreen__bar { height: 70px; padding: 0 25px; display: flex; align-items: center; justify-content: space-between; }.fullscreen__bar .brand { color: var(--event-fullscreen-foreground); }.fullscreen__bar .brand__mark i { background: var(--event-accent); }.fullscreen__bar .brand__mark i:nth-child(2) { background: var(--event-primary); }.fullscreen__bar a { padding: 12px; }.fullscreen__bar .fullscreen__close { min-width: 44px; min-height: 44px; display: grid; place-items: center; color: var(--event-fullscreen-foreground); }.fullscreen .fullscreen__close:focus-visible { outline-color: var(--event-focus); }.fullscreen__grid { padding: 0 25px 35px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }.fullscreen figure { position: relative; }.fullscreen img { width: 100%; height: 75vw; max-height: 500px; object-fit: cover; }.fullscreen figcaption { position: absolute; inset: auto 0 0; padding: 40px 15px 15px; color: var(--event-fullscreen-foreground); background: linear-gradient(transparent, rgb(0 0 0 / 65%)); }
 .photo-grid figure, .photo-grid figcaption, .photo-grid figcaption span, .contributions li > span, .fullscreen figure, .fullscreen figcaption { min-width: 0; overflow-wrap: anywhere; }
 /* Narrow first: the manager base is the labelled two-tier phone header over one workspace column. */
-.manager-shell { --manager-sticky-offset: 112px; --gallery-control-obstruction: 52px; }
+.manager-shell, [data-gallery-live-host] { --manager-sticky-offset: 112px; --gallery-control-obstruction: 52px; }
 .manager-shell { min-height: 100svh; background: #faf6ee; }.manager-nav { position: sticky; top: 0; z-index: 5; min-width: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; border-bottom: 1px solid var(--border); background: #f2eadf; }.manager-nav .brand { width: 100%; min-height: 52px; padding: 0 20px; }.manager-nav nav { width: 100%; margin: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--border); }.manager-nav button { min-width: 0; min-height: 58px; padding: 7px 2px 8px; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: .65rem; line-height: 1; text-align: center; }.manager-nav button svg { width: 20px; height: 20px; }.manager-nav button.active { background: var(--denim-soft); color: var(--chestnut); font-weight: 600; box-shadow: inset 0 -3px 0 var(--chestnut); }.manager-nav button:not(.active):hover { background: rgb(221 231 240 / 45%); color: var(--chestnut); }.manager-main { min-width: 0; padding: 28px 20px 60px; overflow: visible; }.manager-title { display: block; }.manager-title p { margin-bottom: 5px; color: var(--muted); font-size: .8rem; }.manager-title h1 { margin: 0; font-size: clamp(2.15rem, 10vw, 2.7rem); }.manager-title .status { margin-top: 18px; }.lifecycle { margin: 28px 0 45px; display: grid; gap: 7px; padding: 16px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }.lifecycle p { margin: 0; color: var(--muted); font-size: .84rem; }.workspace-heading { display: block; }.workspace-heading h2, .manager-panel h2 { margin: 0; font-size: clamp(2rem, 9vw, 2.25rem); }.filter-tabs { max-width: 100%; margin-top: 20px; display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; }.filter-tabs button { flex: 0 1 auto; min-width: 44px; min-height: 44px; padding: 9px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: .75rem; text-transform: capitalize; white-space: nowrap; cursor: pointer; }
 .moderation-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 13px; }.moderation-grid article { border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: var(--paper); transition: border 160ms, box-shadow 160ms; }.moderation-grid article.selected { border-color: var(--denim); box-shadow: 0 0 0 2px var(--denim); }.moderation-grid label { position: relative; display: block; cursor: pointer; }.moderation-grid input { position: absolute; top: 10px; left: 10px; z-index: 1; width: 20px; min-height: 20px; accent-color: var(--chestnut); }.moderation-grid img { width: 100%; aspect-ratio: 1.25; object-fit: cover; background: #eee4d8; }.moderation-grid article > div { padding: 11px; }.moderation-grid small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; color: var(--muted); }.moderation-grid article > div > div { margin-top: 10px; display: flex; gap: 5px; }.moderation-grid article button { width: 33px; height: 33px; min-width: 44px; min-height: 44px; display: grid; place-items: center; border: 1px solid var(--border); background: transparent; color: var(--moss); border-radius: 5px; cursor: pointer; }.moderation-grid article button:nth-child(2), .moderation-grid article button:nth-child(3) { color: var(--danger); }
 /* The host recognises a photo by its name, so the compact label wraps to two lines instead of ending in an ellipsis. */
@@ -780,12 +780,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .selection-add-actions { grid-template-columns: 1fr; }
 }
 
-/* Live host intake */
-/* Keep the alternate Intake destination close to the current list. */
-.intake-modes { margin: 20px 0 12px; display: flex; flex-wrap: wrap; gap: 8px; }
-.intake-modes button { min-height: 44px; padding: 9px 16px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--ink); font: inherit; font-size: .86rem; cursor: pointer; }
-.intake-note { margin: 0 0 16px; color: var(--muted); font-size: .86rem; line-height: 1.5; }
-.intake-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+/* Gallery recovery and shared publication controls. */
 /* A retained photo is deliberately not shown as a photograph. */
 .trash-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 .trash-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 9px; }
@@ -805,12 +800,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .modal-actions .button { flex: 1 1 180px; }
 .button--danger { border-color: var(--danger); background: var(--danger); color: var(--paper); }
 .button--danger:hover:not(:disabled) { filter: brightness(.94); }
-.intake-search { margin: 24px 0 20px; display: flex; flex-wrap: wrap; align-items: stretch; gap: 9px; }
-.intake-search label { min-width: 100%; flex: 1; position: relative; }
-.intake-search .button { flex: 1 1 auto; }
-.intake-search label > svg { position: absolute; top: 50%; left: 13px; z-index: 1; transform: translateY(-50%); color: var(--muted); }
-.intake-search input { width: 100%; min-height: 48px; padding: 10px 13px 10px 42px; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); }
-.intake-search .text-button { min-width: 44px; font-size: .875rem; }
 .intake-grid .intake-photo { position: relative; padding: 0; }
 .intake-grid .intake-photo > img { width: 100%; aspect-ratio: 1.25; object-fit: cover; background: #eee4d8; }
 @media (max-width: 760px) {
@@ -849,6 +838,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* The label and the count are styled by their own class, so neither can win the other's font size. */
 .manager-nav__label { margin: 0; color: var(--ink); font-size: .875rem; }
 .manager-nav button.active .manager-nav__label { color: var(--chestnut); }
+.manager-nav .manager-nav__toggle { display: none; }
+.manager-nav nav[hidden] { display: none; }
 /* A count runs to 10,000 — the per-event photo cap — so the badge is a pill that grows with its own
    text rather than a fixed box the digits spill out of. The 999px radius reads as a circle at one
    digit and as a capsule past that. */
@@ -1336,9 +1327,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .filter-tabs { width: fit-content; margin-top: 0; display: flex; }
   .filter-tabs button { padding: 9px 14px; font-size: .9rem; }
 
-  .intake-search { align-items: center; }
-  .intake-search label { min-width: 220px; max-width: 430px; }
-  .intake-search .button { flex: 0 0 auto; }
 
   .manager-utility {
     grid-column: 2;
@@ -2019,7 +2007,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
     --gallery-control-obstruction: 52px;
   }
   .manager-panel > h2,
-  #intake-title { scroll-margin-top: calc(var(--manager-sticky-offset) + 12px); }
   #gallery-workspace-title,
   .gallery-moment__heading h3,
   .gallery-mosaic__open,
@@ -2042,36 +2029,37 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 
 @media (max-width: 760px) {
-  .manager-shell:has(.gallery-private .selection-tray) .album-undo__bar { top: calc(var(--manager-sticky-offset) + var(--gallery-control-obstruction) + env(safe-area-inset-top)); bottom: auto; }
+  body:has(.manager-shell .gallery-private .selection-tray) [data-gallery-live-host] .album-undo__bar { top: calc(var(--manager-sticky-offset) + var(--gallery-control-obstruction) + env(safe-area-inset-top)); bottom: auto; }
 }
 
 @media (min-width: 761px) and (max-width: 899px) {
-  .manager-shell:has(.gallery-private .selection-tray) .album-undo__bar { top: calc(var(--manager-sticky-offset) + env(safe-area-inset-top)); bottom: auto; }
+  body:has(.manager-shell .gallery-private .selection-tray) [data-gallery-live-host] .album-undo__bar { top: calc(var(--manager-sticky-offset) + env(safe-area-inset-top)); bottom: auto; }
 }
 
 @media (max-width: 360px) and (max-height: 600px) {
-  .manager-shell:has(.album-undo__bar):has(.gallery-private .selection-tray) {
+  body:has([data-gallery-live-host] .album-undo__bar) .manager-shell:has(.gallery-private .selection-tray),
+  [data-gallery-live-host] {
     --manager-short-undo-dock: 124px;
   }
-  .manager-shell:has(.album-undo__bar):has(.gallery-private .selection-tray) .gallery-control-row {
+  body:has([data-gallery-live-host] .album-undo__bar) .manager-shell:has(.gallery-private .selection-tray) .gallery-control-row {
     position: static;
     scroll-margin-bottom: 12px;
   }
-  .manager-shell:has(.album-undo__bar):has(.gallery-private .selection-tray) .gallery-control-row,
-  .manager-shell:has(.album-undo__bar):has(.gallery-private .selection-tray) .gallery-mode-switch button {
+  body:has([data-gallery-live-host] .album-undo__bar) .manager-shell:has(.gallery-private .selection-tray) .gallery-control-row,
+  body:has([data-gallery-live-host] .album-undo__bar) .manager-shell:has(.gallery-private .selection-tray) .gallery-mode-switch button {
     scroll-margin-top: calc(
       var(--manager-sticky-offset) + var(--manager-short-undo-dock)
       + env(safe-area-inset-top)
     );
   }
-  .manager-shell:has(.gallery-private .selection-tray) .album-undo__bar {
+  body:has(.manager-shell .gallery-private .selection-tray) [data-gallery-live-host] .album-undo__bar {
     box-sizing: border-box;
     top: calc(var(--manager-sticky-offset) + env(safe-area-inset-top));
     max-height: calc(var(--manager-short-undo-dock) - 8px);
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  .manager-shell:has(.album-undo__bar) .selection-tray {
+  body:has([data-gallery-live-host] .album-undo__bar) .manager-shell .selection-tray {
     position: static;
     inset: auto;
     width: auto;
@@ -2089,7 +2077,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
     );
     scroll-margin-bottom: calc(12px + env(safe-area-inset-bottom));
   }
-  .manager-shell:has(.album-undo__bar) .selection-tray__inner { gap: 6px; }
+  body:has([data-gallery-live-host] .album-undo__bar) .manager-shell .selection-tray__inner { gap: 6px; }
 }
 
 @media (min-width: 761px) {
@@ -2106,7 +2094,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 }
 
 @media (min-width: 900px) {
-  .manager-shell:has(.gallery-private .selection-tray) .album-undo__bar { right: auto; bottom: 24px; left: 24px; max-width: min(42vw, 390px); }
+  body:has(.manager-shell .gallery-private .selection-tray) [data-gallery-live-host] .album-undo__bar { right: auto; bottom: 24px; left: 24px; max-width: min(42vw, 390px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2192,25 +2180,26 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .album-metadata:has(.album-metadata__summary) { display: block; }
 
 @media (max-width: 760px) {
-  /* Six destinations wrapped into a grid cost 189px — a third of the screen before the product says
-     anything, and at 320 `Gallery`, `Guestbook` and `Share` collided outright. One row a thumb moves
-     along costs 53. Bounded by max-width rather than undone later: from 761 the product turns this
-     into a vertical rail, and an unscoped horizontal row outranks every rule that would put it back,
-     so anything that re-shapes the nav belongs inside this query. */
-  .manager-shell { --manager-sticky-offset: 53px; }
-  /* One row: the brand holds the left edge — it is the only way back out of the manager, and the
-     shell has an e2e contract that it stays a 44px target at every width — and the destinations
-     scroll beside it. */
-  .manager-nav { display: flex; align-items: stretch; box-shadow: 0 1px 0 rgb(74 36 21 / 4%); }
-  .manager-nav .brand { flex: 0 0 auto; width: auto; min-height: 52px; padding: 0 14px; border-right: 1px solid var(--border); }
-  .manager-nav nav { flex: 1 1 auto; min-width: 0; width: auto; display: flex; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; scrollbar-width: none; -webkit-overflow-scrolling: touch; border-top: 0; }
-  .manager-nav nav::-webkit-scrollbar { display: none; }
-  .manager-nav button { flex: 0 0 auto; scroll-snap-align: center; width: auto; min-height: 52px; padding: 0 15px; flex-direction: row; gap: 7px; border-bottom: 2px solid transparent; }
-  .manager-nav button svg { width: 17px; height: 17px; }
-  .manager-nav button.active { border-bottom-color: var(--chestnut); background: none; box-shadow: none; }
-  .manager-nav button:not(.active):hover { background: none; }
-  /* In a row the badge sits beside its label instead of over it. */
+  /* A current-section disclosure keeps every destination reachable without a
+     clipped horizontal strip. The expanded list overlays the workspace. */
+  .manager-shell, [data-gallery-live-host] { --manager-sticky-offset: 53px; }
+  .manager-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 8px; padding: 0 12px; }
+  .manager-nav[data-navigation-open] { z-index: 50; }
+  /* Workspace popovers and Undo sit below navigation; modal viewers still own
+     the foreground while the manager is inert. */
+  [inert] .manager-nav[data-navigation-open] { z-index: 5; }
+  .manager-nav .brand { flex: 0 0 auto; width: auto; min-height: 52px; padding: 0; }
+  .manager-nav .manager-nav__toggle { display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 6px; min-width: 44px; min-height: 44px; margin: 4px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--paper); color: var(--chestnut); font-size: .875rem; line-height: 1.3; }
+  .manager-nav nav { position: absolute; top: calc(100% + 8px); left: 12px; right: 12px; width: auto; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; max-height: calc(100svh - var(--manager-sticky-offset) - 24px); padding: 8px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); }
+  .manager-nav nav button { width: 100%; min-width: 44px; min-height: 48px; padding: 10px 12px; flex-direction: row; justify-content: start; gap: 10px; border: 0; border-radius: 6px; line-height: 1.3; text-align: left; }
+  .manager-nav button svg { width: 20px; height: 20px; flex-shrink: 0; }
+  .manager-nav nav button.active { background: var(--denim-soft); box-shadow: none; }
+  .manager-nav nav button:not(.active):hover { background: var(--manager-ground, #faf6ee); }
+  .manager-nav :is(button, a):focus-visible { outline: 2px solid var(--focus); outline-offset: -3px; }
+  .manager-nav nav .manager-nav__label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .manager-nav__count { position: static; top: auto; right: auto; }
+  .manager-nav__count { height: auto; min-height: 20px; flex-shrink: 0; line-height: 1.3; }
+  .manager-main:has(.manager-title--library) { padding-top: 12px; }
 
   /* The three chips restate what the switch above already carries — the Album count and the Guest
      gallery state are in the segments — and a second row saying it again costs 43px of photograph.

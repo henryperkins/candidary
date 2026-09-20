@@ -5,8 +5,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_EVENT_THEME_CONFIG, serializeEventThemeConfig } from '../../shared/event-theme';
 import { EventsRepository } from '../../worker/db/events';
 import { MediaRepository } from '../../worker/db/media';
+import { createApp } from '../../worker/app';
 import type { AppEnv } from '../../worker/env';
-import { batchD1Statements } from './helpers';
+import { batchD1Statements, hostAccess } from './helpers';
 
 const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const EVENT_START = '2026-09-19T00:00:00.000Z';
@@ -124,6 +125,12 @@ describe('host private gallery at the 10,000-photo event limit', () => {
     }
     await batchD1Statements(env.DB, statements);
 
+    const host = await hostAccess();
+    await env.DB.prepare(`
+      INSERT INTO event_hosts (event_id, account_id, role, created_at)
+      VALUES ('event-a', ?, 'owner', ?)
+    `).bind(host.account.id, EVENT_START).run();
+
     const plainPlan = await env.DB.prepare(`
       EXPLAIN QUERY PLAN
       SELECT id FROM media
@@ -174,6 +181,44 @@ describe('host private gallery at the 10,000-photo event limit', () => {
     expect(plain.media).toHaveLength(48);
     expect(plain.nextCursor).not.toBeNull();
     expect(Date.now() - plainStarted).toBeLessThan(ceilingMs);
+
+    const firstLive = await createApp().request(
+      '/api/manage/events/event-a/gallery?live=1',
+      { headers: { cookie: host.cookie } }, testEnv,
+    );
+    expect(firstLive.status).toBe(200);
+    const firstLiveBody = await firstLive.json<any>();
+    expect(firstLiveBody.data.media).toHaveLength(48);
+    expect(firstLiveBody.data.media[0].deliverySequence).toBe(10_000);
+    expect(firstLiveBody.data.media.every((photo: { deliverySequence: number }) => Number.isSafeInteger(photo.deliverySequence))).toBe(true);
+    const legacy = await createApp().request(
+      '/api/manage/events/event-a/gallery',
+      { headers: { cookie: host.cookie } }, testEnv,
+    );
+    expect(legacy.status).toBe(200);
+    const legacyBody = await legacy.json<{ data: { media: Record<string, unknown>[] } }>();
+    expect(legacyBody.data.media).toHaveLength(48);
+    expect(legacyBody.data.media.every(photo => !('deliverySequence' in photo))).toBe(true);
+    expect(firstLiveBody.data.nextCursor).toEqual(expect.any(String));
+    const continuation = await createApp().request(
+      `/api/manage/events/event-a/gallery?live=1&cursor=${encodeURIComponent(firstLiveBody.data.nextCursor)}`,
+      { headers: { cookie: host.cookie } }, testEnv,
+    );
+    expect(continuation.status).toBe(200);
+    expect((await continuation.json<any>()).data.media).toHaveLength(48);
+
+    const arrivals = await createApp().request(
+      '/api/manage/events/event-a/gallery/arrivals?after=0',
+      { headers: { cookie: host.cookie } }, testEnv,
+    );
+    expect(arrivals.status).toBe(200);
+    const arrivalsBody = await arrivals.json<any>();
+    expect(arrivalsBody.data).toEqual({
+      afterSequence: 0,
+      snapshotSequence: 10_000,
+      count: 10_000,
+    });
+    expect(arrivalsBody.data).not.toHaveProperty('media');
 
     const favoritesStarted = Date.now();
     const favorites = await repository.listGalleryTimeline('event-a', { favorites: true });

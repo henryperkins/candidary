@@ -1,3 +1,4 @@
+import './manager-upload-dialog.css';
 import { LoaderCircle, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, type RefObject } from 'react';
 
@@ -94,7 +95,7 @@ export function ManagerUploadDialog({
     type="button"
     className="button button--primary"
     onClick={close}
-  >Done</button>;
+  >Return to Library</button>;
 
   return <ModalSurface
     labelledBy="manager-upload-dialog-title"
@@ -135,7 +136,7 @@ export function ManagerUploadDialog({
         {cleanupRetry.deliveredIds.length > 0 && <p>
           {cleanupRetry.deliveredIds.length} delivered {cleanupRetry.deliveredIds.length === 1
             ? 'photo is'
-            : 'photos are'} already safe in Intake.
+            : 'photos are'} already safe in Library.
         </p>}
         <button
           ref={retryCleanupRef}
@@ -157,7 +158,7 @@ export function ManagerUploadDialog({
           className="button button--secondary"
           onClick={close}
         >
-          Return to Intake
+          Return to Library
         </button>
       </section>}
 

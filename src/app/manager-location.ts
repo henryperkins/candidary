@@ -1,5 +1,4 @@
 export type ManagerSection =
-  | 'intake'
   | 'rsvp'
   | 'gallery'
   | 'guestbook'
@@ -10,7 +9,8 @@ export type GalleryMode = 'library' | 'album' | 'guest-gallery';
 
 export type ManagerLocation =
   | { section: Exclude<ManagerSection, 'gallery'> }
-  | { section: 'gallery'; mode: GalleryMode };
+  | { section: 'gallery'; mode: 'library'; view?: 'trash' }
+  | { section: 'gallery'; mode: 'album' | 'guest-gallery' };
 
 export interface ParsedManagerLocation {
   location: ManagerLocation;
@@ -23,7 +23,6 @@ export interface ParsedManagerLocation {
 const MANAGER_EVENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const MANAGER_PATH = /^\/manage\/event\/([^/]+)$/u;
 const NON_GALLERY_SECTIONS = new Set<Exclude<ManagerSection, 'gallery'>>([
-  'intake',
   'rsvp',
   'guestbook',
   'share',
@@ -37,20 +36,21 @@ function galleryMode(value: string | undefined): GalleryMode {
 }
 
 export function parseManagerLocation(search: string): ParsedManagerLocation {
-  const values = { section: [] as string[], mode: [] as string[] };
+  const values = { section: [] as string[], mode: [] as string[], view: [] as string[] };
   let hasUnknownKeys = false;
   for (const [key, value] of new URLSearchParams(search)) {
-    if (key === 'section' || key === 'mode') values[key].push(value);
+    if (key === 'section' || key === 'mode' || key === 'view') values[key].push(value);
     else hasUnknownKeys = true;
   }
 
-  const hasDuplicateKnownKeys = values.section.length > 1 || values.mode.length > 1;
+  const hasDuplicateKnownKeys = values.section.length > 1 || values.mode.length > 1 || values.view.length > 1;
   const requestedSection = values.section.length === 1 ? values.section[0] : undefined;
-  const location: ManagerLocation = requestedSection === 'gallery'
+  let location: ManagerLocation = requestedSection === 'gallery'
     ? { section: 'gallery', mode: galleryMode(values.mode.length === 1 ? values.mode[0] : undefined) }
     : requestedSection && NON_GALLERY_SECTIONS.has(requestedSection as Exclude<ManagerSection, 'gallery'>)
       ? { section: requestedSection as Exclude<ManagerSection, 'gallery'> }
-      : { section: 'intake' };
+      : { section: 'gallery', mode: 'library' };
+  if (requestedSection === 'gallery' && location.section === 'gallery' && location.mode === 'library' && values.view.length === 1 && values.view[0] === 'trash') location = { ...location, view: 'trash' };
   const canonicalSearch = serializeManagerSearch(location);
 
   return {
@@ -64,7 +64,8 @@ export function parseManagerLocation(search: string): ParsedManagerLocation {
 
 export function serializeManagerSearch(location: ManagerLocation): string {
   const search = new URLSearchParams();
-  if (location.section !== 'intake') search.set('section', location.section);
+  if (location.section !== 'gallery' || location.mode !== 'library' || location.view === 'trash') search.set('section', location.section);
+  if (location.section === 'gallery' && location.mode === 'library' && location.view === 'trash') search.set('view', 'trash');
   if (location.section === 'gallery' && location.mode !== 'library') {
     search.set('mode', location.mode);
   }

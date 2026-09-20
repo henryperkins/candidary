@@ -46,7 +46,13 @@ import {
   MIN_EVENT_CALENDAR_YEAR,
   PRIVATE_GALLERY_PAGE_SIZE,
 } from '../../shared/constants';
-import { decodeGalleryCursor, encodeGalleryCursor } from '../http/gallery-cursor';
+import {
+  decodeGalleryCursor,
+  decodeLibraryCursor,
+  encodeGalleryCursor,
+  encodeLibraryCursor,
+} from '../http/gallery-cursor';
+import type { LibraryQuery } from '../../shared/library-arrivals';
 import { decodeMediaCursor, encodeMediaCursor } from '../http/media-cursor';
 import { decodeTrashCursor, encodeTrashCursor } from '../http/trash-cursor';
 import { resolveEventSchedule } from '../http/event-schedule';
@@ -122,6 +128,10 @@ const managerLinkRotationSchema = z.object({
   expectedManagerLinkRevision: z.number().int().nonnegative(),
 }).strict();
 const GALLERY_SEARCH_MAX_CODE_POINTS = 120;
+const deliverySequenceSchema = z.string()
+  .regex(/^(?:0|[1-9]\d*)$/u)
+  .transform(Number)
+  .refine(Number.isSafeInteger);
 
 // Album. `strict()` throughout: an unknown key here is a client composing against a
 // contract this Worker does not implement, and silently dropping it would store an
@@ -176,6 +186,35 @@ function managerForEvent(context: Context<AppBindings>, write = false) {
   return requireManager(context, { write });
 }
 
+function libraryQueryForRequest(context: Context<AppBindings>): LibraryQuery {
+  const rawQuery = context.req.query('query');
+  let query = '';
+  if (rawQuery !== undefined) {
+    query = rawQuery.trim();
+    const codePoints = [...query].length;
+    if (codePoints < 1 || codePoints > GALLERY_SEARCH_MAX_CODE_POINTS) {
+      throw new ApiError(
+        'VALIDATION_FAILED',
+        `Search must contain between 1 and ${GALLERY_SEARCH_MAX_CODE_POINTS} characters.`,
+        422,
+      );
+    }
+  }
+  const rawFavorites = context.req.query('favorites');
+  if (rawFavorites !== undefined && rawFavorites !== '1') {
+    throw new ApiError('VALIDATION_FAILED', 'The favorites filter is invalid.', 422);
+  }
+  const rawOrder = context.req.query('order');
+  if (rawOrder !== undefined && !(GALLERY_TIMELINE_ORDERS as readonly string[]).includes(rawOrder)) {
+    throw new ApiError('VALIDATION_FAILED', 'The gallery order is invalid.', 422);
+  }
+  return {
+    query,
+    favorites: rawFavorites === '1',
+    order: (rawOrder ?? DEFAULT_GALLERY_TIMELINE_ORDER) as GalleryTimelineOrder,
+  };
+}
+
 // Both durable-entry actions are irreversible for guests, so neither may happen
 // on a single tap. The host retypes the event name exactly as it is stored.
 async function assertEventNameConfirmed(
@@ -228,6 +267,7 @@ manageRoutes.use('/manage/events/:eventId/media/:mediaId/trash', privateJson);
 manageRoutes.use('/manage/events/:eventId/media/:mediaId/restore', privateJson);
 manageRoutes.use('/manage/events/:eventId/media/:mediaId/cancel-reservation', privateJson);
 manageRoutes.use('/manage/events/:eventId/gallery/summary', privateJson);
+manageRoutes.use('/manage/events/:eventId/gallery/arrivals', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/batch', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/content', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/finalize', privateJson);
@@ -650,25 +690,7 @@ manageRoutes.get('/manage/events/:eventId/media', async (context) => {
 manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
   await managerForEvent(context);
   const eventId = context.req.param('eventId');
-
-  const rawQuery = context.req.query('query');
-  let query: string | undefined;
-  if (rawQuery !== undefined) {
-    const trimmed = rawQuery.trim();
-    const codePoints = [...trimmed].length;
-    if (codePoints < 1 || codePoints > GALLERY_SEARCH_MAX_CODE_POINTS) {
-      throw new ApiError(
-        'VALIDATION_FAILED',
-        `Search must contain between 1 and ${GALLERY_SEARCH_MAX_CODE_POINTS} characters.`,
-        422,
-      );
-    }
-    query = trimmed;
-  }
-  const rawFavorites = context.req.query('favorites');
-  if (rawFavorites !== undefined && rawFavorites !== '1') {
-    throw new ApiError('VALIDATION_FAILED', 'The favorites filter is invalid.', 422);
-  }
+  const normalized = libraryQueryForRequest(context);
   const limit = galleryLimitSchema.safeParse(context.req.query('limit'));
   if (!limit.success) {
     throw new ApiError(
@@ -677,14 +699,45 @@ manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
       422,
     );
   }
-  const rawOrder = context.req.query('order');
-  if (rawOrder !== undefined && !(GALLERY_TIMELINE_ORDERS as readonly string[]).includes(rawOrder)) {
-    throw new ApiError('VALIDATION_FAILED', 'The gallery order is invalid.', 422);
+  const rawLive = context.req.query('live');
+  if (rawLive !== undefined && rawLive !== '1') {
+    throw new ApiError('VALIDATION_FAILED', 'The Library live mode is invalid.', 422);
   }
-  const order = (rawOrder ?? DEFAULT_GALLERY_TIMELINE_ORDER) as GalleryTimelineOrder;
+  const live = rawLive === '1';
+  const rawSnapshot = context.req.query('snapshot');
+  if (rawSnapshot !== undefined && !live) {
+    throw new ApiError('VALIDATION_FAILED', 'The Library snapshot requires live mode.', 422);
+  }
+  const requestedSnapshot = rawSnapshot === undefined
+    ? undefined
+    : deliverySequenceSchema.safeParse(rawSnapshot);
+  if (requestedSnapshot !== undefined && !requestedSnapshot.success) {
+    throw new ApiError('VALIDATION_FAILED', 'The Library snapshot sequence is invalid.', 422);
+  }
   const rawCursor = context.req.query('cursor');
-  const cursor = rawCursor === undefined ? undefined : decodeGalleryCursor(rawCursor, order);
   const mediaRepository = new MediaRepository(context.env.DB);
+  const legacyCursor = !live && rawCursor !== undefined
+    ? decodeGalleryCursor(rawCursor, normalized.order)
+    : undefined;
+  const libraryCursor = live && rawCursor !== undefined
+    ? decodeLibraryCursor(rawCursor, eventId, normalized)
+    : undefined;
+  const currentSequence = live
+    ? await mediaRepository.currentDeliverySequence(eventId)
+    : undefined;
+  let snapshotSequence: number | undefined;
+  if (live) {
+    snapshotSequence = libraryCursor?.snapshotSequence
+      ?? requestedSnapshot?.data
+      ?? currentSequence;
+    if (snapshotSequence === undefined
+      || snapshotSequence > (currentSequence ?? 0)
+      || (libraryCursor !== undefined
+        && requestedSnapshot !== undefined
+        && requestedSnapshot.data !== libraryCursor.snapshotSequence)) {
+      throw new ApiError('VALIDATION_FAILED', 'The Library snapshot sequence is invalid.', 422);
+    }
+  }
   if (await mediaRepository.countStoredTimelineSentinels(eventId) > 0) {
     throw new ApiError(
       'MEDIA_STATE_CONFLICT',
@@ -695,17 +748,65 @@ manageRoutes.get('/manage/events/:eventId/gallery', async (context) => {
   const page = await mediaRepository.listGalleryTimeline(
     eventId,
     {
-      query,
-      favorites: rawFavorites === '1',
-      cursor,
+      query: normalized.query || undefined,
+      favorites: normalized.favorites,
+      cursor: libraryCursor ?? legacyCursor,
       limit: limit.data,
-      order,
+      order: normalized.order,
+      snapshotSequence,
     },
   );
   return context.json({
     data: {
-      media: page.media,
-      nextCursor: page.nextCursor ? encodeGalleryCursor(page.nextCursor, order) : null,
+      media: live ? page.media : page.media.map(photo => ({ ...photo, deliverySequence: undefined })),
+      nextCursor: page.nextCursor
+        ? live
+          ? encodeLibraryCursor({
+            v: 3,
+            eventId,
+            snapshotSequence: snapshotSequence!,
+            ...normalized,
+            ...page.nextCursor,
+          })
+          : encodeGalleryCursor(page.nextCursor, normalized.order)
+        : null,
+      ...(live ? { snapshotSequence } : {}),
+    },
+    requestId: context.get('requestId'),
+  });
+});
+
+manageRoutes.get('/manage/events/:eventId/gallery/arrivals', async (context) => {
+  await managerForEvent(context);
+  const eventId = context.req.param('eventId');
+  const normalized = libraryQueryForRequest(context);
+  const parsedAfter = deliverySequenceSchema.safeParse(context.req.query('after'));
+  if (!parsedAfter.success) {
+    throw new ApiError('VALIDATION_FAILED', 'The Library arrival sequence is invalid.', 422);
+  }
+  const mediaRepository = new MediaRepository(context.env.DB);
+  const snapshotSequence = await mediaRepository.currentDeliverySequence(eventId);
+  if (parsedAfter.data > snapshotSequence) {
+    throw new ApiError('VALIDATION_FAILED', 'The Library arrival sequence is invalid.', 422);
+  }
+  if (await mediaRepository.countStoredTimelineSentinels(eventId) > 0) {
+    throw new ApiError(
+      'MEDIA_STATE_CONFLICT',
+      'The private gallery is still preparing. Try again shortly.',
+      409,
+    );
+  }
+  const count = await mediaRepository.countLibraryArrivals(
+    eventId,
+    normalized,
+    parsedAfter.data,
+    snapshotSequence,
+  );
+  return context.json({
+    data: {
+      afterSequence: parsedAfter.data,
+      snapshotSequence,
+      count,
     },
     requestId: context.get('requestId'),
   });

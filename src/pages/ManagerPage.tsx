@@ -1,4 +1,5 @@
-import { Check, ClipboardCheck, Copy, Download, Eye, EyeOff, Image as ImageIcon, Inbox, Link as LinkIcon, MessageCircle, QrCode, RotateCcw, Search, Settings, Trash2, X } from 'lucide-react';
+import type { LibraryChange, TrashOutcome } from '../features/gallery/library-file-actions';
+import { Check, ClipboardCheck, Copy, EyeOff, Image as ImageIcon, Link as LinkIcon, MessageCircle, QrCode, Settings, Trash2, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -10,7 +11,7 @@ import {
   useParams,
 } from 'react-router-dom';
 
-import { api, ClientApiError, mediaOriginal, mediaPreview } from '../app/api';
+import { api, ClientApiError } from '../app/api';
 import {
   managerHref,
   parseManagerLocation,
@@ -34,11 +35,11 @@ import {
   formatEventDateTime,
   formatRetentionDate,
 } from '../app/event-date-time';
+import { ManagerLibraryTrash } from '../features/gallery/ManagerLibraryTrash';
 import { useDeadlineClock } from '../app/use-deadline-clock';
 import { formatBytes } from '../app/format';
 import { hostSignInHref } from '../app/recovery';
 import {
-  MANAGER_BULK_SELECTION_MAX,
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
 } from '../../shared/constants';
@@ -47,12 +48,13 @@ import type {
   EventView,
   ExportDownloadView,
   ExportView,
-  ManagerMediaPage,
   ManagerTrashPage,
   MediaView,
   TrashedMediaView,
 } from '../app/types';
 import { Brand } from '../components/Brand';
+import { ManagerNavigation } from '../features/manager/ManagerNavigation';
+import { useWideViewport } from '../features/gallery/viewport';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
 import { EventAccountCard } from '../components/EventAccountCard';
 import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
@@ -98,18 +100,7 @@ import { ManagerUploadDialog } from '../features/uploads/ManagerUploadDialog';
 import { resolveHostUploadAvailability } from '../features/uploads/host-upload-availability';
 import type { UploadExitState } from '../features/uploads/use-manager-upload-session';
 
-type Section = 'intake' | 'rsvp' | 'gallery' | 'guestbook' | 'share' | 'settings';
-type MediaStatus = 'all' | MediaView['publicationStatus'];
-/**
- * Intake asks one of two questions, never a blend of them.
- *
- * `active` is the live collection, with its contributor filter and its status.
- * `trash` is Recently deleted, which has neither — it is a different endpoint, a
- * different ordering, and a different cursor. Making the mode part of the query
- * identity is what stops a filter typed in one from paging the other.
- */
-type IntakeMode = 'active' | 'trash';
-
+type Section = 'rsvp' | 'gallery' | 'guestbook' | 'share' | 'settings';
 const HOST_UPLOAD_UNAVAILABLE_MESSAGE = {
   'media-cap': 'This event has reached its photo limit.',
   'storage-cap': 'This event has reached its storage limit.',
@@ -118,6 +109,7 @@ const HOST_UPLOAD_UNAVAILABLE_MESSAGE = {
 
 type ManagerSectionDestination =
   | { kind: 'section'; section: Section }
+  | { kind: 'trash' }
   | { kind: 'complete-export' }
   | { kind: 'recently-deleted'; focusMediaId: string }
   | { kind: 'settings-repair' }
@@ -271,34 +263,7 @@ type ManagerLinkRotationState =
 const AMBIGUOUS_MANAGER_LINK_ROTATION =
   "Couldn't confirm whether the link changed. Rotate again to create a link you can save.";
 
-// The rows and the cursor that continues them are one value. Polling has to compare an incoming first
-// page against the rows on screen and decide the cursor from that same verdict, and React only
-// guarantees an accurate `current` inside a functional updater — so both live in one state, and any
-// write derived from what is already there has to be an updater. Anything held outside the update
-// queue, a ref included, lags the committed list by at least a scheduler turn, which is long enough
-// for a poll to overwrite a page just appended.
-//
-// The one absolute write is the whole-page replacement in `refresh`. It derives from nothing on
-// screen: its rows and its cursor arrive in the same response and are consistent by construction, and
-// `latestMediaPath` is what keeps it off a query it no longer belongs to. Read the rule as "reads then
-// writes must be updaters", not "no absolute writes" — a partial replacement is never safe absolutely.
-/**
- * One page of whichever list Intake is showing, tagged with which list that is.
- *
- * The tag is not redundant with the mode toggle: a response that arrives during
- * a mode change would otherwise be rendered as the wrong kind of row for exactly
- * one commit, and a Recently deleted row has no preview, no publication status,
- * and no original to download.
- */
-type IntakePageState =
-  | {
-      mode: 'active'; rows: MediaView[]; cursor: string | null;
-      firstPageIds: ReadonlySet<string>;
-    }
-  | {
-      mode: 'trash'; rows: TrashedMediaView[]; cursor: string | null;
-      firstPageIds: ReadonlySet<string>;
-    };
+type TrashPageState = { mode: 'trash'; rows: TrashedMediaView[]; cursor: string | null; firstPageIds: ReadonlySet<string> };
 
 interface EventEntryLoad {
   // Null once the printed entry has been disabled. There is no replacement to
@@ -366,6 +331,7 @@ export function ManagerPage() {
 }
 
 function ManagerEventPage({ eventId }: { eventId: string }) {
+  const wideViewport = useWideViewport();
   const routerLocation = useLocation();
   const navigate = useNavigate();
   const navigationType = useNavigationType();
@@ -407,7 +373,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   }
   // Every Manager resource is loaded by its own controller below. The event is
   // the only shell-critical one: it decides identity and lifecycle, and there is
-  // no Manager to render without it. Intake, exports, the printed credential, and
+  // no Manager to render without it. Trash, exports, the printed credential, and
   // the Guestbook summary each answer for themselves, so one of them failing
   // leaves the other three — and the header, the nav, and Settings — on screen.
   const [escalatedFailure, setEscalatedFailure] = useState<LoadFailure | null>(null);
@@ -449,7 +415,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     escalationLocked.current = true;
     setEscalatedFailure(failure);
   }, [eventId]);
-  const [intakeMode, setIntakeMode] = useState<IntakeMode>('active');
+  const libraryTrash = parsedLocation.location.section === 'gallery' && parsedLocation.location.mode === 'library' && parsedLocation.location.view === 'trash';
+  const trashTrigger = useRef<HTMLButtonElement>(null);
+  const returnFromTrash = useRef(false);
+  const libraryHeadingFocusRequested = useRef(false);
   const [exportDownloads, setExportDownloads] = useState<Record<string, ExportDownloadView>>({});
   // Updated synchronously when disable confirms so an already-resolving
   // settings response cannot slip through before React commits the new entry
@@ -458,7 +427,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const [photoIntakePending, setPhotoIntakePending] = useState(false);
   const photoIntakePendingRef = useRef(false);
   const [qr, setQr] = useState('');
-  const [selected, setSelected] = useState<string[]>([]);
   // Settings stays mounted after its first visit so a debounce timer, an
   // in-flight write, and an unsaved draft all survive a destination change.
   const [settingsMounted, setSettingsMounted] = useState(section === 'settings');
@@ -480,19 +448,15 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const entryActionNoticeFocusRequested = useRef(false);
   const entryActionDisabledFocusRequested = useRef(false);
   const entryDisabledResult = useRef<HTMLParagraphElement>(null);
-  const [status, setStatus] = useState<MediaStatus>('all');
-  const [searchInput, setSearchInput] = useState('');
-  const [guestFilter, setGuestFilter] = useState('');
   const [loadingMore, setLoadingMore] = useState(false);
   // Recently deleted, and the confirmation that leads to it.
-  const [trashCandidate, setTrashCandidate] = useState<MediaView | null>(null);
   const [trashPending, setTrashPending] = useState(false);
-  const trashDialog = useRef<HTMLDivElement>(null);
-  const trashKeepButton = useRef<HTMLButtonElement>(null);
-  const trashOrigin = useRef<HTMLElement | null>(null);
-  const intakeHeading = useRef<HTMLHeadingElement>(null);
-  const trashHeading = useRef<HTMLParagraphElement>(null);
-  const trashRestoreButtons = useRef(new Map<string, HTMLButtonElement>());
+  const trashWritePending = useRef(false);
+  const trashHeading = useRef<HTMLHeadingElement>(null);
+  const ordinaryTrashFocusRequested = useRef(false);
+  const restoringTrashIds = useRef(new Set<string>());
+  const trashTargetPages = useRef<{ id: string; cursors: Set<string> } | null>(null);
+  const [trashRestorePendingIds, setTrashRestorePendingIds] = useState<ReadonlySet<string>>(new Set());
   const [recoveryAnnouncement, setRecoveryAnnouncement] = useState('');
   const managerUndo = useManagerUndo();
   const completeExportFocusRequested = useRef(false);
@@ -536,6 +500,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     ownsBlock: false,
     warnBeforeUnload: false,
   });
+  const finalizedMediaIds = useRef(new Set<string>());
   const managerUploadOwner = useRef<{
     eventId: string;
     eventGeneration: number;
@@ -549,6 +514,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const galleryRestorationGeneration = useRef(0);
   const pendingGalleryRestoration = useRef<PendingGalleryRestoration | null>(null);
   const [galleryMutationEpoch, setGalleryMutationEpoch] = useState(0);
+  const [libraryChange, setLibraryChange] = useState<LibraryChange>();
   const [galleryAnnouncement, setGalleryAnnouncement] = useState('');
   const [galleryLiveHost] = useState(() => {
     const element = document.createElement('div');
@@ -573,7 +539,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const loadMoreOwner = useRef<AbortController | null>(null);
   // The five-second reader has an owner too: an older tick is abandoned when
   // the next one starts, even if a mock/network ignores abort delivery.
-  const intakePollOwner = useRef<AbortController | null>(null);
   // Reads and writes of the event row overlap once autosave can be running
   // behind another destination. Every write brackets itself here, and every
   // whole-event read checks whether it was overtaken before it is adopted.
@@ -633,9 +598,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       const more = loadMoreOwner.current;
       loadMoreOwner.current = null;
       more?.abort();
-      const poll = intakePollOwner.current;
-      intakePollOwner.current = null;
-      poll?.abort();
     };
   }, []);
   // Leaving Settings flushes a valid scheduled write without waiting for its
@@ -847,7 +809,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     setPhotoIntakePending(false);
     photoIntakePendingRef.current = false;
     setQr('');
-    setSelected([]);
     setEntryAction(null);
     setEntryConfirm('');
     setEntryActionPending(false);
@@ -855,13 +816,8 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     entryActionOrigin.current = null;
     entryActionNoticeFocusRequested.current = false;
     entryActionDisabledFocusRequested.current = false;
-    setStatus('all');
-    setSearchInput('');
-    setGuestFilter('');
     setLoadingMore(false);
-    setTrashCandidate(null);
     setTrashPending(false);
-    trashOrigin.current = null;
     setRecoveryAnnouncement('');
     setActionError(null);
     setCoverAccessFailure(null);
@@ -976,34 +932,11 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
   }, [managerLinkRotation]);
 
-  /**
-   * The Intake query, as one identity.
-   *
-   * Mode leads, because Recently deleted and the live collection are different
-   * endpoints with different orderings and different cursors. The contributor
-   * filter and the publication status belong to `active` alone and are dropped
-   * from the trash key entirely, so switching modes cannot carry one list's
-   * filters into the other's request — and neither mode's URL can ever contain
-   * the other's cursor.
-   */
-  const intakeQueryKey = intakeMode === 'trash'
-    ? 'trash'
-    : `active:${status}:${guestFilter}`;
-
-  const intakePath = useCallback((cursor?: string) => {
-    const base = intakeMode === 'trash'
-      ? `/api/manage/events/${eventId}/media/trash`
-      : `/api/manage/events/${eventId}/media`;
+  const trashPath = useCallback((cursor?: string) => {
     const params = new URLSearchParams();
-    if (intakeMode === 'active') {
-      if (status !== 'all') params.set('status', status);
-      if (guestFilter) params.set('guestName', guestFilter);
-    }
-    // The cursor is opaque and `cursor=` is a validation failure, so an absent cursor stays absent.
     if (cursor) params.set('cursor', cursor);
-    const query = params.toString();
-    return `${base}${query ? `?${query}` : ''}`;
-  }, [eventId, guestFilter, intakeMode, status]);
+    return `/api/manage/events/${eventId}/media/trash${cursor ? `?${params}` : ''}`;
+  }, [eventId]);
 
   const eventResource = useManagerResource<EventView>({
     eventId,
@@ -1032,43 +965,33 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     shownEvent.current = event;
   }, [event]);
 
-  const intakeResource = useManagerResource<IntakePageState>({
+  const trashResource = useManagerResource<TrashPageState>({
     eventId,
-    queryKey: intakeQueryKey,
-    fallbackMessage: intakeMode === 'trash'
-      ? 'Recently deleted could not be loaded.'
-      : 'The live intake could not be loaded.',
+    queryKey: 'trash',
+    fallbackMessage: 'Trash could not be loaded.',
     onEscalate: escalate,
     enabled: !rotationResourcesPaused,
     load: useCallback(async (signal: AbortSignal) => {
-      if (intakeMode === 'trash') {
-        const page = await api<ManagerTrashPage>(intakePath(), { signal });
-        return {
-          mode: 'trash' as const,
-          rows: page.media,
-          cursor: page.nextCursor ?? null,
-          firstPageIds: new Set(page.media.map(({ id }) => id)),
-        };
-      }
-      const page = await api<ManagerMediaPage>(intakePath(), { signal });
-      return {
-        mode: 'active' as const,
-        rows: page.media,
-        cursor: page.nextCursor ?? null,
-        firstPageIds: new Set(page.media.map(({ id }) => id)),
-      };
-    }, [intakeMode, intakePath]),
+      const page = await api<ManagerTrashPage>(trashPath(), { signal });
+      return { mode: 'trash' as const, rows: page.media, cursor: page.nextCursor ?? null,
+        firstPageIds: new Set(page.media.map(({ id }) => id)) };
+    }, [trashPath]),
   });
-  const intakePage = intakeResource.state.value;
-  // Tagged rather than inferred from `intakeMode`: the tag travels with the rows,
-  // so a page loaded under the previous mode can never be rendered as the other
-  // list in the render that runs before its controller catches up.
-  const media = intakePage?.mode === 'active' ? intakePage.rows : [];
-  const trashRows = intakePage?.mode === 'trash' ? intakePage.rows : [];
-  const nextMediaCursor = intakePage?.cursor ?? null;
-  const showRecentlyDeletedIntentGuidance = recentlyDeletedIntentGuidance
-    && intakePage?.mode === 'trash'
-    && intakePage.cursor !== null;
+  const trashPage = trashResource.state.value;
+  const previousTrashDestination = useRef({ eventId, active: libraryTrash });
+  const reloadTrash = trashResource.reload;
+  useLayoutEffect(() => {
+    const previous = previousTrashDestination.current;
+    previousTrashDestination.current = { eventId, active: libraryTrash };
+    // The eager read covers a new event. Re-entry needs a fresh read too,
+    // retaining rows while changes from another tab are reconciled.
+    if (libraryTrash && !previous.active && previous.eventId === eventId && !rotationResourcesPaused) {
+      void reloadTrash();
+    }
+  }, [eventId, libraryTrash, reloadTrash, rotationResourcesPaused]);
+  const trashRows = trashPage?.rows ?? [];
+  const nextMediaCursor = trashPage?.cursor ?? null;
+  const showRecentlyDeletedIntentGuidance = recentlyDeletedIntentGuidance && nextMediaCursor !== null;
   // Recently deleted does not need a poll just to cross a known server deadline.
   // The shared hook caps long waits at the browser timer maximum and re-evaluates,
   // so a 30-day recovery window cannot turn into an immediate-loop timeout.
@@ -1191,11 +1114,8 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     const more = loadMoreOwner.current;
     loadMoreOwner.current = null;
     more?.abort();
-    const intakePoll = intakePollOwner.current;
-    intakePollOwner.current = null;
-    intakePoll?.abort();
     eventResource.update((current) => current);
-    intakeResource.update((current) => current);
+    trashResource.update((current) => current);
     exportsResource.update((current) => current);
     audienceResource.update((current) => current);
     entryResource.update((current) => current);
@@ -1218,27 +1138,27 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   }
 
   // Every mutation that changes Gallery membership crosses this one boundary.
-  // The ref follows the currently committed Intake query while the callback
+  // The ref follows the current Trash resource while the callback
   // itself stays stable for the event session, so inverse commands can retain
   // it without retaining a child workspace or a stale filtered page.
   const galleryResourceInvalidators = useRef({
     audience: audienceResource.invalidate,
     event: eventResource.invalidate,
-    intake: intakeResource.invalidate,
+    trash: trashResource.invalidate,
     guestbook: guestbookResource.invalidate,
   });
   useLayoutEffect(() => {
     galleryResourceInvalidators.current = {
       audience: audienceResource.invalidate,
       event: eventResource.invalidate,
-      intake: intakeResource.invalidate,
+      trash: trashResource.invalidate,
       guestbook: guestbookResource.invalidate,
     };
   }, [
     audienceResource.invalidate,
     eventResource.invalidate,
     guestbookResource.invalidate,
-    intakeResource.invalidate,
+    trashResource.invalidate,
   ]);
   const galleryMutationOwner = useRef(eventScope.current.generation);
   useLayoutEffect(() => {
@@ -1246,7 +1166,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     // Re-arm this live owner; the session cleanup still fences actual unmounts.
     galleryMutationOwner.current = eventScope.current.generation;
   }, []);
-  const invalidateGalleryAfterMutation = useCallback(() => {
+  const invalidateGalleryAfterMutation = useCallback((change?: Pick<LibraryChange, 'kind' | 'mediaIds'>) => {
     // A retained inverse may settle after this event session unmounts. Its API
     // response belongs to that old event, but it must not start reconciliation
     // reads or bump the epoch of the Manager now on screen.
@@ -1256,12 +1176,14 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       return;
     }
     setGalleryMutationEpoch((current) => current + 1);
+    setLibraryChange(current => ({ version: (current?.version ?? 0) + 1, eventId,
+      kind: change?.kind ?? 'metadata', mediaIds: change?.mediaIds ?? [] }));
     const owners = galleryResourceInvalidators.current;
     void owners.audience();
     void owners.event();
-    void owners.intake();
+    void owners.trash();
     void owners.guestbook();
-  }, []);
+  }, [eventId]);
 
   const invalidateAfterManagerUpload = useCallback(() => {
     const owner = managerUploadOwner.current;
@@ -1275,9 +1197,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       return;
     }
     void eventResource.invalidate();
-    if (intakeMode === 'active') void intakeResource.invalidate();
+    void audienceResource.invalidate();
+    setManagerUploadLibrarySignal(current => ({ ...current, version: current.version + 1 }));
     void guestbookResource.invalidate();
-  }, [eventId, eventResource.invalidate, guestbookResource.invalidate, intakeMode, intakeResource.invalidate]);
+  }, [eventId, eventResource.invalidate, guestbookResource.invalidate, audienceResource.invalidate]);
 
   const handleManagerUploadFinalized = useCallback(({ mediaId }: { mediaId: string }) => {
     const owner = managerUploadOwner.current;
@@ -1321,9 +1244,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       const toolbarTrigger = addPhotosTrigger.current;
       managerUploadReturnFocus.current = toolbarTrigger?.isConnected ? toolbarTrigger : null;
     }
+    invalidateAfterManagerUpload();
     managerUploadOwner.current = null;
     setManagerUploadOpen(false);
-  }, [eventId]);
+  }, [eventId, invalidateAfterManagerUpload]);
 
   /**
    * Only the event can empty the Manager.
@@ -1344,87 +1268,14 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     await Promise.all([
       audienceResource.reload(),
       eventResource.reload(),
-      intakeResource.reload(),
+      trashResource.reload(),
       exportsResource.reload(),
       entryResource.reload(),
       guestbookResource.reload(),
     ]);
-  }, [audienceResource, entryResource, eventResource, exportsResource, guestbookResource, intakeResource]);
+  }, [audienceResource, entryResource, eventResource, exportsResource, guestbookResource, trashResource]);
 
   const refreshExports = exportsResource.reload;
-
-  /**
-   * The five-second Intake poll.
-   *
-   * It merges rather than replaces, because the host may already have paged past
-   * the first screen and a replacement would throw those pages away. Recently
-   * deleted does not poll: its rows change only when this host acts on them.
-   */
-  const refreshIntake = useCallback(async () => {
-    if (
-      rotationResourcesPausedRef.current
-      || intakeMode !== 'active'
-      || intakeResource.state.terminal
-      || eventResource.state.terminal
-      || intakeResource.isTerminal()
-      || eventResource.isTerminal()
-    ) return;
-    const scope = eventScope.current.generation;
-    const previous = intakePollOwner.current;
-    previous?.abort();
-    const controller = new AbortController();
-    intakePollOwner.current = controller;
-    const eventCapture = eventResource.capture();
-    const intakeCapture = intakeResource.capture();
-    const ownsPoll = () => (
-      intakePollOwner.current === controller
-      && eventScope.current.generation === scope
-    );
-    const eventReadToken = eventReads.current.openRead();
-
-    // These two reads deliberately settle independently. A transient media
-    // outage must not discard a fresh event meter, and a terminal event answer
-    // must not make a good first page disappear.
-    const eventReadTask = api<{ event: EventView }>(`/api/manage/events/${eventId}`, {
-      signal: controller.signal,
-    }).then((eventData) => {
-      if (!ownsPoll() || !eventReads.current.adopt(eventReadToken)) return;
-      eventResource.adoptIfCurrent(eventCapture, eventData.event);
-    }).catch((caught) => {
-      if (!ownsPoll() || (caught instanceof DOMException && caught.name === 'AbortError')) return;
-      eventResource.reportTerminalIfCurrent(eventCapture, caught);
-    });
-    const intakeReadTask = api<ManagerMediaPage>(intakePath(), {
-      signal: controller.signal,
-    }).then((firstPage) => {
-      if (!ownsPoll()) return;
-      intakeResource.updateIfCurrent(intakeCapture, (current) => {
-        const fresh = {
-          mode: 'active' as const,
-          rows: firstPage.media,
-          cursor: firstPage.nextCursor ?? null,
-          firstPageIds: new Set(firstPage.media.map(({ id }) => id)),
-        };
-        if (!current || current.mode !== 'active') return fresh;
-        const refreshedIds = new Set(firstPage.media.map(({ id }) => id));
-        const retained = current.rows.filter(({ id }) => !refreshedIds.has(id));
-        if (current.rows.length === 0 || retained.length === current.rows.length) return fresh;
-        return {
-          mode: 'active',
-          rows: [...firstPage.media, ...retained],
-          cursor: current.cursor,
-          firstPageIds: fresh.firstPageIds,
-        };
-      });
-    }).catch((caught) => {
-      if (!ownsPoll() || (caught instanceof DOMException && caught.name === 'AbortError')) return;
-      // Venue-network failures remain quiet and retain the confirmed Intake.
-      // Credential/lifecycle failures lock this resource and escalate once.
-      intakeResource.reportTerminalIfCurrent(intakeCapture, caught);
-    });
-    await Promise.all([eventReadTask, intakeReadTask]);
-    if (intakePollOwner.current === controller) intakePollOwner.current = null;
-  }, [eventId, eventResource, intakeMode, intakePath, intakeResource]);
 
   const loadMoreMedia = useCallback(async () => {
     if (!nextMediaCursor || loadingMore) return;
@@ -1432,11 +1283,11 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     const requested = nextMediaCursor;
     const controller = new AbortController();
     loadMoreOwner.current = controller;
-    const resourceCapture = intakeResource.capture();
+    const resourceCapture = trashResource.capture();
     setLoadingMore(true);
     try {
-      const page = await api<ManagerMediaPage | ManagerTrashPage>(
-        intakePath(requested),
+      const page = await api<ManagerTrashPage>(
+        trashPath(requested),
         { signal: controller.signal },
       );
       if (eventScope.current.generation !== scope) return;
@@ -1444,26 +1295,14 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       // The cursor was issued for the exact resource generation that was
       // current when the host asked for more. A poll/reload/mutation can
       // replace it without this old continuation getting to retire it.
-      const adopted = intakeResource.updateIfCurrent(resourceCapture, (current) => {
+      const adopted = trashResource.updateIfCurrent(resourceCapture, (current) => {
         if (!current) return current;
         // A poll may have restarted the list while this page was in flight. It continues a keyset the
         // list no longer follows, so appending it would splice in rows from an abandoned ordering.
         if (current.cursor !== requested) return current;
         const known = new Set(current.rows.map(({ id }) => id));
         const appended = page.media.filter(({ id }) => !known.has(id));
-        return current.mode === 'trash'
-          ? {
-              mode: 'trash',
-              rows: [...current.rows, ...(appended as TrashedMediaView[])],
-              cursor: page.nextCursor ?? null,
-              firstPageIds: current.firstPageIds,
-            }
-          : {
-              mode: 'active',
-              rows: [...current.rows, ...(appended as MediaView[])],
-              cursor: page.nextCursor ?? null,
-              firstPageIds: current.firstPageIds,
-            };
+        return { ...current, rows: [...current.rows, ...appended], cursor: page.nextCursor ?? null };
       });
       // A newer query, poll, or confirmed mutation owns any panel notice it
       // installed. An old successful page must not erase that newer feedback
@@ -1474,10 +1313,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       if (eventScope.current.generation !== scope) return;
       if (loadMoreOwner.current !== controller) return;
       if (caught instanceof DOMException && caught.name === 'AbortError') return;
-      // This continuation no longer answers the current Intake resource. Its
+      // This continuation no longer answers the current Trash resource. Its
       // retryable outage is historical, not a panel failure the host can act on.
-      if (!intakeResource.isCaptureCurrent(resourceCapture)) return;
-      if (intakeResource.reportTerminalIfCurrent(resourceCapture, caught)) return;
+      if (!trashResource.isCaptureCurrent(resourceCapture)) return;
+      if (trashResource.reportTerminalIfCurrent(resourceCapture, caught)) return;
       setActionError(managerNoticeFor(caught, 'The next page of photos could not be loaded.'));
     } finally {
       if (eventScope.current.generation === scope && loadMoreOwner.current === controller) {
@@ -1485,7 +1324,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         setLoadingMore(false);
       }
     }
-  }, [intakePath, intakeResource, loadingMore, nextMediaCursor]);
+  }, [trashPath, trashResource, loadingMore, nextMediaCursor]);
 
   // A query change retires `Load more` immediately, so the host cannot spend the
   // previous query's cursor against the new one.
@@ -1494,20 +1333,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     loadMoreOwner.current = null;
     superseded?.abort();
     setLoadingMore(false);
-  }, [eventId, intakeQueryKey]);
-  useEffect(() => {
-    const superseded = intakePollOwner.current;
-    intakePollOwner.current = null;
-    superseded?.abort();
-  }, [eventId, intakeQueryKey]);
+  }, [eventId]);
   useEffect(() => () => {
     const active = loadMoreOwner.current;
     loadMoreOwner.current = null;
-    active?.abort();
-  }, []);
-  useEffect(() => () => {
-    const active = intakePollOwner.current;
-    intakePollOwner.current = null;
     active?.abort();
   }, []);
 
@@ -1552,23 +1381,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
   }
 
-  // No mount load here any more. Each controller starts its own read when its
-  // event or its query changes, which is what lets Intake reload on a filter
-  // change without the event, the exports, and the credential being refetched
-  // beside it.
-  useEffect(() => {
-    if (
-      rotationResourcesPaused
-      || section !== 'intake'
-      || intakeMode !== 'active'
-      || intakeResource.state.terminal
-      || eventResource.state.terminal
-    ) return;
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refreshIntake();
-    }, 5_000);
-    return () => window.clearInterval(interval);
-  }, [eventResource.state.terminal, intakeMode, intakeResource.state.terminal, refreshIntake, rotationResourcesPaused, section]);
   /**
    * An export is the terminal act of the whole product and it runs in a Workflow, so its
    * card is the one place the host waits on work they cannot see. Nothing polled it: the
@@ -1674,7 +1486,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   function currentGalleryStateWithAnchor(): RouterHistoryState {
     const currentLocation = parsedLocation.location;
     const clean = sanitizeManagerHistoryState(routerLocation.state, eventId, currentLocation).state;
-    if (currentLocation.section !== 'gallery') return clean;
+    if (currentLocation.section !== 'gallery' || (currentLocation.mode === 'library' && currentLocation.view === 'trash')) return clean;
     const anchor = galleryWorkspace.current?.captureAnchor(currentLocation.mode) ?? null;
     return withGalleryAnchor(clean, eventId, currentLocation.mode, anchor);
   }
@@ -1748,7 +1560,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       eventId,
       parsedLocation.location,
     );
-    const anchor = consumeGalleryAnchor && parsedLocation.location.section === 'gallery'
+    const anchor = consumeGalleryAnchor && parsedLocation.location.section === 'gallery' && !libraryTrash
       ? clean.envelope?.anchors?.[parsedLocation.location.mode] ?? null
       : null;
     const stateWithoutAnchor = anchor && parsedLocation.location.section === 'gallery'
@@ -1834,7 +1646,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     if (destination.kind === 'guest-gallery-return') {
       return { section: 'gallery', mode: 'guest-gallery' };
     }
-    if (destination.kind === 'recently-deleted') return { section: 'intake' };
+    if (destination.kind === 'recently-deleted' || destination.kind === 'trash') return { section: 'gallery', mode: 'library', view: 'trash' };
     if (destination.kind === 'complete-export') return { section: 'gallery', mode: 'library' };
     return destination.section === 'gallery'
       ? { section: 'gallery', mode: 'library' }
@@ -1900,7 +1712,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       }
       return;
     }
+    if (intent?.kind === 'focus-library-heading') { libraryHeadingFocusRequested.current = true; document.getElementById('gallery-workspace-title')?.focus(); return; }
     if (intent?.kind === 'focus-complete-export') {
+      if (libraryTrash) { void navigate(managerHref(eventId, { section: 'gallery', mode: 'library' }), { replace: true, state: withManagerIntent(routerLocation.state, eventId, intent) }); return; }
       completeExportFocusRequested.current = true;
       if (
         section === 'gallery'
@@ -1914,7 +1728,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
     if (intent?.kind === 'open-recently-deleted') {
       recentlyDeletedFocusRequested.current = intent.focusMediaId;
-      setIntakeMode('trash');
+      if (!libraryTrash) { void navigate(managerHref(eventId, { section: 'gallery', mode: 'library', view: 'trash' }), { replace: true, state: withManagerIntent(routerLocation.state, eventId, intent) }); return; }
       settleRecentlyDeletedIntentFocus();
     }
   }
@@ -1946,11 +1760,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     retireRetainedIntentFocus();
   }
 
-  function chooseIntakeMode(mode: IntakeMode) {
-    retireRetainedIntentFocus();
-    setIntakeMode(mode);
-  }
-
   const scheduleGalleryAnchorRestoration = useCallback((generation: number) => {
     const requested = pendingGalleryRestoration.current;
     if (requested?.generation !== generation || requested.frameScheduled) return;
@@ -1971,19 +1780,17 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   function cleanUpAdoptedManagerLocation(anchor: GalleryAnchor | null) {
     if (section === 'settings') setSettingsMounted(true);
     setGuestGallerySettingsReturn(null);
-    setSelected([]);
     setActionError(null);
     setEntryAction(null);
     setEntryConfirm('');
     retireManagerIntentFocus();
-    if (section === 'intake') setStatus('all');
     // Deep in a 120-photo intake grid, the new section would otherwise open somewhere in its middle —
     // or under the sticky header. Restore the top once the new section has actually been laid out, and
     // only when there is something to restore. `instant` rather than `auto`, because the document
     // carries `scroll-behavior: smooth` and `auto` would defer to it.
     const generation = ++galleryRestorationGeneration.current;
     pendingGalleryRestoration.current = null;
-    if (anchor && parsedLocation.location.section === 'gallery') {
+    if (anchor && parsedLocation.location.section === 'gallery' && !libraryTrash) {
       pendingGalleryRestoration.current = {
         generation,
         mode: parsedLocation.location.mode,
@@ -2197,7 +2004,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   }, [managerAdoptionEpoch, managerEntryIdentity, navigationType]);
 
   function requestGalleryMode(mode: GalleryMode) {
-    if (mode === galleryMode) return;
+    if (mode === galleryMode && !libraryTrash) return;
     if (mode !== 'library') galleryWorkspace.current?.retireCompleteExportFocus();
     if (galleryWorkspace.current?.requiresAlbumLeavePreparation() !== true) {
       clearPendingManagerAdoption();
@@ -2211,8 +2018,8 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   function requestSectionDestination(destination: ManagerSectionDestination) {
     const next = destination.kind === 'section'
       ? destination.section
-      : destination.kind === 'recently-deleted'
-        ? 'intake'
+      : destination.kind === 'recently-deleted' || destination.kind === 'trash'
+        ? 'gallery'
         : destination.kind === 'complete-export'
           || destination.kind === 'guest-gallery-return'
           ? 'gallery'
@@ -2223,19 +2030,17 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       settingsAutosave.current?.flush();
       appearanceAutosave.current?.flush();
     }
-    if (next === section) {
+    if (next === section && managerHref(eventId, managerLocationForDestination(destination)) === canonicalManagerHref) {
       if (destination.kind === 'recently-deleted') {
         recentlyDeletedFocusRequested.current = destination.focusMediaId;
         setRecentlyDeletedIntentGuidance(false);
-        setIntakeMode('trash');
+        settleRecentlyDeletedIntentFocus();
       } else if (destination.kind === 'complete-export') {
-        completeExportFocusRequested.current = true;
         galleryWorkspace.current?.focusCompleteExport();
-        completeExportFocusRequested.current = false;
       } else if (destination.kind === 'settings-repair') {
         setGuestGallerySettingsReturn(null);
         settingsFocusRequested.current = true;
-        setSettingsFocusEpoch((current) => current + 1);
+        setSettingsFocusEpoch(current => current + 1);
       }
       return;
     }
@@ -2341,10 +2146,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
 
   // Initial focus is Keep photo, every time the dialog opens.
   useEffect(() => {
-    if (trashCandidate) trashKeepButton.current?.focus();
-  }, [trashCandidate]);
-
-  useEffect(() => {
     if (!settingsFocusRequested.current || section !== 'settings') return;
     settingsFocusRequested.current = false;
     settingsHeading.current?.focus();
@@ -2357,92 +2158,66 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       !completeExportFocusRequested.current
       || section !== 'gallery'
       || galleryMode !== 'library'
+      || libraryTrash
       || galleryWorkspace.current === null
     ) return;
     completeExportFocusRequested.current = false;
     galleryWorkspace.current.focusCompleteExport();
   }, [event, galleryMode, section]);
+  useLayoutEffect(() => {
+    if (libraryTrash) {
+      if (ordinaryTrashFocusRequested.current) {
+        ordinaryTrashFocusRequested.current = false;
+        trashHeading.current?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (returnFromTrash.current) { returnFromTrash.current = false; trashTrigger.current?.focus({ preventScroll: true }); }
+    if (libraryHeadingFocusRequested.current) { libraryHeadingFocusRequested.current = false; document.getElementById('gallery-workspace-title')?.focus(); }
+  }, [libraryTrash, event]);
   function settleRecentlyDeletedIntentFocus(): boolean {
     const requestedId = recentlyDeletedFocusRequested.current;
     if (
       !requestedId
-      || section !== 'intake'
-      || intakeMode !== 'trash'
-      || intakePage?.mode !== 'trash'
-      || intakeResource.state.status !== 'ready'
+      || !libraryTrash
+      || trashPage?.mode !== 'trash'
+      || trashResource.state.status !== 'ready'
+      // reload retires the generation synchronously, before its loading state
+      // renders. Do not consume a recovery target against that old ready page.
+      || trashResource.state.generation !== trashResource.capture().generation
     ) return false;
-    const restore = intakePage.firstPageIds.has(requestedId)
-      ? trashRestoreButtons.current.get(requestedId) ?? null
-      : null;
-    recentlyDeletedFocusRequested.current = null;
+    const restore = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-restore-media-id]'))
+      .find(button => button.dataset.restoreMediaId === requestedId) ?? null;
     if (restore) {
+      recentlyDeletedFocusRequested.current = null;
+      trashTargetPages.current = null;
       setRecentlyDeletedIntentGuidance(false);
       restore.focus();
       return true;
     }
-    setRecentlyDeletedIntentGuidance(intakePage.cursor !== null);
-    intakeHeading.current?.focus();
+    if (trashPage.cursor !== null && !trashPage.rows.some(row => row.id === requestedId)) {
+      if (trashTargetPages.current?.id !== requestedId) {
+        trashTargetPages.current = { id: requestedId, cursors: new Set() };
+      }
+      // One attempt per cursor; a failed read retains the target and leaves the
+      // existing Load more/error controls in charge of an explicit retry.
+      if (!loadingMore && !trashTargetPages.current.cursors.has(trashPage.cursor)) {
+        trashTargetPages.current.cursors.add(trashPage.cursor);
+        void loadMoreMedia();
+      }
+      setRecentlyDeletedIntentGuidance(true);
+      return false;
+    }
+    recentlyDeletedFocusRequested.current = null;
+    trashTargetPages.current = null;
+    setRecentlyDeletedIntentGuidance(trashPage.cursor !== null);
+    trashHeading.current?.focus();
     return true;
   }
 
   useLayoutEffect(() => {
     settleRecentlyDeletedIntentFocus();
-  }, [intakeMode, intakePage, intakeResource.state.status, nextMediaCursor, section]);
-
-  function adoptPublicationRows(changed: MediaView[]) {
-    const changedById = new Map(changed.map((item) => [item.id, item]));
-    intakeResource.update((current) => {
-      if (!current || current.mode !== 'active') return current;
-      return {
-        ...current,
-        rows: current.rows
-          .map((item) => changedById.get(item.id) ?? item)
-          .filter((item) => status === 'all' || item.publicationStatus === status),
-      };
-    });
-  }
-
-  async function changePublication(item: MediaView, action: 'publish' | 'hide' | 'delete') {
-    const scope = eventScope.current.generation;
-    const result = await eventWrite(() => api<{ media: MediaView }>(`/api/manage/events/${eventId}/media/${item.id}`, {
-      method: 'PATCH', body: JSON.stringify({ action, expectedStatus: item.publicationStatus }),
-    }));
-    if (eventScope.current.generation !== scope) return result.media;
-    adoptPublicationRows([result.media]);
-    return result.media;
-  }
-
-  /**
-   * Where focus goes after a photo leaves Intake.
-   *
-   * Next card, previous card, then the heading — resolved *before* the row is
-   * removed, because after the removal the element the host was on is gone and
-   * the browser has already dropped focus to `<body>`. The resolved element is
-   * also the Undo bar's return origin, so closing the offer puts the host back
-   * exactly where they were rather than at the top of the page.
-   */
-  function resolveIntakeFallback(mediaId: string): HTMLElement | null {
-    const cards = Array.from(document.querySelectorAll<HTMLElement>('[data-intake-card]'));
-    const index = cards.findIndex((card) => card.dataset.intakeCard === mediaId);
-    if (index === -1) return intakeHeading.current;
-    const next = cards[index + 1] ?? cards[index - 1] ?? null;
-    const focusable = next?.querySelector<HTMLElement>('button, a[href]') ?? next;
-    return focusable ?? intakeHeading.current;
-  }
-
-  function openTrashConfirmation(item: MediaView, origin: HTMLElement | null) {
-    trashOrigin.current = origin;
-    setTrashCandidate(item);
-  }
-
-  function closeTrashConfirmation() {
-    setTrashCandidate(null);
-    // Cancelling sent no request, so the host is returned to the control they
-    // opened it from rather than to wherever the dialog happened to leave focus.
-    const origin = trashOrigin.current;
-    trashOrigin.current = null;
-    origin?.focus();
-  }
+  }, [libraryTrash, trashPage, trashResource.state.status, nextMediaCursor, loadingMore, section]);
 
   /**
    * Move one photo to Recently deleted.
@@ -2452,44 +2227,36 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
    * server's `restoreUntil` — it does not exist until this transition is
    * accepted, so nothing here predicts it.
    */
-  async function confirmTrash(item: MediaView, activation: 'keyboard' | 'pointer') {
-    if (trashPending || !managerUndo.canPresent) return;
+  async function confirmTrash(item: Pick<MediaView, 'id' | 'caption' | 'originalFilename' | 'guestName'>, activation: 'keyboard' | 'pointer'): Promise<TrashOutcome> {
+    if (trashWritePending.current || !managerUndo.canPresent) return { status: 'retired' };
+    trashWritePending.current = true;
     const scope = eventScope.current.generation;
     // A confirmed trash transition supersedes the idle/failed recovery offer.
     // Retire it before this request yields so it cannot begin running and lock
     // out the new restore offer after the server accepts the trash.
     managerUndo.dismiss();
     setTrashPending(true);
-    const fallback = resolveIntakeFallback(item.id);
+    const fallback = document.querySelector<HTMLElement>('.gallery-private')
+        ?? document.querySelector<HTMLElement>('#gallery-workspace-title');
+    const destination = 'Trash';
     try {
       const { media: trashed } = await eventWrite(() => api<{ media: TrashedMediaView }>(
         `/api/manage/events/${eventId}/media/${item.id}/trash`,
         { method: 'POST', body: '{}' },
       ));
-      if (eventScope.current.generation !== scope) return;
-      setTrashCandidate(null);
-      trashOrigin.current = null;
-      // Remove the card here rather than reloading the page: the host is looking
-      // at the grid, and a reload would move everything under them.
-      intakeResource.update((current) => (current && current.mode === 'active'
-        ? { ...current, rows: current.rows.filter(({ id }) => id !== item.id) }
-        : current));
-      // Trash changed stored counts and bytes, Gallery membership, the current
-      // Intake question, and what the Guestbook feed shows. Manager owns all
-      // four reads and retires them together; no child ref participates.
-      invalidateGalleryAfterMutation();
-      fallback?.focus();
+      if (eventScope.current.generation !== scope) return { status: 'retired' };
+          invalidateGalleryAfterMutation({ kind: 'trashed', mediaIds: [item.id] });
       const deadline = formatRetentionDate(trashed.restoreUntil, event?.eventTimezone ?? 'UTC')
         ?? TIME_UNAVAILABLE;
       const name = trashed.caption || trashed.originalFilename;
       setRecoveryAnnouncement(
-        `${name} moved to Recently deleted. Restore is available until ${deadline}.`,
+        `${name} moved to ${destination}. Restore is available until ${deadline}.`,
       );
       const inverseEventId = eventId;
       const inverseMediaId = trashed.id;
       managerUndo.present({
         eventId: inverseEventId,
-        message: `${name} moved to Recently deleted. The original is retained until ${deadline}.`,
+        message: `${name} moved to ${destination}. The original is retained until ${deadline}.`,
         durationMs: TRASH_UNDO_WINDOW_MS,
         absoluteDeadline: trashed.restoreUntil,
         input: activation,
@@ -2502,39 +2269,51 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           } finally {
             // A lost response or deadline race is uncertain too. Reconcile the
             // same canonical owners before the provider exposes Retry.
-            invalidateGalleryAfterMutation();
+            if (eventScope.current.generation === scope) {
+              invalidateGalleryAfterMutation({ kind: 'restored', mediaIds: [inverseMediaId] });
+            }
           }
         },
       }, { fallback });
+      return { status: 'trashed', media: trashed };
     } catch (caught) {
       if (eventScope.current.generation === scope) {
-        reportManagerActionFailure(caught, 'This photo could not be moved to Recently deleted.', scope);
-        setTrashCandidate(null);
-        trashOrigin.current?.focus();
-        trashOrigin.current = null;
+        reportManagerActionFailure(caught, `This photo could not be moved to ${destination}.`, scope);
+                throw caught;
       }
+      return { status: 'retired' };
     } finally {
+      trashWritePending.current = false;
       if (eventScope.current.generation === scope) setTrashPending(false);
     }
   }
 
-  async function restoreFromTrashRow(row: TrashedMediaView) {
+  async function restoreFromTrashRow(row: TrashedMediaView, origin?: HTMLButtonElement) {
+    if (restoringTrashIds.current.has(row.id)) return;
+    restoringTrashIds.current.add(row.id);
+    setTrashRestorePendingIds(new Set(restoringTrashIds.current));
     const scope = eventScope.current.generation;
     const name = row.caption || row.originalFilename;
-    const fallback = resolveIntakeFallback(row.id) ?? trashHeading.current;
-    await runManagerAction(async () => {
+    const fallback = trashHeading.current;
+    try { await runManagerAction(async () => {
       await eventWrite(() => api(
         `/api/manage/events/${eventId}/media/${row.id}/restore`,
         { method: 'POST', body: '{}' },
       ));
       if (eventScope.current.generation !== scope) return;
-      intakeResource.update((current) => (current && current.mode === 'trash'
+      trashResource.update((current) => (current && current.mode === 'trash'
         ? { ...current, rows: current.rows.filter(({ id }) => id !== row.id) }
         : current));
-      setRecoveryAnnouncement(`${name} is back in Live intake.`);
-      invalidateGalleryAfterMutation();
+      setRecoveryAnnouncement(`${name} is back in Library.`);
+      invalidateGalleryAfterMutation({ kind: 'restored', mediaIds: [row.id] });
       fallback?.focus();
-    });
+    }); } finally {
+      restoringTrashIds.current.delete(row.id);
+      if (eventScope.current.generation === scope) {
+        setTrashRestorePendingIds(new Set(restoringTrashIds.current));
+        if (origin?.isConnected && document.activeElement === document.body) origin.focus();
+      }
+    }
   }
 
   function adoptAcceptedExport(job: ExportView) {
@@ -2878,7 +2657,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     recheckPhotoIntake,
     event ? managerLifecycleKey(event) : null,
   );
-  const selectionAtLimit = selected.length >= MANAGER_BULK_SELECTION_MAX;
   const activeAlbumLeaveAttempt = albumLeaveAttempt && (
     albumLeaveAttempt.destination.kind !== 'router'
     || (
@@ -2899,154 +2677,24 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
    * its guest, its caption — and the server's answer about how long Restore lasts.
    */
   function renderTrashList() {
-    if (!intakePage && (
-      intakeResource.state.status === 'idle'
-      || intakeResource.state.status === 'loading'
+    if (!trashPage && (
+      trashResource.state.status === 'idle'
+      || trashResource.state.status === 'loading'
     )) {
-      return <LoadingState label="Opening Recently deleted…" />;
+      return <LoadingState label="Opening Trash…" />;
     }
-    if (intakeResource.state.status === 'failed' && !intakePage) return null;
-    if (!trashRows.length) {
-      return <div className="empty-state">
-        <Trash2 aria-hidden="true" />
-        <h3>Nothing in Recently deleted.</h3>
-        <p>Photos you remove stay here, and keep using this event's capacity, until you restore them or their recovery ends.</p>
-      </div>;
-    }
-    const zone = event?.eventTimezone ?? 'UTC';
-    return <>
-      <ul className="trash-list">{trashRows.map((row) => {
-        const deadline = formatRetentionDate(row.restoreUntil, zone);
-        const expired = Date.parse(row.restoreUntil) <= trashNow;
-        const name = row.caption || row.originalFilename;
-        return <li key={row.id} data-intake-card={row.id}>
-          <div>
-            <strong title={name}>{name}</strong>
-            <small>From {row.guestName}</small>
-            {expired
-              ? <small className="trash-list__state">Recovery expired · cleanup pending</small>
-              : <small className="trash-list__state">Restore until {deadline === null
-                  ? TIME_UNAVAILABLE
-                  : <time dateTime={row.restoreUntil}>{deadline}</time>}</small>}
-          </div>
-          {/* No Restore past the deadline. An accepted export may still be holding
-              the bytes, which is why the row is here at all, but recovery is over. */}
-          {!expired && <button
-            ref={(button) => {
-              if (button) trashRestoreButtons.current.set(row.id, button);
-              else trashRestoreButtons.current.delete(row.id);
-            }}
-            type="button"
-            className="button button--secondary"
-            aria-label={`Restore ${row.originalFilename}`}
-            data-restore-media-id={row.id}
-            onClick={() => void restoreFromTrashRow(row)}
-          ><RotateCcw aria-hidden="true" /> Restore</button>}
-        </li>;
-      })}</ul>
-      {nextMediaCursor && <div className="media-more">
-        <button type="button" className="button button--secondary" disabled={loadingMore} onClick={() => void loadMoreMedia()}>Load more</button>
-      </div>}
-    </>;
-  }
-
-  function renderMediaGrid(publicationControls: boolean) {
-    if (!intakePage && (
-      intakeResource.state.status === 'idle'
-      || intakeResource.state.status === 'loading'
-    )) {
-      return <LoadingState label="Opening the live intake…" />;
-    }
-    // A failed new query has no authoritative answer. The recovery panel above
-    // explains the failure; calling an unanswered query empty would be false.
-    if (intakeResource.state.status === 'failed' && !intakePage) return null;
-    if (!media.length) {
-      if (status !== 'all' || guestFilter) {
-        return <div className="empty-state">
-          <ImageIcon aria-hidden="true" />
-          <h3>No matching photos</h3>
-          <p>No delivered photos match the active filters.</p>
-          <button
-            type="button"
-            className="button button--secondary"
-            onClick={() => {
-              setStatus('all');
-              setSearchInput('');
-              setGuestFilter('');
-            }}
-          >Clear filters</button>
-        </div>;
-      }
-      return <div className="empty-state">
-        <ImageIcon aria-hidden="true" />
-        <h3>No photos yet</h3>
-        <p>Guests&apos; photos arrive privately here.</p>
-        <div className="button-row">
-          <button
-            type="button"
-            className="button button--primary"
-            onClick={() => { void openSection('share'); }}
-          >Share event</button>
-          <button
-            type="button"
-            className="button button--secondary"
-            aria-disabled={!hostUploadAvailability.enabled}
-            aria-describedby={hostUploadUnavailableMessage === null
-              ? undefined
-              : 'empty-host-upload-unavailable-reason'}
-            onClick={(click) => openManagerUpload(click.currentTarget)}
-          >Add photos</button>
-        </div>
-        {hostUploadUnavailableMessage !== null && <p
-          id="empty-host-upload-unavailable-reason"
-          className="intake-note"
-        >{hostUploadUnavailableMessage}</p>}
-      </div>;
-    }
-    return <>
-      <div className="moderation-grid intake-grid">{media.map((item) => {
-        const isSelected = selected.includes(item.id);
-        const selectionUnavailable = !isSelected && selectionAtLimit;
-        return <article className={isSelected ? 'selected' : ''} key={item.id} data-intake-card={item.id}>
-          <div className="intake-photo">
-            {publicationControls && <label className="intake-select"><input
-              type="checkbox"
-              aria-label={`Select ${item.originalFilename}`}
-              aria-describedby={selectionUnavailable ? 'bulk-selection-status' : undefined}
-              checked={isSelected}
-              disabled={selectionUnavailable}
-              onChange={(change) => setSelected((current) => {
-                if (!change.target.checked) return current.filter((id) => id !== item.id);
-                if (current.includes(item.id) || current.length >= MANAGER_BULK_SELECTION_MAX) return current;
-                return [...current, item.id];
-              })}
-            /></label>}
-            <img src={mediaPreview(item.id)} alt={item.caption || item.originalFilename} loading="lazy" decoding="async" />
-          </div>
-          <div>
-            <span className={`publication publication--${item.publicationStatus}`}>{item.publicationStatus}</span>
-            <strong title={item.caption || item.originalFilename}>{item.caption || item.originalFilename}</strong>
-            <small>From {item.guestName}</small>
-            <div className="intake-card-actions">
-              <a href={mediaOriginal(item.id)} download aria-label={`Download original ${item.originalFilename}`}><Download aria-hidden="true" /></a>
-              {publicationControls && item.publicationStatus !== 'published' && <button aria-label={`Publish ${item.originalFilename}`} onClick={() => void runManagerAction(async () => { await changePublication(item, 'publish'); })}><Eye aria-hidden="true" /></button>}
-              {publicationControls && item.publicationStatus !== 'hidden' && <button aria-label={`Hide ${item.originalFilename}`} onClick={() => void runManagerAction(async () => { await changePublication(item, 'hide'); })}><EyeOff aria-hidden="true" /></button>}
-              {/* Opens the confirmation. No request is sent from here: the exact
-                  recovery deadline does not exist until the server accepts the
-                  transition, so nothing may be started before the host agrees. */}
-              <button
-                aria-label={`Move ${item.originalFilename} to Recently deleted`}
-                disabled={!managerUndo.canPresent}
-                onClick={(click) => openTrashConfirmation(item, click.currentTarget)}
-              ><Trash2 aria-hidden="true" /></button>
-            </div>
-          </div>
-        </article>;
-      })}</div>
-      {nextMediaCursor && <div className="media-more">
-        <button type="button" className="button button--secondary" disabled={loadingMore} onClick={() => void loadMoreMedia()}>Load more photos</button>
-      </div>}
-    </>;
+    if (trashResource.state.status === 'failed' && !trashPage) return null;
+    return <ManagerLibraryTrash
+      rows={trashRows}
+      now={trashNow}
+      timeZone={event?.eventTimezone ?? 'UTC'}
+      pendingIds={trashRestorePendingIds}
+      hasMore={nextMediaCursor !== null}
+      loadingMore={loadingMore}
+      onRestore={(row, origin) => void restoreFromTrashRow(row, origin)}
+      onLoadMore={() => void loadMoreMedia()}
+      onBackToLibrary={() => { returnFromTrash.current = true; requestSectionDestination({ kind: 'section', section: 'gallery' }); }}
+    />;
   }
 
   // Offered for the plain no-credential state as well as a dead account session: a
@@ -3104,7 +2752,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     managerUploadOwner.current = {
       eventId,
       eventGeneration: eventScope.current.generation,
-      finalizedMediaIds: new Set(),
+      finalizedMediaIds: finalizedMediaIds.current,
     };
     setManagerUploadOpen(true);
   }
@@ -3121,6 +2769,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       && managerLinkRotation.saveStatus === 'copied'
     );
   const librarySurface = section === 'gallery' && (galleryMode === 'library' || galleryMode === 'album');
+  const compactEventHeader = librarySurface || !wideViewport;
   const uploadStatus = <span className={`status status--${uploadChip.tone}`}>{uploadChip.tone === 'approved' ? <Check aria-hidden="true" /> : <EyeOff aria-hidden="true" />} {uploadChip.label}</span>;
   const managementDeadline = formatEventDateTime(event.managementAccessExpiresAt, event.eventTimezone);
   const lifecycle = <div className="lifecycle"><p><strong>{photoCount}</strong> delivered photos</p><p><strong>{formatBytes(event.storedBytes)}</strong> of {STORAGE_CAP} used</p><p>Files delete <strong>{purgeAfterDisplay === null
@@ -3130,24 +2779,24 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       : <time dateTime={event.managementAccessExpiresAt}>{managementDeadline}</time>}</strong></p></div>;
   return <>
     {createPortal(
-      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{galleryAnnouncement}</p>,
+      <><p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{galleryAnnouncement}</p>
+        <ManagerUndoBar /></>,
       galleryLiveHost,
     )}
     <div className="manager-shell manager-shell--intake">
     {/* The brand and the section navigation, which is a banner rather than complementary content. As
         an `aside` this announced a second unnamed complementary landmark beside the utility rail —
         `landmark-unique` — and as a plain `div` the brand fell outside every landmark — `region`. */}
-    <header className="manager-nav"><Brand compact /><nav aria-label="Manager sections">
-      <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'intake'} className={section === 'intake' ? 'active' : ''} onClick={() => { void openSection('intake'); }}><Inbox aria-hidden="true" /><span className="manager-nav__label">Intake</span>{photoCount > 0 && <span className="manager-nav__count">{photoCount}</span>}</button>
-      <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => { void openSection('rsvp'); }}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
+    <ManagerNavigation section={section} navigationKey={canonicalManagerHref} mobile={!wideViewport} reviewCount={guestbookSummary?.needsReviewCount ?? 0} liveHost={galleryLiveHost}>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'gallery'} className={section === 'gallery' ? 'active' : ''} onClick={() => { void openSection('gallery'); }}><ImageIcon aria-hidden="true" /><span className="manager-nav__label">Gallery</span></button>
+      <button aria-pressed={section === 'rsvp'} className={section === 'rsvp' ? 'active' : ''} onClick={() => { void openSection('rsvp'); }}><ClipboardCheck aria-hidden="true" /><span className="manager-nav__label">RSVP</span></button>
       <button aria-label={guestbookSummary?.needsReviewCount ? `Guestbook ${guestbookSummary.needsReviewCount}` : 'Guestbook'} disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'guestbook'} className={section === 'guestbook' ? 'active' : ''} onClick={() => { void openSection('guestbook'); }}><MessageCircle aria-hidden="true" /><span className="manager-nav__label">Guestbook</span>{Boolean(guestbookSummary?.needsReviewCount) && <span className="manager-nav__count" aria-hidden="true">{guestbookSummary?.needsReviewCount}</span>}</button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'share'} className={section === 'share' ? 'active' : ''} onClick={() => { void openSection('share'); }}><LinkIcon aria-hidden="true" /><span className="manager-nav__label">Share</span></button>
       <button disabled={rsvpCommitPending && section === 'rsvp'} aria-pressed={section === 'settings'} className={section === 'settings' ? 'active' : ''} onClick={() => { void openSection('settings'); }}><Settings aria-hidden="true" /><span className="manager-nav__label">Settings</span></button>
-    </nav></header>
+    </ManagerNavigation>
 
     <main className="manager-main">
-      {librarySurface ? <header className="manager-title manager-title--library">
+      {compactEventHeader ? <header className="manager-title manager-title--library">
         <h1>{event.name}</h1>
         <details className="library-event-details">
           <summary>Event details</summary>
@@ -3159,7 +2808,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         recoveryHint={eventResource.state.failure.recoveryHint}
         onRetry={() => void eventResource.reload()}
       />}
-      {!librarySurface && lifecycle}
+      {!compactEventHeader && lifecycle}
 
       {visibleNotice && <section
         className="manager-action-error"
@@ -3204,7 +2853,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {recoveryAnnouncement}
       </p>
-      <ManagerUndoBar />
 
       {section !== 'gallery' && activeExport && (
         <section className="manager-export-compact export-state" role="region" aria-label="Export progress">
@@ -3236,71 +2884,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         </section>
       )}
 
-      {section === 'intake' && <section aria-labelledby="intake-title">
-        <div className="workspace-heading"><div>
-          <p className="section-label">Delivered photos</p>
-          <h2 id="intake-title" tabIndex={-1} ref={intakeHeading}>
-            {intakeMode === 'trash' ? 'Recently deleted' : 'Live intake'}
-          </h2>
-        </div>{intakeMode === 'active' && <div className="intake-upload-action">
-          <button
-            ref={addPhotosTrigger}
-            type="button"
-            className="button button--primary"
-            aria-disabled={!hostUploadAvailability.enabled}
-            aria-describedby={hostUploadUnavailableMessage === null
-              ? undefined
-              : 'host-upload-unavailable-reason'}
-            onClick={(click) => openManagerUpload(click.currentTarget)}
-          >Add photos</button>
-          {hostUploadUnavailableMessage !== null && <p
-            id="host-upload-unavailable-reason"
-            className="intake-note"
-          >{hostUploadUnavailableMessage}</p>}
-        </div>}</div>
-        {/* Show only the place the host can go next. The current collection is
-            already named by the heading, so repeating it as a selected control
-            adds state without adding a choice. */}
-        <div className="intake-modes">
-          {intakeMode === 'active'
-            ? <button type="button" onClick={() => chooseIntakeMode('trash')}>
-                Trash{event.recoverableMediaCount > 0 ? ` (${event.recoverableMediaCount})` : ''}
-              </button>
-            : <button type="button" onClick={() => chooseIntakeMode('active')}>
-                Live intake
-              </button>}
-        </div>
-        {intakeMode === 'trash'
-          ? <>
-              <p className="intake-note" ref={trashHeading} tabIndex={-1}>
-                These photos still use this event's capacity until they are restored or their
-                recovery ends.
-              </p>
-              {showRecentlyDeletedIntentGuidance && <p className="intake-note">
-                The retained photo may be under Load more.
-              </p>}
-              {intakeResource.state.failure && <ErrorState
-                message={intakeResource.state.failure.message}
-                recoveryHint={intakeResource.state.failure.recoveryHint}
-                onRetry={() => void intakeResource.reload()}
-              />}
-              {renderTrashList()}
-            </>
-          : <>
-              <form className="intake-search" onSubmit={(formEvent) => { formEvent.preventDefault(); setGuestFilter(searchInput.trim()); }}>
-                <label><span className="sr-only">Filter by guest name</span><Search aria-hidden="true" /><input aria-label="Filter by guest name" value={searchInput} onChange={(change) => setSearchInput(change.target.value)} placeholder="Find a guest by name" /></label>
-                <button className="button button--secondary">Filter</button>
-                {guestFilter && <button type="button" className="text-button" onClick={() => { setStatus('all'); setSearchInput(''); setGuestFilter(''); }}>Clear</button>}
-              </form>
-              {intakeResource.state.failure && <ErrorState
-                message={intakeResource.state.failure.message}
-                recoveryHint={intakeResource.state.failure.recoveryHint}
-                onRetry={() => void intakeResource.reload()}
-              />}
-              {renderMediaGrid(false)}
-            </>}
-      </section>}
-
       {/* Mounted only from its own destination, so the CSV, household, and totals
           requests never join the manager's initial load. */}
       {section === 'rsvp' && <ManagerRsvpPanel
@@ -3324,6 +2907,17 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         mode={galleryMode}
         onModeChange={requestGalleryMode}
         galleryMutationEpoch={galleryMutationEpoch}
+        libraryChange={libraryChange}
+        fileActions={{ canTrash: !trashPending && managerUndo.canPresent, trash: confirmTrash }}
+        librarySuspended={libraryTrash}
+        libraryActions={<><button ref={addPhotosTrigger} type="button" className="button button--primary" aria-disabled={!hostUploadAvailability.enabled} onClick={click => openManagerUpload(click.currentTarget)}>Add photos</button>{hostUploadUnavailableMessage && <p className="library-note">{hostUploadUnavailableMessage}</p>}</>}
+        trashAction={<button ref={trashTrigger} type="button" className="text-button library-trash-trigger" onClick={(click) => {
+          ordinaryTrashFocusRequested.current = click.detail === 0;
+          requestSectionDestination({ kind: 'trash' });
+        }}>Trash{recoverableCount > 0 ? ` (${recoverableCount})` : ''}</button>}
+        trashContent={<section aria-labelledby="library-trash-title"><h2 id="library-trash-title" tabIndex={-1} ref={trashHeading}>Trash</h2><p className="library-note">These photos still use this event's capacity until they are restored or their recovery ends.</p>{showRecentlyDeletedIntentGuidance && <p>The retained photo may be under Load more.</p>}{trashResource.state.failure && <ErrorState message={trashResource.state.failure.message} recoveryHint={trashResource.state.failure.recoveryHint} onRetry={() => void trashResource.reload()} />}{renderTrashList()}</section>}
+        libraryReadsPaused={rotationResourcesPaused || managerUploadOpen}
+        onArrivalsAccepted={() => { void eventResource.invalidate(); void audienceResource.invalidate(); }}
         libraryInvalidationVersion={managerUploadLibrarySignal.eventId === eventId
           && managerUploadLibrarySignal.eventGeneration === eventScope.current.generation
           ? managerUploadLibrarySignal.version
@@ -3332,7 +2926,6 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         audience={audienceAuthority}
         onAnnouncement={setGalleryAnnouncement}
         shared={{
-          onPublicationChanged: adoptPublicationRows,
           onOpenRecentlyDeleted: openRecentlyDeleted,
           // The filter travels through Manager's one-use Settings intent after
           // the same guest-list, autosave, Album, and anchor settlement gates.
@@ -3793,85 +3386,11 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       an export already prepared keeps its own copy. The exact deadline is
       deliberately absent — it does not exist until the server accepts this.
     */}
-    {trashCandidate && <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={(press) => { if (press.target === press.currentTarget) closeTrashConfirmation(); }}
-    >
-      <div
-        ref={trashDialog}
-        className="modal-card"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="trash-confirm-title"
-        aria-describedby="trash-confirm-body"
-        onKeyDown={(key) => {
-          if (key.key === 'Escape') {
-            key.stopPropagation();
-            closeTrashConfirmation();
-            return;
-          }
-          if (key.key !== 'Tab') return;
-          const focusable = Array.from(
-            trashDialog.current?.querySelectorAll<HTMLElement>('button') ?? [],
-          );
-          const first = focusable[0];
-          const last = focusable[focusable.length - 1];
-          if (!first || !last) return;
-          if (key.shiftKey && document.activeElement === first) {
-            key.preventDefault();
-            last.focus();
-          } else if (!key.shiftKey && document.activeElement === last) {
-            key.preventDefault();
-            first.focus();
-          }
-        }}
-      >
-        <h2 id="trash-confirm-title">Move this photo to Recently deleted?</h2>
-        <div id="trash-confirm-body">
-          <p><strong>{trashCandidate.caption || trashCandidate.originalFilename}</strong> from {trashCandidate.guestName}.</p>
-          <p>
-            From now on it is removed from Library, Album, the Guest gallery, and a live Album
-            link. Pages already open, and copies anyone has already downloaded, cannot be recalled.
-          </p>
-          <p>
-            You can restore it for up to 30 days — never past your management access or the event's
-            deletion date, whichever comes first. Until then the photo keeps using this event's
-            photo and storage capacity.
-          </p>
-          <p>
-            An export you have already prepared keeps its own copy of this photo. Removing it here
-            does not change a ZIP that is already made.
-          </p>
-        </div>
-        <div className="modal-actions">
-          {/* Initial focus, and never the destructive one. */}
-          <button
-            type="button"
-            ref={trashKeepButton}
-            className="button button--secondary"
-            disabled={trashPending}
-            onClick={closeTrashConfirmation}
-          >Keep photo</button>
-          <button
-            type="button"
-            className="button button--danger"
-            disabled={trashPending || !managerUndo.canPresent}
-            onClick={(click) => {
-              // Pointer activation leaves focus where the host put it; keyboard
-              // activation has just removed a control from under them, so the
-              // Undo offer becomes where focus belongs.
-              const activation = click.detail === 0 ? 'keyboard' : 'pointer';
-              void confirmTrash(trashCandidate, activation);
-            }}
-          >{trashPending ? 'Moving…' : 'Move to Recently deleted'}</button>
-        </div>
-      </div>
-    </div>}
+
 
     <aside className="manager-utility">
       <section className="manager-utility__guest-entry"><p className="section-label">Event entry</p><h2>Scan to join</h2>{qr && <img className="intake-qr" src={qr} alt="Event QR code" />}<button type="button" className="button button--secondary button--wide" disabled={!eventLink} onClick={() => void copyEventLink()}><Copy aria-hidden="true" /> Copy event link</button></section>
-      <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>Delivered photos</span></div><div className="meter"><span style={{ width: `${Math.min(100, (heldCount / MAX_EVENT_MEDIA) * 100)}%` }} /></div><small>{heldCount.toLocaleString()} of {PHOTO_CAP} · {formatBytes(heldBytes)} of {STORAGE_CAP}</small>{recoverableCount > 0 && <small className="manager-utility__recoverable">Includes {recoverableCount.toLocaleString()} in Recently deleted, held until restored or cleaned up</small>}</section>
+      <section className="manager-utility__capacity"><p className="section-label">Event capacity</p><div className="stat"><strong>{photoCount}</strong><span>Delivered photos</span></div><div className="meter"><span style={{ width: `${Math.min(100, (heldCount / MAX_EVENT_MEDIA) * 100)}%` }} /></div><small>{heldCount.toLocaleString()} of {PHOTO_CAP} · {formatBytes(heldBytes)} of {STORAGE_CAP}</small>{recoverableCount > 0 && <small className="manager-utility__recoverable">Includes {recoverableCount.toLocaleString()} in Trash, held until restored or cleaned up</small>}</section>
     </aside>
     </div>
   </>;

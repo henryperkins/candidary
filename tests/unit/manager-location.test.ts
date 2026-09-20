@@ -14,29 +14,32 @@ const EVENT = '11111111-2222-4333-8444-555555555555';
 
 describe('manager location parser and serializer', () => {
   it.each([
-    ['', { section: 'intake' }, ''],
-    ['?section=intake', { section: 'intake' }, ''],
+    ['', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=intake', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=gallery&view=trash', { section: 'gallery', mode: 'library', view: 'trash' }, '?section=gallery&view=trash'],
+    ['?section=gallery&mode=album&view=trash', { section: 'gallery', mode: 'album' }, '?section=gallery&mode=album'],
+    ['?section=gallery&view=wrong', { section: 'gallery', mode: 'library' }, ''],
     ['?section=rsvp', { section: 'rsvp' }, '?section=rsvp'],
     ['?section=guestbook', { section: 'guestbook' }, '?section=guestbook'],
     ['?section=share', { section: 'share' }, '?section=share'],
     ['?section=settings', { section: 'settings' }, '?section=settings'],
-    ['?section=gallery', { section: 'gallery', mode: 'library' }, '?section=gallery'],
-    ['?section=gallery&mode=library', { section: 'gallery', mode: 'library' }, '?section=gallery'],
+    ['?section=gallery', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=gallery&mode=library', { section: 'gallery', mode: 'library' }, ''],
     ['?section=gallery&mode=album', { section: 'gallery', mode: 'album' }, '?section=gallery&mode=album'],
     ['?section=gallery&mode=guest-gallery', { section: 'gallery', mode: 'guest-gallery' }, '?section=gallery&mode=guest-gallery'],
     ['?section=gallery&mode=shared', { section: 'gallery', mode: 'guest-gallery' }, '?section=gallery&mode=guest-gallery'],
-    ['?mode=album', { section: 'intake' }, ''],
-    ['?section=', { section: 'intake' }, ''],
+    ['?mode=album', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=', { section: 'gallery', mode: 'library' }, ''],
     ['?section=%72svp', { section: 'rsvp' }, '?section=rsvp'],
-    ['?section=%52svp', { section: 'intake' }, ''],
+    ['?section=%52svp', { section: 'gallery', mode: 'library' }, ''],
     ['?section=rsvp&mode=album', { section: 'rsvp' }, '?section=rsvp'],
-    ['?section=gallery&mode=', { section: 'gallery', mode: 'library' }, '?section=gallery'],
-    ['?section=gallery&mode=wrong', { section: 'gallery', mode: 'library' }, '?section=gallery'],
-    ['?section=gallery&mode=album&mode=guest-gallery', { section: 'gallery', mode: 'library' }, '?section=gallery'],
-    ['?section=rsvp&section=gallery&mode=album', { section: 'intake' }, ''],
-    ['?section=Gallery', { section: 'intake' }, ''],
-    ['?section=gallery&mode=Album', { section: 'gallery', mode: 'library' }, '?section=gallery'],
-    ['?extra=1', { section: 'intake' }, ''],
+    ['?section=gallery&mode=', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=gallery&mode=wrong', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=gallery&mode=album&mode=guest-gallery', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=rsvp&section=gallery&mode=album', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=Gallery', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=gallery&mode=Album', { section: 'gallery', mode: 'library' }, ''],
+    ['?extra=1', { section: 'gallery', mode: 'library' }, ''],
     ['?section=gallery&mode=album&extra=1', { section: 'gallery', mode: 'album' }, '?section=gallery&mode=album'],
   ] as const)('parses %s to a canonical Manager location', (search, location, canonicalSearch) => {
     const parsed = parseManagerLocation(search);
@@ -69,12 +72,12 @@ describe('manager location parser and serializer', () => {
       '?section=gallery&mode=album',
     );
     expect(serializeManagerSearch({ section: 'gallery', mode: 'library' })).toBe(
-      '?section=gallery',
+      '',
     );
   });
 
   it.each([
-    { section: 'intake' },
+    { section: 'gallery', mode: 'library' },
     { section: 'rsvp' },
     { section: 'guestbook' },
     { section: 'share' },
@@ -130,7 +133,7 @@ describe('manager location paths', () => {
       value.includes('section=gallery') && value.includes('mode=shared')
         ? `/manage/event/${EVENT}?section=gallery&mode=guest-gallery`
         : value.includes('mode=wrong')
-          ? `/manage/event/${EVENT}?section=gallery`
+          ? `/manage/event/${EVENT}`
           : `/manage/event/${EVENT}`,
     );
   });
@@ -138,6 +141,7 @@ describe('manager location paths', () => {
   it.each([
     ['unknown key', `/manage/event/${EVENT}?section=rsvp&extra=1`],
     ['duplicate section', `/manage/event/${EVENT}?section=rsvp&section=gallery`],
+    ['duplicate view', `/manage/event/${EVENT}?section=gallery&view=trash&view=trash`],
     ['duplicate mode', `/manage/event/${EVENT}?section=gallery&mode=album&mode=guest-gallery`],
     ['fragment', `/manage/event/${EVENT}#saved`],
     ['bare fragment', `/manage/event/${EVENT}#`],
