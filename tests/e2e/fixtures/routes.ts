@@ -2370,7 +2370,7 @@ export async function stubLibraryRoutes(page: Page, count = 96, uploadOptions?: 
   const originals = makeMedia(count, 'unpublished');
   await stubManagerRoutes(page, { mediaPages: { first: { media: originals.slice(0, 48), nextCursor: null } }, event: { storedMediaCount: count }, uploads: uploadOptions });
   let sequence = count;
-  let rows = originals.map((row, i) => ({ ...row, receivedAt: row.createdAt, timelineAt: row.createdAt, timelineSource: 'received' as const, isFavorite: i % 2 === 0, previewAvailable: i !== 1, deliverySequence: i + 1 }));
+  let rows: Array<ManagerGalleryMediaView & { createdAt: string; deliverySequence: number }> = originals.map((row, i) => ({ ...row, receivedAt: row.createdAt, timelineAt: row.createdAt, timelineSource: 'received' as const, isFavorite: i % 2 === 0, previewAvailable: i !== 1, deliverySequence: i + 1 }));
   let trash: ManagerTrashedMediaView[] = [];
   const requests: string[] = [];
   let failPoll = false, failRefresh = false, failTrash = false, failContinuation = false;

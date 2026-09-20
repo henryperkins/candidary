@@ -252,7 +252,7 @@ interface GalleryRenderOverrides {
 }
 
 function renderGalleryWithFetch(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: ReturnType<typeof managerFetch>,
   overrides: GalleryRenderOverrides = {},
 ) {
   const implementation = fetchMock.getMockImplementation();
@@ -264,7 +264,7 @@ function renderGalleryWithFetch(
     }
     if (!implementation) throw new Error(`Unexpected request ${method} ${url.pathname}${url.search}`);
     try {
-      return (implementation as (request: RequestInfo | URL, options?: RequestInit) => unknown)(input, init);
+      return implementation(input, init);
     } catch (caught) {
       if (url.pathname === '/api/manage/events/event-a/photo-exports/capabilities'
         && method === 'GET'
@@ -2245,7 +2245,7 @@ describe('host private gallery', () => {
     const user = userEvent.setup();
 
     expect(await screen.findByText(
-      'New delivered photos appear in Live intake as event guests send them.',
+      'Photos added by you or your guests appear here.',
     )).toBeVisible();
     expect(document.body).not.toHaveTextContent(/private deliveries/iu);
     await user.selectOptions(await screen.findByRole('combobox', { name: 'Photos shown' }), 'album');

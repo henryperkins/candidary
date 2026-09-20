@@ -666,7 +666,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     if (pendingChangeKind.current === 'delivered') return;
     // Matching manager signals must not cancel the viewer's post-write continuation.
     if (pendingChangeKind.current === 'trashed' && libraryChange?.mediaIds.length === 1
-      && viewerTrash.current?.id === libraryChange.mediaIds[0]
+      && viewerTrash.current !== null && viewerTrash.current.id === libraryChange.mediaIds[0]
       && viewerTrash.current.owner === currentOwner.current) return;
     cancelContinuation();
     if (!first && loading && loadController.current) {

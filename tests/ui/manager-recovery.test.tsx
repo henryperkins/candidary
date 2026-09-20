@@ -177,7 +177,7 @@ describe('Library manager trash ownership', () => {
   async function openLibrary(options: Parameters<typeof managerFetch>[0] = {}) {
     const fixtures = managerFetch(options);
     await openManager(fixtures.fetchMock);
-    await screen.findByRole('heading', { name: 'Library', exact: true });
+    await screen.findByRole('heading', { name: 'Library' });
     await waitFor(() => expect(document.querySelector('.gallery-mosaic__open')).not.toBeNull());
     return fixtures;
   }
@@ -640,6 +640,72 @@ describe('moving a photo to Trash', () => {
 });
 
 describe('Trash', () => {
+  it('refreshes Trash on every entry after a photo is trashed elsewhere', async () => {
+    const user = userEvent.setup();
+    let retained: typeof TRASHED[] = [];
+    const { fetchMock } = managerFetch({
+      onTrashList: () => json({ media: retained, nextCursor: null }),
+    });
+    await openManager(fetchMock);
+    retained = [TRASHED];
+
+    await user.click(screen.getByRole('button', { name: 'Trash' }));
+    expect(await screen.findByRole('button', { name: 'Restore first-dance.jpg' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Back to Library' }));
+    await screen.findByRole('heading', { name: 'Library' });
+    retained = [{ ...TRASHED, id: SECOND.id, originalFilename: SECOND.originalFilename }];
+
+    await user.click(screen.getByRole('button', { name: 'Trash' }));
+    expect(await screen.findByRole('button', { name: 'Restore cake.jpg' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Restore first-dance.jpg' })).not.toBeInTheDocument();
+  });
+
+  it('waits for the entry refresh before resolving a targeted Trash recovery', async () => {
+    let finish!: (value: Response) => void;
+    const refresh = new Promise<Response>(resolve => { finish = resolve; });
+    let entered = false;
+    const { fetchMock } = managerFetch({
+      onTrashList: () => entered ? refresh : json({ media: [], nextCursor: null }),
+    });
+    const router = await openManager(fetchMock);
+    entered = true;
+
+    await act(async () => { await router.navigate('/manage/event/event-a', { state: {
+      __candidaryManager: { version: 1, eventId: 'event-a', intent: { kind: 'open-recently-deleted', focusMediaId: TRASHED.id } },
+    } }); });
+    expect(await screen.findByRole('heading', { name: 'Trash' })).not.toHaveFocus();
+
+    await act(async () => { finish(await json({ media: [TRASHED], nextCursor: null })); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore first-dance.jpg' })).toHaveFocus());
+  });
+
+  it('retains Trash rows through a failed entry refresh and resolves the target after Retry', async () => {
+    const user = userEvent.setup();
+    let finish!: (value: Response) => void;
+    const refresh = new Promise<Response>(resolve => { finish = resolve; });
+    let entered = false;
+    let retried = false;
+    const target = { ...TRASHED, id: SECOND.id, originalFilename: SECOND.originalFilename };
+    const { fetchMock } = managerFetch({
+      onTrashList: () => !entered ? json({ media: [TRASHED], nextCursor: null })
+        : retried ? json({ media: [TRASHED, target], nextCursor: null }) : refresh,
+    });
+    const router = await openManager(fetchMock);
+    entered = true;
+
+    await act(async () => { await router.navigate('/manage/event/event-a', { state: {
+      __candidaryManager: { version: 1, eventId: 'event-a', intent: { kind: 'open-recently-deleted', focusMediaId: target.id } },
+    } }); });
+    expect(await screen.findByRole('button', { name: 'Restore first-dance.jpg' })).toBeVisible();
+    await act(async () => { finish(await apiError('INTERNAL_ERROR', 'Trash refresh failed.', 500)); });
+    expect(await screen.findByText('Trash refresh failed.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Restore first-dance.jpg' })).toBeVisible();
+    retried = true;
+
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore cake.jpg' })).toHaveFocus());
+  });
+
   it('moves focus to the Trash heading after ordinary keyboard entry', async () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch({ trash: [TRASHED] });

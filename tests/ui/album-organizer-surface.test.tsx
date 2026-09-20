@@ -131,7 +131,7 @@ describe('Album organizer surface', () => {
     await waitFor(() => expect([...document.querySelectorAll<HTMLElement>('[data-entry-key^="photo:"]')]
       .map((entry) => entry.dataset.entryKey)).toEqual(['photo:later', 'photo:first']));
 
-    await user.click(screen.getByRole('button', { name: 'Export', exact: true }));
+    await user.click(screen.getByRole('button', { name: 'Export' }));
     for (const destination of ['OneDrive', 'Google Photos', 'iCloud']) {
       expect(screen.getByRole('button', { name: `${destination} Coming soon` })).toBeDisabled();
     }

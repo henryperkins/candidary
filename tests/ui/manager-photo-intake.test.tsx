@@ -75,7 +75,7 @@ function managerFetch(events: readonly EventView[]) {
 }
 
 async function openSettings(user: ReturnType<typeof userEvent.setup>) {
-  await screen.findByRole('heading', { name: 'Library', exact: true });
+  await screen.findByRole('heading', { name: 'Library' });
   await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
     .getByRole('button', { name: /settings/i }));
 }
@@ -234,7 +234,7 @@ describe('manager guest uploads', () => {
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
-    const intakeHeading = await screen.findByRole('heading', { name: 'Library', exact: true });
+    const intakeHeading = await screen.findByRole('heading', { name: 'Library' });
     const intakeSection = intakeHeading.closest('section');
     expect(intakeSection).toHaveTextContent('Library');
     expect(intakeSection).not.toHaveTextContent('Private collection');

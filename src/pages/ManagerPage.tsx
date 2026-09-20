@@ -975,6 +975,17 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }, [trashPath]),
   });
   const trashPage = trashResource.state.value;
+  const previousTrashDestination = useRef({ eventId, active: libraryTrash });
+  const reloadTrash = trashResource.reload;
+  useLayoutEffect(() => {
+    const previous = previousTrashDestination.current;
+    previousTrashDestination.current = { eventId, active: libraryTrash };
+    // The eager read covers a new event. Re-entry needs a fresh read too,
+    // retaining rows while changes from another tab are reconciled.
+    if (libraryTrash && !previous.active && previous.eventId === eventId && !rotationResourcesPaused) {
+      void reloadTrash();
+    }
+  }, [eventId, libraryTrash, reloadTrash, rotationResourcesPaused]);
   const trashRows = trashPage?.rows ?? [];
   const nextMediaCursor = trashPage?.cursor ?? null;
   const showRecentlyDeletedIntentGuidance = recentlyDeletedIntentGuidance && nextMediaCursor !== null;
@@ -2168,6 +2179,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       || !libraryTrash
       || trashPage?.mode !== 'trash'
       || trashResource.state.status !== 'ready'
+      // reload retires the generation synchronously, before its loading state
+      // renders. Do not consume a recovery target against that old ready page.
+      || trashResource.state.generation !== trashResource.capture().generation
     ) return false;
     const restore = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-restore-media-id]'))
       .find(button => button.dataset.restoreMediaId === requestedId) ?? null;

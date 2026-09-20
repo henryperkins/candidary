@@ -354,7 +354,7 @@ describe('host private gallery API', () => {
     await seedStored(access, 2, { timelineAt: '2026-09-19T11:00:00.000Z' });
     const legacy = await gallery(access, '?limit=1');
     const legacyBody = await legacy.json<any>();
-    expect(decodeCursorPayload(legacyBody.data.nextCursor).v).toBe(2);
+    expect(decodeCursorPayload(legacyBody.data.nextCursor)).toMatchObject({ v: 2 });
     expect((await gallery(
       access,
       `?limit=1&cursor=${encodeURIComponent(legacyBody.data.nextCursor)}`,
