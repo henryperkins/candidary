@@ -2528,9 +2528,9 @@ test('reduced motion opens the terminal Guestbook without smooth scrolling or mo
   const action = page.getByRole('button', { name: 'Leave a guestbook note' });
   await action.focus();
   await page.keyboard.press('Enter');
-  const heading = page.getByRole('heading', { name: 'Leave a note for Maya & Theo' });
+  const heading = page.getByRole('heading', { name: 'Leave a note' });
   await expect(heading).toBeFocused();
-  await expect(page.getByRole('textbox', { name: 'Your note for Maya & Theo' })).not.toBeFocused();
+  await expect(page.getByRole('textbox', { name: 'Your note' })).not.toBeFocused();
   expect(await page.evaluate(() => (window as unknown as { __guestbookScrollBehaviors: ScrollBehavior[] })
     .__guestbookScrollBehaviors)).toEqual(['auto']);
   const ring = await outline(heading);

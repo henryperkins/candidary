@@ -539,7 +539,7 @@ test('Guestbook placeholder uses the approved themed muted text role', async ({ 
   await stubGuestRoutes(page, { event: { theme: eventTheme('candidary-default') } });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
   await page.locator('.event-extra summary').filter({ hasText: 'Guestbook' }).click();
-  const placeholderColor = await page.getByRole('textbox', { name: 'Your note for Maya & Theo' }).evaluate(
+  const placeholderColor = await page.getByRole('textbox', { name: 'Your note' }).evaluate(
     (element) => getComputedStyle(element, '::placeholder').color,
   );
   expect(placeholderColor).toBe('rgb(119, 110, 106)');

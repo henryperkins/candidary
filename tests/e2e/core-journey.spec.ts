@@ -127,8 +127,8 @@ test('guest captures, appends, recovers one failure, and reaches the terminal re
 
   await guestbookAction.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('heading', { name: 'Leave a note for Maya & Theo' })).toBeFocused();
-  await expect(page.getByRole('textbox', { name: 'Your note for Maya & Theo' })).not.toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Leave a note' })).toBeFocused();
+  await expect(page.getByRole('textbox', { name: 'Your note' })).not.toBeFocused();
   await expect(page.locator('details.guestbook')).toHaveAttribute('open', '');
 
   await page.reload();

@@ -159,7 +159,7 @@ describe('guest-facing Guestbook', () => {
 
     expect(screen.getByText('Unsigned')).toBeVisible();
     expect(localStorage.getItem('candidary_guest_name')).toBe('Taylor');
-    expect(screen.getByRole('textbox', { name: 'Your note for Maya & Theo' })).toBeEnabled();
+    expect(screen.getByRole('textbox', { name: 'Your note' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Send note' })).toBeEnabled();
   });
 
@@ -322,7 +322,7 @@ describe('guest-facing Guestbook', () => {
     render(<Guestbook event={EVENT} contributionEnabled guestName="Taylor" onGuestNameChange={vi.fn()} openRequest={0} />);
     const user = userEvent.setup();
     await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
-    const note = screen.getByRole('textbox', { name: 'Your note for Maya & Theo' });
+    const note = screen.getByRole('textbox', { name: 'Your note' });
     await user.type(note, 'A private memory.');
     await user.tab();
     expect(screen.getByRole('button', { name: 'Send note' })).toHaveFocus();
@@ -360,7 +360,7 @@ describe('guest-facing Guestbook', () => {
 
     renderEvent();
     await user.click(await screen.findByText(/Guestbook/, { selector: 'span' }));
-    const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
+    const note = await screen.findByRole('textbox', { name: 'Your note' });
     await user.type(note, 'A private memory.');
     await user.click(screen.getByRole('button', { name: 'Send note' }));
     expect(attempts).toHaveLength(0);
@@ -398,7 +398,7 @@ describe('guest-facing Guestbook', () => {
 
     renderEvent();
     await user.click(await screen.findByText(/Guestbook/, { selector: 'span' }));
-    await user.type(screen.getByRole('textbox', { name: 'Your note for Maya & Theo' }), 'Please try this later.');
+    await user.type(screen.getByRole('textbox', { name: 'Your note' }), 'Please try this later.');
     await user.click(screen.getByRole('button', { name: 'Send note' }));
     await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
 
@@ -427,7 +427,7 @@ describe('guest-facing Guestbook', () => {
 
     renderEvent();
     await user.click(await screen.findByText(/Guestbook/, { selector: 'span' }));
-    const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
+    const note = await screen.findByRole('textbox', { name: 'Your note' });
     await user.type(note, 'First draft');
     await user.click(screen.getByRole('button', { name: 'Send note' }));
     await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
@@ -476,7 +476,7 @@ describe('guest-facing Guestbook', () => {
     await user.click(await screen.findByText(/Guestbook/, { selector: 'span' }));
     expect(await screen.findByText('A private memory.')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Show earlier shared entries' }));
-    const noteA = screen.getByRole('textbox', { name: 'Your note for Maya & Theo' });
+    const noteA = screen.getByRole('textbox', { name: 'Your note' });
     await user.type(noteA, 'Only for Maya and Theo');
     await user.click(screen.getByRole('button', { name: 'Send note' }));
     await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
@@ -492,7 +492,7 @@ describe('guest-facing Guestbook', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     const guestbookSummary = screen.getByText(/Guestbook/, { selector: 'span' });
     if (!guestbookSummary.closest('details')?.open) await user.click(guestbookSummary);
-    expect(screen.getByRole('heading', { name: 'Leave a note for June & Ravi' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Leave a note' })).toBeVisible();
 
     lateApage.resolve(new Response(JSON.stringify({
       data: {
@@ -504,7 +504,7 @@ describe('guest-facing Guestbook', () => {
     await Promise.resolve();
     expect(screen.queryByText('Late A row.')).not.toBeInTheDocument();
 
-    const noteB = screen.getByRole('textbox', { name: 'Your note for June & Ravi' });
+    const noteB = screen.getByRole('textbox', { name: 'Your note' });
     await user.type(noteB, 'Only for June and Ravi');
     await user.click(screen.getByRole('button', { name: 'Send note' }));
     await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
@@ -542,7 +542,7 @@ describe('guest-facing Guestbook', () => {
       openRequest={0}
     />);
     await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
-    const note = screen.getByRole('textbox', { name: 'Your note for Maya & Theo' });
+    const note = screen.getByRole('textbox', { name: 'Your note' });
     await user.type(note, 'Keep the intent exact');
     await user.click(screen.getByRole('button', { name: 'Send note' }));
     await user.click(screen.getByRole('button', { name: 'Confirm and send' }));

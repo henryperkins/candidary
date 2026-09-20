@@ -28,7 +28,6 @@ import {
 } from '../../shared/constants';
 import type { EventView, GalleryAudienceSummaryView, GuestEventView } from '../../shared/contracts';
 import { resolveEventTheme } from '../../shared/event-theme';
-import { mediaPreview } from '../../src/app/api';
 import { hostSignInHref } from '../../src/app/recovery';
 import { createAppRouter } from '../../src/app/router';
 import type {
@@ -797,7 +796,7 @@ describe('guest event experience', () => {
       .toEqual(['/api/event/maya-theo', '/api/event/maya-theo/contributions']);
   });
 
-  it('names the note field after the event rather than leaving it to a placeholder', async () => {
+  it('gives the note field a persistent label rather than leaving it to a placeholder', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
@@ -809,10 +808,10 @@ describe('guest event experience', () => {
 
     await userEvent.setup().click(screen.getByText(/Guestbook/, { selector: 'span' }));
     // A placeholder is not a name: it disappears on the first keystroke and is not announced as one.
-    const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
+    const note = await screen.findByRole('textbox', { name: 'Your note' });
     expect(note).toBeVisible();
     // Exactly the field's own name — no placeholder, no submit label, nothing else swept in with it.
-    expect(note).toHaveAccessibleName('Your note for Maya & Theo');
+    expect(note).toHaveAccessibleName('Your note');
     expect(note).toHaveAttribute('name', 'body');
     expect(note).toHaveAttribute('placeholder', 'Share a wish or memory…');
     fireEvent.change(note, { target: { value: 'x'.repeat(499) } });
@@ -838,7 +837,7 @@ describe('guest event experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
-    const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
+    const note = await screen.findByRole('textbox', { name: 'Your note' });
     await user.type(note, 'What a perfect evening.');
     const send = screen.getByRole('button', { name: 'Send note' });
     await user.click(send);
@@ -904,7 +903,7 @@ describe('guest event experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
-    const note = await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' });
+    const note = await screen.findByRole('textbox', { name: 'Your note' });
     await user.type(note, 'Keep these words.');
     await user.click(screen.getByRole('button', { name: 'Send note' }));
     await user.click(screen.getByRole('button', { name: 'Confirm and send' }));
@@ -958,7 +957,7 @@ describe('guest event experience', () => {
     const user = userEvent.setup();
     await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     await user.type(
-      await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' }),
+      await screen.findByRole('textbox', { name: 'Your note' }),
       'The final words.',
     );
     await user.click(screen.getByRole('button', { name: 'Send note' }));
@@ -985,11 +984,11 @@ describe('guest event experience', () => {
     const user = userEvent.setup();
     const summary = screen.getByText(/Guestbook/, { selector: 'span' });
     await user.click(summary);
-    await user.type(await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' }), 'Still here.');
+    await user.type(await screen.findByRole('textbox', { name: 'Your note' }), 'Still here.');
     await user.click(summary);
-    expect(screen.queryByRole('textbox', { name: 'Your note for Maya & Theo' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Your note' })).not.toBeInTheDocument();
     await user.click(summary);
-    expect(await screen.findByRole('textbox', { name: 'Your note for Maya & Theo' })).toHaveValue('Still here.');
+    expect(await screen.findByRole('textbox', { name: 'Your note' })).toHaveValue('Still here.');
   });
 
   it('distinguishes a failed notes read from a confirmed empty feed and retries in place', async () => {
@@ -1012,7 +1011,7 @@ describe('guest event experience', () => {
     await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Notes are unavailable.');
     await user.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByText('No entries have been shared yet.')).toBeVisible();
+    expect(await screen.findByText('No shared entries yet.')).toBeVisible();
     expect(reads).toBe(2);
   });
 });
@@ -4298,10 +4297,12 @@ describe('manager experience', () => {
    * only lives while the job is queued or running. Both ways of losing that poll are
    * silent by construction, so both are pinned here.
    */
-  it('keeps one export poll and live owner running outside Gallery until the job is terminal', async () => {
+  it.each(['complete', 'album'] as const)('keeps one timely %s export poll and live owner running outside Gallery until the job is terminal', async kind => {
+    const label = kind === 'album' ? 'Album' : 'Complete';
+    const pollMs = kind === 'album' ? 2_000 : 10_000;
     const exportJob = (state: 'queued' | 'running' | 'ready'): ExportView => ({
       id: 'export-global',
-      kind: 'complete',
+      kind,
       state,
       snapshotAt: '2026-09-20T00:00:00.000Z',
       createdAt: '2026-09-20T00:00:01.000Z',
@@ -4325,6 +4326,7 @@ describe('manager experience', () => {
       errorCode: null,
     });
     let exportReads = 0;
+    let finishExportPoll: (() => void) | undefined;
     const base = managerFetch({ first: { media: [], nextCursor: null } });
     const interval = vi.spyOn(window, 'setInterval');
     const clearInterval = vi.spyOn(window, 'clearInterval');
@@ -4332,6 +4334,9 @@ describe('manager experience', () => {
       const url = String(input);
       if (url.endsWith('/exports')) {
         exportReads += 1;
+        if (exportReads === 2) return new Promise<Response>(resolve => {
+          finishExportPoll = () => resolve(json({ exports: [exportJob('running')] }));
+        });
         return json({ exports: [exportJob(exportReads === 1 ? 'queued' : exportReads === 2 ? 'running' : 'ready')] });
       }
       return base(input);
@@ -4341,19 +4346,22 @@ describe('manager experience', () => {
     expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
     await userEvent.setup().click(screen.getByRole('button', { name: 'Share' }));
     const compact = await screen.findByRole('region', { name: 'Export progress' });
-    expect(within(compact).getByText('Complete export · Queued')).toBeVisible();
+    expect(within(compact).getByText(`${label} export · Queued`)).toBeVisible();
     const liveHost = document.querySelector('[data-gallery-live-host]');
     expect(liveHost).not.toBeNull();
     expect(liveHost?.querySelectorAll(':scope > p[role="status"]')).toHaveLength(1);
 
     const scheduled = await waitFor(() => {
-      const index = interval.mock.calls.findLastIndex(([, delay]) => delay === 10_000);
+      const index = interval.mock.calls.findLastIndex(([, delay]) => delay === pollMs);
       const call = interval.mock.calls[index];
       if (!call) throw new Error('the global export poll was never scheduled');
       return { handler: call[0] as () => void, id: interval.mock.results[index]?.value };
     });
     await act(async () => { scheduled.handler(); });
-    expect(await screen.findByText('Complete export · Running')).toBeVisible();
+    if (kind === 'album') await act(async () => { scheduled.handler(); });
+    expect(exportReads).toBe(2);
+    await act(async () => { finishExportPoll?.(); });
+    expect(await screen.findByText(`${label} export · Running`)).toBeVisible();
     expect(document.querySelector('[data-gallery-live-host]')).toBe(liveHost);
 
     await act(async () => { scheduled.handler(); });
@@ -4438,7 +4446,7 @@ describe('manager experience', () => {
       await waitFor(() => expect(interval.mock.calls.some(([, delay]) => delay === 10_000)).toBe(true));
 
       await user.click(galleryMode('Album'));
-      expect(await screen.findByRole('button', { name: 'Prepare Album ZIP' })).toBeDisabled();
+      expect(await screen.findByRole('button', { name: 'Download Album' })).toBeDisabled();
       expect(screen.getByText(
         'Complete collection export is Queued. Prepare and retry actions will be available when it finishes.',
       )).toBeVisible();
@@ -4488,6 +4496,7 @@ describe('manager experience', () => {
     }));
 
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Share' }));
     expect(within(await screen.findByRole('region', { name: 'Export progress' }))
       .getByText('Complete export · Running')).toBeVisible();
     const poll = await waitFor(() => {
@@ -4609,11 +4618,12 @@ describe('manager experience', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Another export is already being prepared.');
     expect(screen.getByRole('button', { name: 'Download all' })).toBeDisabled();
+    await user.click(screen.getByText('Exports', { selector: 'summary' }));
     expect(screen.getByText(
       'Album export is Running. Prepare and retry actions will be available when it finishes.',
     )).toBeVisible();
     expect(exportReads).toBe(2);
-    await waitFor(() => expect(interval.mock.calls.some(([, delay]) => delay === 10_000)).toBe(true));
+    await waitFor(() => expect(interval.mock.calls.some(([, delay]) => delay === 2_000)).toBe(true));
     expect(document.querySelector('[data-gallery-live-host] [role="status"]'))
       .toHaveTextContent('Album export. Running');
 
@@ -4804,6 +4814,7 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Library'));
+    await user.click(screen.getByText('Exports', { selector: 'summary' }));
     expect(await screen.findByText(/1 photo · Failed/, { selector: 'span' })).toBeVisible();
     expect(screen.getByText('Frozen size: 1 KB · 0 guestbook entries.')).toBeVisible();
     const readsBeforeRetry = exportReads;
@@ -9108,10 +9119,10 @@ describe('guest event phase composition', () => {
 
     await user.click(screen.getByRole('button', { name: 'Leave a guestbook note' }));
 
-    const heading = await screen.findByRole('heading', { name: 'Leave a note for Maya & Theo' });
+    const heading = await screen.findByRole('heading', { name: 'Leave a note' });
     await waitFor(() => expect(heading).toHaveFocus());
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' });
     expect(await screen.findByRole('alert')).toHaveTextContent('The book is resting. Try again.');
-    expect(screen.getByRole('textbox', { name: 'Your note for Maya & Theo' })).toBeEnabled();
+    expect(screen.getByRole('textbox', { name: 'Your note' })).toBeEnabled();
   });
 });

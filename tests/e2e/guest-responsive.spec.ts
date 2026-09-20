@@ -458,7 +458,7 @@ test('keyboard-only guest contribution confirms and announces the server respons
   const summary = page.locator('details.guestbook summary');
   await summary.focus();
   await page.keyboard.press('Enter');
-  const note = page.getByRole('textbox', { name: 'Your note for Maya & Theo' });
+  const note = page.getByRole('textbox', { name: 'Your note' });
   await note.focus();
   await page.keyboard.type('A keyboard-written wish for the happy couple.');
   await page.keyboard.press('Tab');

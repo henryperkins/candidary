@@ -1385,13 +1385,15 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
    * An export is the terminal act of the whole product and it runs in a Workflow, so its
    * card is the one place the host waits on work they cannot see. Nothing polled it: the
    * state was written once by `refresh` and then sat on "Preparing" until a reload or some
-   * unrelated manager action happened to run a full refresh. Ten seconds while a job is
-   * actually in flight, on the same visibility guard intake uses, and never otherwise.
+   * unrelated manager action happened to run a full refresh. Album preparation polls
+   * every two seconds so small ZIPs surface promptly; complete archives use ten seconds.
+   * Poll only visible, active jobs; faster Album polls wait for a pending status request.
    */
   const completeExport = exports.find((job) => job.kind === 'complete');
   const albumExport = exports.find((job) => job.kind === 'album');
   const activeExport = exports.find((job) => job.state === 'queued' || job.state === 'running');
   const activeExportState = activeExport?.state;
+  const activeExportPollMs = activeExport?.kind === 'album' ? 2_000 : 10_000;
   const lastActiveExport = useRef<{ eventId: string; id: string | null }>({ eventId, id: null });
   useLayoutEffect(() => {
     if (lastActiveExport.current.eventId !== eventId) {
@@ -1404,16 +1406,19 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     if (rotationResourcesPaused) return;
     if (exportsResource.state.terminal || eventResource.state.terminal) return;
     if (activeExportState !== 'queued' && activeExportState !== 'running') return;
+    let refreshing = false;
     const refreshVisibleExports = () => {
-      if (document.visibilityState === 'visible') void refreshExports();
+      if (document.visibilityState !== 'visible' || (activeExportPollMs === 2_000 && refreshing)) return;
+      refreshing = true;
+      void refreshExports().finally(() => { refreshing = false; });
     };
-    const interval = window.setInterval(refreshVisibleExports, 10_000);
+    const interval = window.setInterval(refreshVisibleExports, activeExportPollMs);
     window.addEventListener('focus', refreshVisibleExports);
     return () => {
       window.clearInterval(interval);
       window.removeEventListener('focus', refreshVisibleExports);
     };
-  }, [activeExportState, eventResource.state.terminal, exportsResource.state.terminal, refreshExports, rotationResourcesPaused]);
+  }, [activeExportState, activeExportPollMs, eventResource.state.terminal, exportsResource.state.terminal, refreshExports, rotationResourcesPaused]);
   // A retry keeps its original createdAt. Once that tracked job terminalizes,
   // a cross-kind createdAt sort can otherwise switch the announcement to an
   // older terminal result and never announce the job the host was waiting on.

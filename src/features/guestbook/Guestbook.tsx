@@ -360,9 +360,9 @@ export function Guestbook({
     <summary><span>Guestbook <small>{contributionEnabled ? 'Read or leave a note' : 'Read entries'}</small></span><ChevronDown aria-hidden="true" /></summary>
     {opened && <div className="event-extra__content guestbook__content">
       <div className="guestbook__intro">
-        <h3 ref={headingRef} tabIndex={-1}><MessageCircle aria-hidden="true" />Leave a note for <bdi>{event.name}</bdi></h3>
+        <h3 ref={headingRef} tabIndex={-1}><MessageCircle aria-hidden="true" />Leave a note</h3>
         <p dir="auto">{event.guestbookPrompt}</p>
-        <p className="guestbook__privacy">This event-private book is visible to current guests only after the hosts share an entry. Your display name is not a verified identity.</p>
+        <p className="guestbook__privacy">Your note stays private until the hosts share it with event guests. Names aren’t verified.</p>
       </div>
 
       {contributionEnabled && !submissionDisabled && <section className="guestbook-composer" aria-labelledby="guestbook-composer-heading">
@@ -384,7 +384,7 @@ export function Guestbook({
         </div>
         <form className="note-form" onSubmit={startConfirmation} aria-busy={submitStatus === 'sending'}>
           <label>
-            <span className="note-form__label">Your note for <bdi>{event.name}</bdi></span>
+            <span className="note-form__label">Your note</span>
             <textarea
               ref={noteInputRef}
               name="body"
@@ -450,7 +450,7 @@ export function Guestbook({
         <section className="guestbook-section" aria-labelledby="guestbook-shared-heading">
           <h4 id="guestbook-shared-heading">Shared guestbook</h4>
           {readStatus === 'ready' && sharedItems.length === 0
-            && <p className="guestbook-feed-state">No entries have been shared yet.</p>}
+            && <p className="guestbook-feed-state">No shared entries yet.</p>}
           {sharedItems.length > 0 && <ul className="notes-feed">{sharedItems.map(renderEntry)}</ul>}
           {sharedCursor && <div className="notes-feed__more">
             <button type="button" className="button button--secondary" disabled={sharedEarlierBusy} onClick={() => void loadEarlier('shared')}>

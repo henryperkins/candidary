@@ -65,23 +65,37 @@ async function immutableAlbumMediaEntries(
   return rawEntries === null ? entries : resolveFrozenAlbumOrder(rawEntries, entries);
 }
 
-/** Fence each source pull, including the completion pull, while retaining backpressure. */
-function ownedSourceStream(body: ReadableStream<Uint8Array>, assertActive: () => Promise<void>, expectedBytes?: number) {
+// Album originals are private until the final owned Ready transition. Group small
+// transport fragments into 1 MiB reads so each fragment does not cost two D1 trips.
+// Other export protocols retain their per-fragment checks.
+const ALBUM_SOURCE_READ_BYTES = 1024 * 1024;
+
+/** Fence both sides of each bounded read, including EOF, and retain backpressure. */
+function ownedSourceStream(body: ReadableStream<Uint8Array>, assertActive: () => Promise<void>, expectedBytes?: number, readBatchBytes = 0) {
   const reader = body.getReader(); let readBytes = 0; let closed = false;
   const cancel = async () => { if (!closed) { closed = true; await reader.cancel(); } };
   return { cancel, body: new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         await assertActive();
-        const chunk = await reader.read();
+        const chunks: Uint8Array[] = [];
+        let batchBytes = 0;
+        let done = false;
+        do {
+          const chunk = await reader.read();
+          if (chunk.done) { done = true; break; }
+          readBytes += chunk.value.byteLength;
+          if (expectedBytes !== undefined && (readBytes > expectedBytes || readBytes > MAX_IMAGE_BYTES)) throw new Error('EXPORT_SOURCE_MISSING');
+          chunks.push(chunk.value);
+          batchBytes += chunk.value.byteLength;
+        } while (batchBytes < readBatchBytes);
         await assertActive();
-        if (chunk.done) {
+        if (done) {
           if (expectedBytes !== undefined && readBytes !== expectedBytes) throw new Error('EXPORT_SOURCE_MISSING');
-          closed = true; reader.releaseLock(); controller.close(); return;
+          closed = true; reader.releaseLock();
         }
-        readBytes += chunk.value.byteLength;
-        if (expectedBytes !== undefined && (readBytes > expectedBytes || readBytes > MAX_IMAGE_BYTES)) throw new Error('EXPORT_SOURCE_MISSING');
-        controller.enqueue(chunk.value);
+        for (const chunk of chunks) controller.enqueue(chunk);
+        if (done) controller.close();
       } catch (error) { await cancel(); controller.error(error); }
     }, cancel,
   }, { highWaterMark: 0 }) };
@@ -200,7 +214,8 @@ export async function processExport(
           const object = await bucket.get(media.objectKey);
           if (!object?.body) throw new Error('EXPORT_SOURCE_MISSING');
           const source = ownedSourceStream(object.body, assertActive,
-            job.kind === 'selection' ? media.byteSize ?? media.declaredByteSize : undefined);
+            job.kind === 'selection' ? media.byteSize ?? media.declaredByteSize : undefined,
+            job.kind === 'album' ? ALBUM_SOURCE_READ_BYTES : 0);
           sources.push(source);
           await assertActive();
           if (job.kind === 'selection' && (object.size !== (media.byteSize ?? media.declaredByteSize)
