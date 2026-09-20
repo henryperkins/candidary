@@ -111,7 +111,10 @@
   overflow: visible;
   border-radius: 0;
   background: transparent;
-  contain-intrinsic-size: auto 255px;
+  /* Exact row geometry keeps a restored anchor stable after a window replacement.
+     The inherited mosaic intrinsic estimate does not fit this variable-height wall. */
+  content-visibility: visible;
+  contain-intrinsic-size: none;
 }
 .gallery-photo__image { position: relative; aspect-ratio: 1; overflow: hidden; border-radius: 8px; background: #eee4d8; }
 .gallery-photo__image > img { display: block; width: 100%; height: 100%; object-fit: cover; }
@@ -162,3 +165,44 @@
 @media (prefers-reduced-motion: reduce) {
   .gallery-photo__album { transition: none; }
 }
+
+/* Reserved before the first check: a delivery notice cannot shift the Photo Wall. */
+.library-arrivals { min-height: 44px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.library-arrivals__accept { min-height: 44px; min-width: 44px; color: var(--chestnut); font-variant-numeric: tabular-nums; }
+.library-arrivals [role="alert"] { color: var(--ink); font-size: .875rem; }
+
+/* Viewer file actions retain the Photo Wall's original image treatment. */
+.gallery-viewer__file-actions { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 14px; border-top: 1px solid rgb(255 250 243 / 25%); }
+.gallery-viewer__file-actions .button { min-width: 44px; min-height: 44px; }
+.gallery-viewer__file-actions .button--secondary { background: var(--paper); color: var(--ink); }
+.gallery-viewer__file-actions .button--danger-outline { margin-left: auto; border: 1px solid var(--paper); color: var(--paper); background: transparent; }
+.gallery-viewer__file-actions .button--danger-outline:hover:not(:disabled) { background: rgb(255 250 243 / 12%); }
+.gallery-viewer__file-actions .button:disabled { opacity: .6; cursor: wait; }
+.gallery-viewer__file-actions :focus-visible { outline: 2px solid var(--paper); outline-offset: 3px; }
+.gallery-viewer__meta { overflow-wrap: anywhere; }
+.gallery-viewer--confirmation { display: flex; align-items: center; justify-content: center; padding: 16px; overflow: auto; }
+.gallery-viewer__confirmation { width: min(100%, 640px); max-height: 100%; padding: clamp(20px, 4vw, 32px); display: flex; flex-direction: column; overflow: hidden; background: var(--paper); color: var(--ink); border-radius: 12px; }
+.gallery-viewer__confirmation h2 { margin: 0 0 20px; font-size: clamp(1.5rem, 5vw, 2rem); line-height: 1.2; }
+.gallery-viewer__confirmation p { margin: 0 0 16px; line-height: 1.55; overflow-wrap: anywhere; }
+.gallery-viewer__confirmation .modal-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.gallery-viewer__confirmation .button, .manager-library-trash .button { min-height: 44px; min-width: 44px; }
+[data-gallery-live-host="true"] .album-undo__bar { z-index: 45; }
+body:has(.gallery-viewer) [data-gallery-live-host="true"] .album-undo__bar { bottom: calc(12px + env(safe-area-inset-bottom)); }
+
+.manager-gallery > .workspace-heading[hidden] { display: none; }
+.library-add-photos { margin-left: auto; }
+.library-utilities { display: flex; align-items: center; gap: 4px; }
+.library-trash-trigger { min-width: 44px; min-height: 44px; }
+.library-note { color: var(--muted); line-height: 1.5; }
+.manager-gallery:not([data-mode="library"]) .library-utilities { display: contents; }
+@media (max-width: 760px) {
+  .manager-gallery[data-mode="library"] .gallery-total { margin-left: 0; }
+  .manager-gallery[data-mode="library"] .library-utilities { flex-basis: 100%; justify-content: flex-end; margin-top: -6px; }
+  .manager-gallery[data-mode="library"] .gallery-control-row { margin-top: 6px; }
+}
+/* The single Undo host is a body portal, outside the inert manager shell. */
+body:has(.gallery-viewer) [data-gallery-live-host] .album-undo__bar { top: 64px; bottom: auto; max-height: 132px; overflow: auto; }
+body:has(.gallery-viewer) [data-gallery-live-host] { z-index: 45; }
+
+.gallery-viewer__confirmation > h2, .gallery-viewer__confirmation > .modal-actions { flex-shrink: 0; }
+.gallery-viewer__confirmation > #gallery-viewer-phase-description { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }

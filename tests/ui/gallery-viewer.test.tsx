@@ -1,10 +1,11 @@
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
 
 import type { ManagerGalleryMediaView } from '../../shared/contracts';
 import { GalleryViewer, type ViewerContinuationOutcome } from '../../src/features/gallery/GalleryViewer';
+import type { LibraryFileActions, TrashOutcome } from '../../src/features/gallery/library-file-actions';
 
 function photo(id: string, caption: string): ManagerGalleryMediaView {
   return {
@@ -37,6 +38,8 @@ function deferred<T>() {
 }
 
 interface ViewerHarnessProps {
+  fileActions?: LibraryFileActions;
+  onTrashConfirmed?: (photoId: string) => Promise<ViewerContinuationOutcome>;
   photos?: ManagerGalleryMediaView[];
   initialPhotoId?: string;
   hasMore?: boolean;
@@ -52,6 +55,8 @@ function ViewerHarness({
   loadNextAfter,
   onClose = vi.fn(),
   onPhotoChange,
+  fileActions,
+  onTrashConfirmed,
 }: ViewerHarnessProps) {
   const [photoId, setPhotoId] = useState(initialPhotoId);
   return <GalleryViewer
@@ -67,6 +72,8 @@ function ViewerHarness({
     loadNextAfter={loadNextAfter}
     onClose={onClose}
     onFavorite={vi.fn()}
+    fileActions={fileActions}
+    onTrashConfirmed={onTrashConfirmed}
   />;
 }
 
@@ -90,7 +97,107 @@ function UnmountingViewerHarness({
 
 afterEach(() => cleanup());
 
+describe('GalleryViewer file actions', () => {
+  it('does not let an earlier next-page request change the confirmation target', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<ViewerContinuationOutcome>();
+    render(<ViewerHarness photos={[firstDance, cakeCutting]} initialPhotoId={cakeCutting.id}
+      loadNextAfter={() => pending.promise} fileActions={{ canTrash: true, trash: vi.fn() }} />);
+    await user.click(screen.getByRole('button', { name: 'Load next photo' }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await act(async () => pending.resolve({ status: 'advanced', nextPhotoId: firstDance.id }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('Cake cutting');
+    expect(screen.getByRole('button', { name: 'Keep photo' })).toHaveFocus();
+  });
+  it('downloads the original and confirms inside one modal with safe focus and complete consequences', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ViewerHarness photos={[firstDance, cakeCutting]} initialPhotoId={firstDance.id}
+      loadNextAfter={async () => ({ status: 'exhausted' })} onClose={onClose}
+      fileActions={{ canTrash: true, trash: vi.fn() }} />);
+    expect(screen.getByRole('link', { name: 'Download original' })).toHaveAttribute('href', '/api/media/first-dance/original');
+    expect(screen.getByText('first-dance.jpg')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    const dialog = screen.getByRole('dialog', { name: 'Move this photo to Trash?' });
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Keep photo' })).toHaveFocus();
+    expect(dialog).toHaveTextContent('up to 30 days');
+    expect(dialog).toHaveTextContent('cannot be recalled');
+    expect(dialog).toHaveTextContent('keeps its own copy');
+    await user.keyboard('{ArrowRight}{Escape}');
+    expect(screen.getByRole('dialog', { name: 'First dance' })).toBe(dialog);
+    expect(screen.getByRole('button', { name: 'Move to Trash' })).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    fireEvent.mouseDown(screen.getByRole('dialog'));
+    expect(screen.getByRole('button', { name: 'Move to Trash' })).toHaveFocus();
+  });
+
+  it.each(['retired', 'failed'] as const)('unlocks the original photo after a %s write', async (result) => {
+    const user = userEvent.setup();
+    const pending = deferred<TrashOutcome>();
+    const trash = vi.fn(() => result === 'failed' ? Promise.reject(new Error('Write refused')) : pending.promise);
+    const onClose = vi.fn();
+    const onTrashConfirmed = vi.fn();
+    render(<ViewerHarness loadNextAfter={async () => ({ status: 'exhausted' })} onClose={onClose}
+      fileActions={{ canTrash: true, trash }} onTrashConfirmed={onTrashConfirmed} />);
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    if (result === 'retired') {
+      expect(screen.getByRole('button', { name: 'Keep photo' })).toBeDisabled();
+      await user.keyboard('{Escape}{ArrowRight}');
+      fireEvent.mouseDown(screen.getByRole('dialog'));
+      expect(onClose).not.toHaveBeenCalled();
+      await act(async () => pending.resolve({ status: 'retired' }));
+    }
+    expect(await screen.findByRole('button', { name: 'Move to Trash' })).toBeEnabled();
+    expect(screen.getByRole('dialog', { name: 'First dance' })).toBeVisible();
+    expect(onTrashConfirmed).not.toHaveBeenCalled();
+    expect(trash).toHaveBeenCalledOnce();
+    if (result === 'failed') expect(screen.getByRole('alert')).toHaveTextContent('Write refused');
+  });
+
+  it('keeps a successful deletion distinct from failed continuation and retries only the read', async () => {
+    const user = userEvent.setup();
+    const trash = vi.fn(async (): Promise<TrashOutcome> => ({ status: 'trashed', media: {
+      id: firstDance.id, originalFilename: firstDance.originalFilename, caption: firstDance.caption,
+      guestName: firstDance.guestName, trashedAt: '2026-09-15T00:00:00Z', restoreUntil: '2026-10-15T00:00:00Z',
+    } }));
+    const loadNextAfter = vi.fn(async (): Promise<ViewerContinuationOutcome> => ({ status: 'advanced', nextPhotoId: cakeCutting.id }));
+    render(<ViewerHarness photos={[firstDance, cakeCutting]} initialPhotoId={firstDance.id} loadNextAfter={loadNextAfter}
+      fileActions={{ canTrash: true, trash }} onTrashConfirmed={async () => ({ status: 'failed' })} />);
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    expect(await screen.findByText('Photo moved to Trash. Could not load the next photo.')).toBeVisible();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Back to Library' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Retry' })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('dialog', { name: 'Cake cutting' })).toBeVisible();
+    expect(trash).toHaveBeenCalledOnce();
+    expect(loadNextAfter).toHaveBeenCalledOnce();
+  });
+});
+
 describe('GalleryViewer continuation', () => {
+  it('retains ordinary modal Tab wrapping when the allowed live host has no controls', async () => {
+    const user = userEvent.setup();
+    const liveHost = document.createElement('div');
+    liveHost.dataset.galleryLiveHost = 'true';
+    liveHost.textContent = 'Photo status';
+    document.body.append(liveHost);
+    const view = render(<ViewerHarness loadNextAfter={async () => ({ status: 'exhausted' })} />);
+    const close = screen.getByRole('button', { name: 'Close viewer' });
+    const favorite = screen.getByRole('button', { name: 'Pick First dance for the Album' });
+    expect(close).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(favorite).toHaveFocus();
+    await user.tab();
+    expect(close).toHaveFocus();
+    expect(liveHost).not.toHaveAttribute('inert');
+    view.unmount();
+    liveHost.remove();
+  });
   it('retains its modal label, focus, containment boundary, scroll lock, Escape, and return focus', async () => {
     // Mutations caught: losing Gallery-only behavior while adopting the shared modal mechanics.
     const origin = document.createElement('button');

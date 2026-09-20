@@ -90,6 +90,22 @@ export function ModalSurface({
       if (event.key !== 'Tab') return;
       const dialog = dialogRef?.current ?? host.firstElementChild as HTMLElement | null;
       const focusable = focusableElements(dialog);
+      const exception = inertExceptionRef?.current;
+      const exceptionControls = exception?.isConnected && !exception.closest('[inert]')
+        ? focusableElements(exception) : [];
+      if (exceptionControls.length > 0) {
+        // An explicitly allowed interactive portal (for example Manager Undo)
+        // belongs to this focus boundary even though it is a separate DOM root.
+        // Walk the combined ring explicitly: native DOM order may put the portal
+        // before the dialog, or inert background controls between the two roots.
+        const boundary = [...new Set([...focusable, ...exceptionControls])];
+        const index = boundary.indexOf(document.activeElement as HTMLElement);
+        const next = index < 0 ? (event.shiftKey ? boundary.length - 1 : 0)
+          : (index + (event.shiftKey ? -1 : 1) + boundary.length) % boundary.length;
+        event.preventDefault();
+        boundary[next]?.focus();
+        return;
+      }
       const first = focusable[0];
       const last = focusable.at(-1);
       if (!first || !last) {
@@ -113,7 +129,7 @@ export function ModalSurface({
     };
     document.addEventListener('keydown', onKeyDown, true);
     return () => document.removeEventListener('keydown', onKeyDown, true);
-  }, [closePolicy.escape, dialogRef, host, initialFocusRef, onRequestClose]);
+  }, [closePolicy.escape, dialogRef, host, inertExceptionRef, initialFocusRef, onRequestClose]);
 
   const originalMouseDown = child.props.onMouseDown;
   return createPortal(cloneElement(child, {

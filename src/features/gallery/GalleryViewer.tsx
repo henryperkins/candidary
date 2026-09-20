@@ -1,7 +1,8 @@
 import { Check, ChevronLeft, ChevronRight, Plus, X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
-import { mediaPreview } from '../../app/api';
+import { mediaOriginal, mediaPreview } from '../../app/api';
+import type { LibraryFileActions } from './library-file-actions';
 import type { ManagerGalleryMediaView } from '../../../shared/contracts';
 import { ModalSurface } from '../../components/ModalSurface';
 import { formatMomentHeading, galleryPhotoTitle } from './gallery-timeline';
@@ -12,6 +13,8 @@ export type ViewerContinuationOutcome =
   | { status: 'failed' };
 
 interface GalleryViewerProps {
+  fileActions?: LibraryFileActions;
+  onTrashConfirmed?(photoId: string): Promise<ViewerContinuationOutcome>;
   photos: ManagerGalleryMediaView[];
   photoId: string;
   timeZone: string;
@@ -49,9 +52,19 @@ export function GalleryViewer({
   onFavorite,
   live = true,
   onAnnouncement,
+  fileActions,
+  onTrashConfirmed,
 }: GalleryViewerProps) {
   const index = photos.findIndex((candidate) => candidate.id === photoId);
   const photo = photos[index];
+  const [phase, setPhase] = useState<'photo' | 'confirm-trash' | 'trashing' | 'next-photo-failed'>('photo');
+  const [trashError, setTrashError] = useState<string | null>(null);
+  const trashActionRef = useRef<HTMLButtonElement>(null);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const trashRequest = useRef(false);
+  const previousPhase = useRef(phase);
+  const confirmedPhotoId = useRef<string | null>(null);
+  const focusTrashUndo = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(
@@ -91,6 +104,66 @@ export function GalleryViewer({
     if (continuationFailure) retryRef.current?.focus();
   }, [continuationFailure]);
 
+  useLayoutEffect(() => {
+    if (phase === 'confirm-trash') keepRef.current?.focus();
+    else if (phase === 'next-photo-failed') retryRef.current?.focus();
+    else if (phase === 'photo' && previousPhase.current !== 'photo') {
+      // Keyboard Undo owns focus if the manager just presented its offer.
+      const undo = focusTrashUndo.current
+        ? inertExceptionRef.current?.querySelector<HTMLButtonElement>('.album-undo__action') : null;
+      if (undo) undo.focus();
+      else if (!document.activeElement?.closest('.album-undo')) trashActionRef.current?.focus();
+    }
+    focusTrashUndo.current = false;
+    previousPhase.current = phase;
+  }, [phase]);
+
+  function settleTrashContinuation(outcome: ViewerContinuationOutcome) {
+    if (outcome.status === 'failed') setPhase('next-photo-failed');
+    else if (outcome.status === 'advanced') {
+      onPhotoChange(outcome.nextPhotoId);
+      setPhase('photo');
+    } else { viewerRequestGeneration.current += 1; onClose(); }
+  }
+
+  async function trashPhoto(activation: 'keyboard' | 'pointer') {
+    if (!photo || !fileActions?.canTrash || trashRequest.current) return;
+    trashRequest.current = true;
+    confirmedPhotoId.current = null;
+    setTrashError(null);
+    setPhase('trashing');
+    viewerRequestGeneration.current += 1;
+    const generation = viewerRequestGeneration.current;
+    try {
+      const outcome = await fileActions.trash(photo, activation);
+      if (!viewerMounted.current || generation !== viewerRequestGeneration.current) return;
+      if (outcome.status === 'retired') { setPhase('photo'); return; }
+      confirmedPhotoId.current = photo.id;
+      const next = await onTrashConfirmed?.(photo.id) ?? { status: 'exhausted' as const };
+      if (!viewerMounted.current || generation !== viewerRequestGeneration.current) return;
+      focusTrashUndo.current = activation === 'keyboard';
+      settleTrashContinuation(next);
+    } catch (caught) {
+      if (!viewerMounted.current || generation !== viewerRequestGeneration.current) return;
+      if (confirmedPhotoId.current === photo.id) { setPhase('next-photo-failed'); return; }
+      setTrashError(caught instanceof Error ? caught.message : 'This photo could not be moved to Trash.');
+      setPhase('photo');
+    } finally { trashRequest.current = false; }
+  }
+
+  async function retryAfterTrash() {
+    if (trashRequest.current || confirmedPhotoId.current === null) return;
+    trashRequest.current = true;
+    const generation = viewerRequestGeneration.current;
+    try {
+      const next = await loadNextAfter(confirmedPhotoId.current);
+      if (viewerMounted.current && generation === viewerRequestGeneration.current) {
+        settleTrashContinuation(next);
+        if (next.status === 'failed') retryRef.current?.focus();
+      }
+    } finally { trashRequest.current = false; }
+  }
+
   function changePhoto(nextPhotoId: string) {
     if (nextPhotoId === photoId) return;
     viewerRequestGeneration.current += 1;
@@ -99,6 +172,8 @@ export function GalleryViewer({
   }
 
   function closeViewer() {
+    if (phase === 'trashing') return;
+    if (phase === 'confirm-trash') { setPhase('photo'); return; }
     viewerRequestGeneration.current += 1;
     onClose();
   }
@@ -155,6 +230,7 @@ export function GalleryViewer({
   }
 
   useEffect(() => {
+    if (phase !== 'photo') return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'ArrowRight') {
         event.preventDefault();
@@ -168,29 +244,51 @@ export function GalleryViewer({
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [index, photos, moveForward, moveBackward]);
+  }, [phase, index, photos, moveForward, moveBackward]);
 
-  if (!photo) return null;
-  const title = galleryPhotoTitle(photo);
-  const titleId = `gallery-viewer-title-${photo.id}`;
+  if (!photo && phase === 'photo') return null;
+  const title = photo ? galleryPhotoTitle(photo) : '';
+  const titleId = `gallery-viewer-title-${photoId}`;
   const canContinue = index >= photos.length - 1
     && hasMore
     && exhaustedContinuationForPhotoId !== photoId;
   const moment = {
-    key: photo.id,
-    photos: [photo],
-    startAt: photo.timelineAt,
-    endAt: photo.timelineAt,
+    key: photoId,
+    photos: photo ? [photo] : [],
+    startAt: photo?.timelineAt ?? '',
+    endAt: photo?.timelineAt ?? '',
   };
   return <ModalSurface
     labelledBy={titleId}
     initialFocusRef={closeRef}
     onRequestClose={closeViewer}
-    closePolicy={{ escape: true, backdrop: true }}
+    closePolicy={{ escape: phase !== 'trashing', backdrop: phase !== 'trashing' }}
     dialogRef={dialogRef}
     inertExceptionRef={inertExceptionRef}
     returnFocusRef={returnFocusRef}
-  ><div className="gallery-viewer">
+  ><div className={phase === 'photo' ? 'gallery-viewer' : 'gallery-viewer gallery-viewer--confirmation'}
+    aria-describedby={phase === 'photo' ? undefined : 'gallery-viewer-phase-description'}>
+    {phase === 'next-photo-failed' ? <div className="gallery-viewer__confirmation">
+      <h2 id={titleId}>Photo moved to Trash</h2>
+      <p id="gallery-viewer-phase-description" role="alert">Photo moved to Trash. Could not load the next photo.</p>
+      <div className="modal-actions">
+        <button type="button" className="button button--secondary" onClick={closeViewer}>Back to Library</button>
+        <button type="button" className="button button--primary" ref={retryRef} onClick={() => void retryAfterTrash()}>Retry</button>
+      </div>
+    </div> : phase !== 'photo' ? <div className="gallery-viewer__confirmation" aria-busy={phase === 'trashing'}>
+      <h2 id={titleId}>Move this photo to Trash?</h2>
+      <div id="gallery-viewer-phase-description">
+        {photo && <p><strong>{title}</strong> from {photo.guestName}.</p>}
+        <p>From now on it is removed from Library, Album, the Guest gallery, and a live Album link. Pages already open, and copies anyone has already downloaded, cannot be recalled.</p>
+        <p>You can restore it for up to 30 days — never past your management access or the event's deletion date, whichever comes first. Until then the photo keeps using this event's photo and storage capacity.</p>
+        <p>An export you have already prepared keeps its own copy of this photo. Removing it here does not change a ZIP that is already made.</p>
+      </div>
+      <div className="modal-actions">
+        <button type="button" className="button button--secondary" ref={keepRef} disabled={phase === 'trashing'} onClick={() => setPhase('photo')}>Keep photo</button>
+        <button type="button" className="button button--danger" disabled={phase === 'trashing' || !fileActions?.canTrash}
+          onClick={click => void trashPhoto(click.detail === 0 ? 'keyboard' : 'pointer')}>{phase === 'trashing' ? 'Moving…' : 'Move to Trash'}</button>
+      </div>
+    </div> : photo && <>
     {/* One region, mounted outside every branch below. Stepping through the gallery changes
         only the photograph, so a region rendered beside its own first text is never announced
         and the host navigates in silence. It carries position, title and contributor together
@@ -244,6 +342,7 @@ export function GalleryViewer({
     <div className="gallery-viewer__info">
       <div className="gallery-viewer__meta">
         <strong id={titleId}>{title}</strong>
+        {title !== photo.originalFilename && <span>{photo.originalFilename}</span>}
         <span>From {photo.guestName}</span>
         <span className="gallery-viewer__timing">
           {photo.timelineSource === 'capture' ? 'Taken' : 'Received'} {formatMomentHeading(moment, timeZone)}
@@ -273,6 +372,14 @@ export function GalleryViewer({
           ? <><Check aria-hidden="true" /> <span aria-hidden="true">In Album</span></>
           : <><Plus aria-hidden="true" /> <span aria-hidden="true">Pick</span></>}
       </button>
+      {trashError && <p role="alert">{trashError}</p>}
+      {fileActions && <div className="gallery-viewer__file-actions">
+        <a href={mediaOriginal(photo.id)} download className="button button--secondary">Download original</a>
+        <button type="button" className="button button--danger-outline" ref={trashActionRef}
+          disabled={!fileActions.canTrash || favoritePendingIds.has(photo.id)}
+          onClick={() => { viewerRequestGeneration.current += 1; setTrashError(null); setPhase('confirm-trash'); }}>Move to Trash</button>
+      </div>}
     </div>
+    </>}
   </div></ModalSurface>;
 }

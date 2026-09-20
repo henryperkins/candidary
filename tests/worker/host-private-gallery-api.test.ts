@@ -6,6 +6,7 @@ import {
   eventAccess,
   origin,
   resetDatabase,
+  png,
   testEnv,
   trashMedia,
   uploadPending,
@@ -76,6 +77,41 @@ function gallery(access: Access, query = '') {
   }, testEnv);
 }
 
+function arrivals(access: Access, after: string | number, query = '') {
+  const separator = query.length > 0 ? '&' : '?';
+  return createApp().request(
+    `/api/manage/events/${access.event.id}/gallery/arrivals${query}${separator}after=${after}`,
+    { headers: { cookie: access.manager.cookie } },
+    testEnv,
+  );
+}
+
+async function reserveUpload(access: Access, key: string, guestName = 'Avery') {
+  const response = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+    method: 'POST',
+    headers: writeHeaders(access.guest),
+    body: JSON.stringify({
+      filename: `${key}.png`, mimeType: 'image/png', byteSize: png().byteLength,
+      idempotencyKey: key, guestName, caption: null,
+    }),
+  }, testEnv);
+  expect(response.status).toBe(201);
+  return (await response.json<any>()).data.media as { id: string };
+}
+
+async function finalizeUpload(access: Access, mediaId: string) {
+  const bytes = png();
+  return createApp().request(`/api/event/${access.event.slug}/uploads/${mediaId}/content`, {
+    method: 'PUT',
+    headers: {
+      ...writeHeaders(access.guest),
+      'content-type': 'image/png',
+      'content-length': String(bytes.byteLength),
+    },
+    body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+  }, testEnv);
+}
+
 function album(access: Access) {
   return createApp().request(`/api/manage/events/${access.event.id}/album`, {
     headers: { cookie: access.manager.cookie },
@@ -105,7 +141,253 @@ function unversionedCursor(timelineAt: string, id: string): string {
     .replace(/=+$/u, '');
 }
 
+function versionOneCursor(timelineAt: string, id: string): string {
+  return btoa(JSON.stringify({ v: 1, timelineAt, id }))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/u, '');
+}
+
 describe('host private gallery API', () => {
+  it('counts a later delivery despite identical stored timestamps', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1);
+    const first = await (await gallery(access, '?live=1')).json<any>();
+    expect(first.data.snapshotSequence).toEqual(expect.any(Number));
+    const laterId = await seedStored(access, 2, {
+      timelineAt: '2026-09-18T10:00:00.000Z',
+    });
+    const response = await arrivals(access, first.data.snapshotSequence);
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data.count).toBe(1);
+    const frozen = await (await gallery(
+      access,
+      `?live=1&snapshot=${first.data.snapshotSequence}`,
+    )).json<any>();
+    expect(frozen.data.media.map((row: { id: string }) => row.id)).not.toContain(laterId);
+  });
+
+  it('counts delivery when trash keeps the active total unchanged and ignores restoration', async () => {
+    const access = await eventAccess();
+    const restored = await uploadPending(access, 'restored-before-baseline');
+    const removed = await uploadPending(access, 'removed-before-baseline');
+    const baseline = await (await gallery(access, '?live=1')).json<any>();
+    await trashMedia(access, restored.id);
+    await trashMedia(access, removed.id);
+    const delivered = await uploadPending(access, 'delivered-after-baseline');
+    const restoredResponse = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${restored.id}/restore`,
+      { method: 'POST', headers: writeHeaders(access.manager), body: '{}' },
+      testEnv,
+    );
+    expect(restoredResponse.status).toBe(200);
+
+    const summary = await (await arrivals(access, baseline.data.snapshotSequence)).json<any>();
+    expect(summary.data.count).toBe(1);
+    const accepted = await (await gallery(
+      access,
+      `?live=1&snapshot=${summary.data.snapshotSequence}`,
+    )).json<any>();
+    expect(accepted.data.media.map((row: { id: string }) => row.id).sort())
+      .toEqual([delivered.id, restored.id].sort());
+  });
+
+  it('assigns a pending reservation only when delivery finalizes and does not advance on retry', async () => {
+    const access = await eventAccess();
+    const pending = await reserveUpload(access, 'pending-after-baseline');
+    const baseline = await (await gallery(access, '?live=1')).json<any>();
+
+    expect((await finalizeUpload(access, pending.id)).status).toBe(200);
+    const delivered = await (await arrivals(access, baseline.data.snapshotSequence)).json<any>();
+    expect(delivered.data.count).toBe(1);
+    expect(delivered.data.snapshotSequence).toBe(baseline.data.snapshotSequence + 1);
+
+    expect((await finalizeUpload(access, pending.id)).status).toBe(200);
+    const retried = await (await arrivals(access, baseline.data.snapshotSequence)).json<any>();
+    expect(retried.data).toEqual(delivered.data);
+  });
+
+  it('uses the same literal search and In album predicates for arrivals', async () => {
+    const access = await eventAccess();
+    const baseline = await (await gallery(access, '?live=1')).json<any>();
+    const jose = await seedStored(access, 1, {
+      guestName: 'Jose', filename: '100%_final.jpg', caption: 'First dance',
+    });
+    await seedStored(access, 2, { guestName: 'Maya', caption: 'Cake' });
+    const picked = await createApp().request(
+      `/api/manage/events/${access.event.id}/media/${jose}/favorite`,
+      {
+        method: 'PUT', headers: writeHeaders(access.manager),
+        body: JSON.stringify({ favorite: true }),
+      },
+      testEnv,
+    );
+    expect(picked.status).toBe(200);
+
+    const after = baseline.data.snapshotSequence;
+    expect((await (await arrivals(access, after, '?query=JOSE')).json<any>()).data.count).toBe(1);
+    expect((await (await arrivals(access, after, '?query=100%_')).json<any>()).data.count).toBe(1);
+    expect((await (await arrivals(access, after, '?query=missing')).json<any>()).data.count).toBe(0);
+    expect((await (await arrivals(access, after, '?favorites=1')).json<any>()).data.count).toBe(1);
+    expect((await (await arrivals(access, after, '?query=Maya&favorites=1')).json<any>()).data.count)
+      .toBe(0);
+  });
+
+  it('returns a zero arrival summary at the captured marker', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1);
+    const baseline = await (await gallery(access, '?live=1')).json<any>();
+    const response = await arrivals(access, baseline.data.snapshotSequence);
+    expect(response.status).toBe(200);
+    expect((await response.json<any>()).data).toEqual({
+      afterSequence: baseline.data.snapshotSequence,
+      snapshotSequence: baseline.data.snapshotSequence,
+      count: 0,
+    });
+  });
+
+  it('keeps a live continuation on its first snapshot when new arrivals land', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, { timelineAt: '2026-09-19T12:00:00.000Z' });
+    await seedStored(access, 2, { timelineAt: '2026-09-19T10:00:00.000Z' });
+    const first = await (await gallery(access, '?live=1&limit=1')).json<any>();
+    expect(first.data.snapshotSequence).toEqual(expect.any(Number));
+    const laterId = await seedStored(access, 3, { timelineAt: '2026-09-19T11:00:00.000Z' });
+
+    const second = await (await gallery(
+      access,
+      `?live=1&limit=1&cursor=${encodeURIComponent(first.data.nextCursor)}`,
+    )).json<any>();
+    expect(second.data.snapshotSequence).toBe(first.data.snapshotSequence);
+    expect(second.data.media.map((row: { id: string }) => row.id)).toEqual([mediaId(2)]);
+    expect(second.data.media.map((row: { id: string }) => row.id)).not.toContain(laterId);
+  });
+
+  it('paginates a live Unicode search through a v3 cursor', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, {
+      guestName: '李 Avery', timelineAt: '2026-09-19T12:00:00.000Z',
+    });
+    await seedStored(access, 2, {
+      guestName: '李 Maya', timelineAt: '2026-09-19T11:00:00.000Z',
+    });
+
+    const first = await gallery(access, `?live=1&query=${encodeURIComponent('李')}&limit=1`);
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<any>();
+    expect(firstBody.data.snapshotSequence).toEqual(expect.any(Number));
+    expect(firstBody.data.media.map((row: { id: string }) => row.id)).toEqual([mediaId(1)]);
+    expect(firstBody.data.nextCursor).toEqual(expect.any(String));
+
+    const second = await gallery(
+      access,
+      `?live=1&query=${encodeURIComponent('李')}&limit=1&cursor=${encodeURIComponent(firstBody.data.nextCursor)}`,
+    );
+    expect(second.status).toBe(200);
+    const secondBody = await second.json<any>();
+    expect(secondBody.data.snapshotSequence).toBe(firstBody.data.snapshotSequence);
+    expect(secondBody.data.media.map((row: { id: string }) => row.id)).toEqual([mediaId(2)]);
+    expect(secondBody.data.nextCursor).toBeNull();
+  });
+
+  it('rejects live cursor scope mismatches across event, query, filter, order, and snapshot', async () => {
+    const access = await eventAccess();
+    const other = await eventAccess('Other Event');
+    await seedStored(access, 1, { guestName: 'Jose', timelineAt: '2026-09-19T12:00:00.000Z' });
+    await seedStored(access, 2, { guestName: 'Jose', timelineAt: '2026-09-19T11:00:00.000Z' });
+    const first = await (await gallery(access, '?live=1&query=Jose&limit=1')).json<any>();
+    const cursor = encodeURIComponent(first.data.nextCursor);
+
+    for (const response of [
+      await gallery(access, `?live=1&query=Maya&limit=1&cursor=${cursor}`),
+      await gallery(access, `?live=1&query=Jose&favorites=1&limit=1&cursor=${cursor}`),
+      await gallery(access, `?live=1&query=Jose&order=earliest&limit=1&cursor=${cursor}`),
+      await gallery(access, `?live=1&query=Jose&snapshot=0&limit=1&cursor=${cursor}`),
+      await createApp().request(
+        `/api/manage/events/${other.event.id}/gallery?live=1&query=Jose&limit=1&cursor=${cursor}`,
+        { headers: { cookie: other.manager.cookie } }, testEnv,
+      ),
+    ]) {
+      expect(response.status).toBe(422);
+      expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    }
+  });
+
+  it('denies arrival reads to guests and foreign managers', async () => {
+    const access = await eventAccess();
+    const other = await eventAccess('Other Event');
+    const guest = await createApp().request(
+      `/api/manage/events/${access.event.id}/gallery/arrivals?after=0`,
+      { headers: writeHeaders(access.guest) }, testEnv,
+    );
+    expect(guest.status).toBe(403);
+    const foreign = await createApp().request(
+      `/api/manage/events/${access.event.id}/gallery/arrivals?after=0`,
+      { headers: { cookie: other.manager.cookie } }, testEnv,
+    );
+    expect(foreign.status).toBe(403);
+    expect((await foreign.json<any>()).code).toBe('ROLE_FORBIDDEN');
+  });
+
+  it('rejects malformed and future sequences and invalid live values', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1);
+    const baseline = await (await gallery(access, '?live=1')).json<any>();
+    for (const response of [
+      await arrivals(access, '-1'),
+      await arrivals(access, '1.5'),
+      await arrivals(access, 'nope'),
+      await arrivals(access, baseline.data.snapshotSequence + 1),
+      await gallery(access, '?live=0'),
+      await gallery(access, '?live=true'),
+      await gallery(access, '?live=1&snapshot=-1'),
+      await gallery(access, `?live=1&snapshot=${baseline.data.snapshotSequence + 1}`),
+    ]) {
+      expect(response.status).toBe(422);
+      expect((await response.json<any>()).code).toBe('VALIDATION_FAILED');
+    }
+  });
+
+  it('keeps v1/v2 cursors legacy-only and emits v3 for live reads', async () => {
+    const access = await eventAccess();
+    await seedStored(access, 1, { timelineAt: '2026-09-19T12:00:00.000Z' });
+    await seedStored(access, 2, { timelineAt: '2026-09-19T11:00:00.000Z' });
+    const legacy = await gallery(access, '?limit=1');
+    const legacyBody = await legacy.json<any>();
+    expect(decodeCursorPayload(legacyBody.data.nextCursor).v).toBe(2);
+    expect((await gallery(
+      access,
+      `?limit=1&cursor=${encodeURIComponent(legacyBody.data.nextCursor)}`,
+    )).status).toBe(200);
+    const v1 = versionOneCursor('2026-09-19T11:00:00.000Z', mediaId(2));
+    expect((await gallery(
+      access,
+      `?limit=1&order=earliest&cursor=${encodeURIComponent(v1)}`,
+    )).status).toBe(200);
+    expect((await gallery(
+      access,
+      `?live=1&limit=1&cursor=${encodeURIComponent(legacyBody.data.nextCursor)}`,
+    )).status).toBe(422);
+    expect((await gallery(
+      access,
+      `?live=1&limit=1&order=earliest&cursor=${encodeURIComponent(v1)}`,
+    )).status).toBe(422);
+
+    const live = await (await gallery(access, '?live=1&limit=1')).json<any>();
+    expect(decodeCursorPayload(live.data.nextCursor)).toMatchObject({
+      v: 3,
+      eventId: access.event.id,
+      query: '',
+      favorites: false,
+      order: 'newest',
+      snapshotSequence: live.data.snapshotSequence,
+    });
+    expect((await gallery(
+      access,
+      `?limit=1&cursor=${encodeURIComponent(live.data.nextCursor)}`,
+    )).status).toBe(422);
+  });
+
   it('refuses a private gallery read without a manager session', async () => {
     const access = await eventAccess();
     const missing = await createApp().request(

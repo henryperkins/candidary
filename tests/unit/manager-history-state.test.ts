@@ -38,12 +38,12 @@ describe('manager history state', () => {
   it('accepts exact compatible intents and rejects incompatible ones', () => {
     const cases: Array<[ManagerNavigationIntent, ManagerLocation, boolean]> = [
       [{ kind: 'focus-complete-export' }, { section: 'gallery', mode: 'library' }, true],
-      [{ kind: 'focus-intake-heading' }, { section: 'intake' }, true],
-      [{ kind: 'open-recently-deleted', focusMediaId: 'm1' }, { section: 'intake' }, true],
+      [{ kind: 'focus-intake-heading' }, { section: 'gallery', mode: 'library' }, true],
+      [{ kind: 'open-recently-deleted', focusMediaId: 'm1' }, { section: 'gallery', mode: 'library' }, true],
       [{ kind: 'edit-guest-gallery-availability', returnTo: { section: 'gallery', mode: 'guest-gallery', publicationFilter: 'published' } }, { section: 'settings' }, true],
-      [{ kind: 'focus-complete-export' }, { section: 'intake' }, false],
-      [{ kind: 'focus-intake-heading' }, { section: 'gallery', mode: 'library' }, false],
-      [{ kind: 'open-recently-deleted', focusMediaId: 'm1' }, { section: 'gallery', mode: 'library' }, false],
+      [{ kind: 'focus-complete-export' }, { section: 'settings' }, false],
+      [{ kind: 'focus-intake-heading' }, { section: 'settings' }, false],
+      [{ kind: 'open-recently-deleted', focusMediaId: 'm1' }, { section: 'settings' }, false],
     ];
     for (const [intent, location, compatible] of cases) {
       const result = consumeManagerIntent({ __candidaryManager: { version: 1, eventId: 'e', intent } }, 'e', location);
@@ -51,23 +51,25 @@ describe('manager history state', () => {
     }
   });
 
-  it('drops a valid but location-incompatible intent while retaining sibling anchors and requests replacement', () => {
-    const result = consumeManagerIntent({ source: 'x', __candidaryManager: { version: 1, eventId: 'e', anchors: { library: mediaAnchor }, intent: { kind: 'focus-intake-heading' } } }, 'e', { section: 'gallery', mode: 'library' });
-    expect(result.intent).toBeNull();
-    expect(result.state).toEqual({ source: 'x', __candidaryManager: { version: 1, eventId: 'e', anchors: { library: mediaAnchor } } });
-    expect(sanitizeManagerHistoryState({ __candidaryManager: { version: 1, eventId: 'e', intent: { kind: 'focus-intake-heading' } } }, 'e', { section: 'gallery', mode: 'library' }).needsReplace).toBe(true);
+  it('normalizes legacy heading intent before Library compatibility and retains foreign keys', () => {
+    const raw = { source: 'x', __candidaryManager: { version: 1, eventId: 'e', anchors: { library: mediaAnchor }, intent: { kind: 'focus-intake-heading' } } };
+    const result = sanitizeManagerHistoryState(raw, 'e', { section: 'gallery', mode: 'library' });
+    expect(result.envelope?.intent).toEqual({ kind: 'focus-library-heading' });
+    expect(result.needsReplace).toBe(true);
+    expect(result.state.source).toBe('x');
+    expect(consumeManagerIntent(raw, 'e', { section: 'gallery', mode: 'library', view: 'trash' }).intent).toEqual({ kind: 'focus-library-heading' });
   });
 
   it('requires true plain objects for envelopes and nested records', () => {
     class Envelope { version = 1; eventId = 'e'; }
-    expect(sanitizeManagerHistoryState({ __candidaryManager: new Envelope() }, 'e', { section: 'intake' }).envelope).toBeNull();
-    expect(sanitizeManagerHistoryState({ __candidaryManager: { version: 1, eventId: 'e', anchors: new Date() } }, 'e', { section: 'intake' }).envelope).toBeNull();
+    expect(sanitizeManagerHistoryState({ __candidaryManager: new Envelope() }, 'e', { section: 'gallery', mode: 'library' }).envelope).toBeNull();
+    expect(sanitizeManagerHistoryState({ __candidaryManager: { version: 1, eventId: 'e', anchors: new Date() } }, 'e', { section: 'gallery', mode: 'library' }).envelope).toBeNull();
     expect(sanitizeManagerHistoryState({ __candidaryManager: { version: 1, eventId: 'e', intent: { kind: 'edit-guest-gallery-availability', returnTo: new Date() } } }, 'e', { section: 'settings' }).envelope).toBeNull();
   });
 
   it('canonicalizes cyclic foreign envelope data without throwing', () => {
     const extra: Record<string, unknown> = {}; extra.self = extra;
-    expect(() => sanitizeManagerHistoryState({ source: 'x', __candidaryManager: { version: 1, eventId: 'e', extra } }, 'e', { section: 'intake' })).not.toThrow();
+    expect(() => sanitizeManagerHistoryState({ source: 'x', __candidaryManager: { version: 1, eventId: 'e', extra } }, 'e', { section: 'gallery', mode: 'library' })).not.toThrow();
   });
 
   it('consumes a compatible intent while preserving foreign state and anchors', () => {
@@ -86,7 +88,7 @@ describe('manager history state', () => {
   });
 
   it('removes an empty envelope after consuming an incompatible or absent intent', () => {
-    expect(consumeManagerIntent({ source: 'share', __candidaryManager: { version: 1, eventId: 'e' } }, 'e', { section: 'intake' }).state)
+    expect(consumeManagerIntent({ source: 'share', __candidaryManager: { version: 1, eventId: 'e' } }, 'e', { section: 'gallery', mode: 'library' }).state)
       .toEqual({ source: 'share' });
   });
 
@@ -105,7 +107,7 @@ describe('manager history state', () => {
 
   it('adds intents while retaining valid anchors', () => {
     expect(withManagerIntent({ __candidaryManager: { version: 1, eventId: 'e', anchors: { album: albumAnchor } } }, 'e', { kind: 'focus-intake-heading' }))
-      .toEqual({ __candidaryManager: { version: 1, eventId: 'e', anchors: { album: albumAnchor }, intent: { kind: 'focus-intake-heading' } } });
+      .toEqual({ __candidaryManager: { version: 1, eventId: 'e', anchors: { album: albumAnchor }, intent: { kind: 'focus-library-heading' } } });
     const intent: ManagerNavigationIntent = { kind: 'open-recently-deleted', focusMediaId: 'm1' };
     const result = withManagerIntent({}, 'e', intent);
     intent.focusMediaId = 'changed';
@@ -131,14 +133,14 @@ describe('manager history state', () => {
   });
 
   it('removes canonical empty envelopes but retains intent-only envelopes', () => {
-    expect(sanitizeManagerHistoryState({ source: 'x', __candidaryManager: { version: 1, eventId: 'e' } }, 'e', { section: 'intake' })).toMatchObject({ envelope: null, state: { source: 'x' }, needsReplace: true });
-    expect(sanitizeManagerHistoryState({ __candidaryManager: { version: 1, eventId: 'e', intent: { kind: 'focus-intake-heading' } } }, 'e', { section: 'intake' }).envelope).toEqual({ version: 1, eventId: 'e', intent: { kind: 'focus-intake-heading' } });
+    expect(sanitizeManagerHistoryState({ source: 'x', __candidaryManager: { version: 1, eventId: 'e' } }, 'e', { section: 'gallery', mode: 'library' })).toMatchObject({ envelope: null, state: { source: 'x' }, needsReplace: true });
+    expect(sanitizeManagerHistoryState({ __candidaryManager: { version: 1, eventId: 'e', intent: { kind: 'focus-intake-heading' } } }, 'e', { section: 'gallery', mode: 'library' }).envelope).toEqual({ version: 1, eventId: 'e', intent: { kind: 'focus-library-heading' } });
   });
 
   it('treats absent manager state as canonical but present empty state as replacement-needed', () => {
-    expect(sanitizeManagerHistoryState({ source: 'x' }, 'e', { section: 'intake' })).toMatchObject({ envelope: null, needsReplace: false, state: { source: 'x' } });
-    expect(sanitizeManagerHistoryState(null, 'e', { section: 'intake' })).toMatchObject({ envelope: null, needsReplace: false, state: {} });
-    expect(sanitizeManagerHistoryState({ source: 'x', __candidaryManager: {} }, 'e', { section: 'intake' }).needsReplace).toBe(true);
+    expect(sanitizeManagerHistoryState({ source: 'x' }, 'e', { section: 'gallery', mode: 'library' })).toMatchObject({ envelope: null, needsReplace: false, state: { source: 'x' } });
+    expect(sanitizeManagerHistoryState(null, 'e', { section: 'gallery', mode: 'library' })).toMatchObject({ envelope: null, needsReplace: false, state: {} });
+    expect(sanitizeManagerHistoryState({ source: 'x', __candidaryManager: {} }, 'e', { section: 'gallery', mode: 'library' }).needsReplace).toBe(true);
   });
 
   it('marks a truncated neighbor list as replacement-needed', () => {

@@ -29,12 +29,13 @@ import {
   type AlbumLeavePreparation,
   type ManagerAlbumHandle,
 } from './ManagerAlbum';
+import type { LibraryChange, LibraryFileActions } from './library-file-actions';
 import { ManagerPrivateGallery, type ManagerPrivateGalleryHandle } from './ManagerPrivateGallery';
 import { ManagerSharedGallery, type GallerySharedStatus, type ManagerSharedGalleryHandle } from './ManagerSharedGallery';
-import type { Dispatch, SetStateAction } from 'react';
+import type { Dispatch, SetStateAction, ReactNode } from 'react';
 import type { ExportCurrentSource } from './export-control-status';
 import type { GalleryAnchor, PublicationFilter } from '../../app/manager-history-state';
-import type { GalleryAnchorRestoreOutcome } from './gallery-anchor';
+import { galleryEffectiveVisibleTop, type GalleryAnchorRestoreOutcome } from './gallery-anchor';
 import type { PhotoExportSource, PhotoExportView } from '../../../shared/photo-exports';
 import { PhotoExportChooser, PhotoExportEntryActions, usePhotoExportCapabilities } from './PhotoExportChooser';
 
@@ -98,6 +99,14 @@ export interface ManagerGalleryWorkspaceProps {
   galleryMutationEpoch: number;
   /** Manager upload successes not yet observed by this mounted Library owner. */
   libraryInvalidationVersion?: number;
+  libraryChange?: LibraryChange;
+  fileActions?: LibraryFileActions;
+  librarySuspended?: boolean;
+  libraryActions?: ReactNode;
+  trashAction?: ReactNode;
+  trashContent?: ReactNode;
+  libraryReadsPaused?: boolean;
+  onArrivalsAccepted?(): void;
   /** The sole cross-resource mutation invalidator retained by inverse commands. */
   invalidateGalleryAfterMutation(): void;
   audience: GalleryAudienceAuthority;
@@ -190,6 +199,14 @@ ManagerGalleryWorkspaceProps
   onModeChange,
   galleryMutationEpoch,
   libraryInvalidationVersion = 0,
+  libraryChange,
+  fileActions,
+  librarySuspended = false,
+  libraryActions,
+  trashAction,
+  trashContent,
+  libraryReadsPaused = false,
+  onArrivalsAccepted,
   invalidateGalleryAfterMutation,
   shared,
   exports,
@@ -283,15 +300,6 @@ ManagerGalleryWorkspaceProps
   const invalidateLibrary = useCallback(() => {
     setLibraryEpoch((current) => current + 1);
   }, []);
-  const consumedLibraryInvalidation = useRef({ eventId, version: 0 });
-  if (consumedLibraryInvalidation.current.eventId !== eventId) {
-    consumedLibraryInvalidation.current = { eventId, version: 0 };
-  }
-  useEffect(() => {
-    if (libraryInvalidationVersion <= consumedLibraryInvalidation.current.version) return;
-    consumedLibraryInvalidation.current.version = libraryInvalidationVersion;
-    invalidateLibrary();
-  }, [eventId, invalidateLibrary, libraryInvalidationVersion]);
   const [guestGalleryVisible, setGuestGalleryVisible] = useState(event.galleryVisible);
   const guestGalleryVisibleRef = useRef(event.galleryVisible);
   const visibilityEventId = useRef(eventId);
@@ -303,7 +311,7 @@ ManagerGalleryWorkspaceProps
   // Standalone workspace consumers in older tests can still provide an initial
   // snapshot. Manager itself never does: it supplies `onPublicationChanged`,
   // which selects the resource-backed path below.
-  const legacySharedSnapshot = shared.onPublicationChanged === undefined;
+  const legacySharedSnapshot = shared.media !== undefined;
   const [sharedStatus, setSharedStatus] = useState<GallerySharedStatus>(shared.status ?? 'unpublished');
   const [sharedSelected, setSharedSelected] = useState<string[]>(shared.selected ?? []);
   const [sharedLoadingMore, setSharedLoadingMore] = useState(false);
@@ -813,10 +821,7 @@ ManagerGalleryWorkspaceProps
         guestGallerySettingsRequest.current = null;
       },
       captureAnchor: (requestedMode) => {
-        const effectiveVisibleTop = Math.max(
-          0,
-          document.querySelector<HTMLElement>('.manager-nav')?.getBoundingClientRect().bottom ?? 0,
-        );
+        const effectiveVisibleTop = galleryEffectiveVisibleTop();
         switch (requestedMode) {
           case 'library': return privateGalleryRef.current?.captureAnchor(effectiveVisibleTop) ?? null;
           case 'album': return albumRef.current?.captureAnchor(effectiveVisibleTop) ?? null;
@@ -824,10 +829,7 @@ ManagerGalleryWorkspaceProps
         }
       },
       restoreAnchor: (requestedMode, anchor) => {
-        const effectiveVisibleTop = Math.max(
-          0,
-          document.querySelector<HTMLElement>('.manager-nav')?.getBoundingClientRect().bottom ?? 0,
-        );
+        const effectiveVisibleTop = galleryEffectiveVisibleTop();
         switch (requestedMode) {
           case 'library': return privateGalleryRef.current?.restoreAnchor(anchor, effectiveVisibleTop)
             ?? 'pending';
@@ -932,10 +934,11 @@ ManagerGalleryWorkspaceProps
   </div>;
 
   return <section className="manager-gallery" data-mode={mode} ref={rootRef} aria-labelledby="gallery-workspace-title">
-    <div className="workspace-heading">
-      <h2 id="gallery-workspace-title">{mode === 'library' ? 'Library' : 'Gallery'}</h2>
+    <div className="workspace-heading" hidden={librarySuspended}>
+      <h2 id="gallery-workspace-title" tabIndex={-1}>{mode === 'library' ? 'Library' : 'Gallery'}</h2>
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} {event.storedMediaCount === 1 ? 'photo' : 'photos'}</p>
-      <details
+      {mode === 'library' && <div className="library-add-photos">{libraryActions}</div>}
+      <div className="library-utilities">{mode === 'library' && trashAction}<details
         className="gallery-export-tools"
         open={mode !== 'library' || libraryToolsOpen || photoExportTarget?.mode === 'library' || !!exports.failure}
         onToggle={event => { if (mode === 'library') setLibraryToolsOpen(event.currentTarget.open); }}
@@ -945,7 +948,7 @@ ManagerGalleryWorkspaceProps
           <div className="gallery-action" ref={setActionDock} />
           {libraryExportContent}
         </div>
-      </details>
+      </details></div>
     </div>
     <div className="gallery-control-row">
       <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
@@ -999,10 +1002,19 @@ ManagerGalleryWorkspaceProps
       recoveryHint={audience.failure.recoveryHint}
       onRetry={() => void audience.reload()}
     />}
-    <div className="gallery-private-mode" hidden={mode !== 'library'}>
+    {librarySuspended && trashContent}
+    <div className="gallery-private-mode" hidden={mode !== 'library' || librarySuspended}>
       <ManagerPrivateGallery
         ref={privateGalleryRef}
-        key={`library:${galleryMutationEpoch}:${libraryEpoch}`}
+        key={`library:${eventId}`}
+        libraryChange={libraryChange}
+        fileActions={fileActions}
+        suspended={librarySuspended}
+        readsPaused={libraryReadsPaused}
+        reconciliationVersion={`${galleryMutationEpoch}:${libraryEpoch}`}
+        deliveryVersion={libraryInvalidationVersion}
+        onEscalate={onResourceEscalate}
+        onArrivalsAccepted={onArrivalsAccepted}
         event={event}
         eventId={eventId}
         active={mode === 'library'}

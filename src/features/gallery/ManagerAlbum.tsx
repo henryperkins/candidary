@@ -2429,7 +2429,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
     ? photos.find((entry) => entry.photo.id === draft.coverMediaId)?.photo ?? null
     : null;
   /**
-   * The cover the host chose is in Recently deleted.
+   * The cover the host chose is in Trash.
    *
    * The reference is kept rather than silently dropped, so a timely Restore returns
    * the same photograph to the cover; until then `effectiveCover` falls through to
@@ -2814,7 +2814,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                                   type="button"
                                   className="text-button album-entry__retained-open"
                                   onClick={() => onOpenRecentlyDeleted(entry.slot.mediaId)}
-                                >Restore in Recently deleted</button>}
+                                >Restore in Trash</button>}
                               </>
                             : <>
                                 <div className="album-review-grid__preview">
@@ -3001,7 +3001,7 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
                           ? <>{RETAINED_SLOT_EXPIRED}. Recovery ended{' '}
                               <RetentionInstant display={coverRetainedDeadline} />, so the first photo
                               stays the cover. Star another photo to choose a different one.</>
-                          : <>Restore it in Recently deleted by{' '}
+                          : <>Restore it in Trash by{' '}
                               <RetentionInstant display={coverRetainedDeadline} /> and it is the cover
                               again. Until then people with the Album link see the first photo, and starring another photo
                               replaces the choice.</>}

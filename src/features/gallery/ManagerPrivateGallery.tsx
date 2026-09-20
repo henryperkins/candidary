@@ -3,7 +3,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import { flushSync } from 'react-dom';
 
 import { api, ClientApiError } from '../../app/api';
-import { ErrorState, LoadingState } from '../../components/States';
+import { describeLoadFailure, type LoadFailure, ErrorState, LoadingState } from '../../components/States';
 import {
   DEFAULT_GALLERY_TIMELINE_ORDER,
   ALBUM_MAX_ENTRIES,
@@ -25,9 +25,14 @@ import { UNDO_WINDOW_MS, useManagerUndo } from './undo';
 import type { GalleryAnchor } from '../../app/manager-history-state';
 import {
   captureRenderedGalleryAnchor,
+  galleryEffectiveVisibleTop,
   restoreRenderedGalleryAnchor,
   type GalleryAnchorRestoreOutcome,
 } from './gallery-anchor';
+import type { LibraryPage } from '../../../shared/library-arrivals';
+import type { LibraryChange, LibraryFileActions } from './library-file-actions';
+import { readLibraryWindow } from './library-arrivals';
+import { useLibraryArrivals } from './use-library-arrivals';
 import './library-photo-wall.css';
 
 const SEARCH_MAX_CODE_POINTS = 120;
@@ -36,6 +41,14 @@ interface ManagerPrivateGalleryProps {
   event: EventView;
   eventId: string;
   active?: boolean;
+  suspended?: boolean;
+  readsPaused?: boolean;
+  libraryChange?: LibraryChange;
+  fileActions?: LibraryFileActions;
+  reconciliationVersion?: string;
+  deliveryVersion?: number;
+  onEscalate?(failure: LoadFailure): void;
+  onArrivalsAccepted?(): void;
   /** Album membership, for the filter's own label. Owned by the workspace so Album and Library agree. */
   pickCount: number;
   /** Photos and sections share the same persisted album ceiling. */
@@ -88,7 +101,7 @@ type GalleryRowsAction =
 
 interface GalleryNotice {
   message: string;
-  retry: 'replace' | 'append' | { photo: ManagerGalleryMediaView } | null;
+  retry: 'replace' | 'append' | 'reconcile' | { photo: ManagerGalleryMediaView } | null;
 }
 
 function galleryRowsReducer(state: GalleryRowsState, action: GalleryRowsAction): GalleryRowsState {
@@ -177,6 +190,14 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   event,
   eventId,
   active = true,
+  suspended = false,
+  readsPaused = false,
+  libraryChange,
+  fileActions,
+  reconciliationVersion = '',
+  deliveryVersion = 0,
+  onEscalate,
+  onArrivalsAccepted,
   pickCount,
   albumEntryCount,
   onPicksChanged,
@@ -223,6 +244,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   const rowsRef = useRef<ManagerGalleryMediaView[]>([]);
   const cursorRef = useRef<string | null>(null);
   const confirmedEventId = useRef<string | null>(null);
+  const confirmedRequest = useRef<string | null>(null);
   const hasConfirmedPage = useRef(false);
   const focusResults = useRef(false);
   const handledResultsFocusEpoch = useRef(0);
@@ -235,18 +257,52 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   const emptyRef = useRef<HTMLHeadingElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const rows = rowState.rows;
+  const [snapshotSequence, setSnapshotSequence] = useState<number | null>(null);
+  const [accepting, setAccepting] = useState(false);
+  const [arrivalError, setArrivalError] = useState(false);
+  const [reconciliationRetryEpoch, setReconciliationRetryEpoch] = useState(0);
+  const failedReconciliation = useRef<string | null>(null);
+  const [readsBlocked, setReadsBlocked] = useState(false);
+  const stagedController = useRef<AbortController | null>(null);
+  const mutationGeneration = useRef(0);
+  const arrivalButton = useRef<HTMLButtonElement>(null);
+  const currentViewer = useRef(viewerPhotoId); currentViewer.current = viewerPhotoId;
+  const viewerTrash = useRef<{ id: string; owner: string; before: string[]; confirmed: boolean } | null>(null);
+  const ownerKey = JSON.stringify([eventId, query, favoritesOnly, order]);
+  const currentOwner = useRef(ownerKey); currentOwner.current = ownerKey;
+  const visibleOwner = useRef(false); visibleOwner.current = active && !suspended && !readsPaused && !readsBlocked;
+  const retireStaging = useCallback(() => {
+    mutationGeneration.current++;
+    stagedController.current?.abort(); stagedController.current = null;
+    setAccepting(false);
+  }, []);
+  const escalate = useCallback((failure: LoadFailure) => {
+    setReadsBlocked(true); retireStaging(); onEscalate?.(failure);
+  }, [onEscalate, retireStaging]);
+  const arrivals = useLibraryArrivals({ eventId, query, favorites: favoritesOnly, order,
+    snapshotSequence, active: active && !suspended,
+    paused: readsPaused || readsBlocked || loading || accepting,
+    onEscalate: escalate });
+  useEffect(() => {
+    if (arrivals.count > 0) setAnnouncement(`${arrivals.count} new ${arrivals.count === 1 ? 'photo' : 'photos'} available.`);
+  }, [arrivals.count]);
+  useLayoutEffect(() => {
+    retireStaging();
+    return () => { mutationGeneration.current++; stagedController.current?.abort(); };
+  }, [ownerKey, active, suspended, readsPaused, retireStaging]);
 
   const commitRows = useCallback((
     action: GalleryRowsAction,
     synchronizedRows?: ManagerGalleryMediaView[],
   ) => {
+    if (action.type === 'favorite' || action.type === 'confirm' || action.type === 'remove') retireStaging();
     rowsRef.current = synchronizedRows ?? galleryRowsReducer({
       rows: rowsRef.current,
       focusRequest: null,
       focusSequence: 0,
     }, action).rows;
     dispatchRows(action);
-  }, []);
+  }, [retireStaging]);
 
   useImperativeHandle(ref, () => ({
     captureAnchor: (effectiveVisibleTop) => rootRef.current
@@ -273,8 +329,10 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     nextFavorites: boolean,
     nextOrder: GalleryTimelineOrder,
     nextCursor?: string,
+    snapshot?: number,
   ) => {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ live: '1' });
+    if (snapshot !== undefined) params.set('snapshot', String(snapshot));
     if (nextQuery) params.set('query', nextQuery);
     if (nextFavorites) params.set('favorites', '1');
     // Always explicit: a cursor is cut for one direction and the server refuses to
@@ -303,7 +361,10 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     retireContinuation();
   }, [retireContinuation]);
 
+  useEffect(() => { if (suspended || readsPaused || readsBlocked) cancelContinuation(); }, [suspended, readsPaused, readsBlocked, cancelContinuation]);
+
   const beginReplacement = useCallback(() => {
+    retireStaging();
     loadGeneration.current += 1;
     loadController.current?.abort();
     loadController.current = null;
@@ -312,10 +373,18 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     // previous query's cursor synchronously so it cannot append into the new query, but
     // retain the confirmed rows that stay rendered if this same-event replacement fails.
     cursorRef.current = null;
-  }, [cancelContinuation]);
+    // A remembered successful query is not reusable after its cursor/sequence
+    // ownership has been retired, even if another query fails back to its rows.
+    confirmedRequest.current = null;
+  }, [cancelContinuation, retireStaging]);
 
   useEffect(() => {
+    if (readsPaused || suspended || readsBlocked) return;
+    const requestKey = JSON.stringify([eventId, query, favoritesOnly, order, retryEpoch]);
+    if (confirmedRequest.current === requestKey) return;
+    confirmedRequest.current = null;
     const generation = ++loadGeneration.current;
+    setSnapshotSequence(null);
     loadController.current?.abort();
     const controller = new AbortController();
     loadController.current = controller;
@@ -336,11 +405,13 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     setViewerPhotoId(null);
     viewerOrigin.current = null;
 
-    api<GalleryPage>(galleryPath(query, favoritesOnly, order), { signal: controller.signal })
+    api<LibraryPage>(galleryPath(query, favoritesOnly, order), { signal: controller.signal })
       .then((page) => {
         if (generation !== loadGeneration.current) return;
         confirmedEventId.current = eventId;
+        confirmedRequest.current = requestKey;
         hasConfirmedPage.current = true;
+        setSnapshotSequence(page.snapshotSequence ?? null);
         cursorRef.current = page.nextCursor;
         commitRows({ type: 'replace', rows: page.media }, page.media);
         setCursor(page.nextCursor);
@@ -352,6 +423,8 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       .catch((caught) => {
         if (generation !== loadGeneration.current) return;
         if (caught instanceof DOMException && caught.name === 'AbortError') return;
+        const failure = describeLoadFailure(caught, 'manager', 'Library could not be loaded.');
+        if (!failure.retryable) escalate(failure);
         const message = errorMessage(caught, 'Library could not be loaded.');
         if (hadConfirmedPage) {
           setNotice({ message, retry: 'replace' });
@@ -366,8 +439,8 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
         }
       });
 
-    return () => controller.abort();
-  }, [cancelContinuation, commitRows, eventId, favoritesOnly, galleryPath, order, query, retryEpoch]);
+    return () => { controller.abort(); loadGeneration.current++; };
+  }, [cancelContinuation, commitRows, eventId, favoritesOnly, galleryPath, order, query, retryEpoch, readsPaused, suspended, readsBlocked, escalate]);
 
   useEffect(() => {
     if (
@@ -424,6 +497,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
    * only their wrappers choose where (or whether) to show a failure.
    */
   function appendNextPage(): Promise<NextPageResult> {
+    retireStaging();
     if (nextPageRequest.current) return nextPageRequest.current;
     const requested = cursorRef.current;
     if (requested === null) return Promise.resolve({ status: 'unavailable' });
@@ -485,6 +559,8 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
   }
 
   async function loadNextAfter(photoId: string): Promise<ViewerContinuationOutcome> {
+    if (viewerTrash.current?.id === photoId && viewerTrash.current.confirmed
+      && !rowsRef.current.some(photo => photo.id === photoId)) return continueAfterTrash();
     const result = await appendNextPage();
     if (result.status === 'appended') {
       const currentIndex = result.rows.findIndex(({ id }) => id === photoId);
@@ -495,6 +571,134 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     if (result.status === 'unavailable') return { status: 'exhausted' };
     return { status: 'failed' };
   }
+
+  async function reconcileWindow(sequence: number, deliberate: boolean, changeToConsume?: string) {
+    if (!visibleOwner.current || loading || nextPageRequest.current) return;
+    retireStaging();
+    const generation = mutationGeneration.current;
+    const owner = currentOwner.current;
+    const controller = new AbortController(); stagedController.current = controller;
+    const boundary = rowsRef.current.at(-1) ?? null;
+    setAccepting(true); setArrivalError(false);
+    try {
+      const page = await readLibraryWindow({ snapshotSequence: sequence, boundary, order, signal: controller.signal,
+        fetchPage: request => api<LibraryPage>(galleryPath(query, favoritesOnly, order, request.cursor, request.snapshotSequence), { signal: request.signal }) });
+      if (controller.signal.aborted || generation !== mutationGeneration.current || owner !== currentOwner.current || !visibleOwner.current) return;
+      // Re-read interaction state at adoption. Selection refs stay owned by their existing
+      // controllers; neither explicit off-page IDs nor all-matching exclusions are rewritten.
+      const viewer = currentViewer.current;
+      const root = rootRef.current;
+      const top = galleryEffectiveVisibleTop();
+      const anchor = root ? captureRenderedGalleryAnchor(root, 'media', top) : null;
+      const focused = document.activeElement;
+      const focusWasArrival = focused === arrivalButton.current;
+      if (changeToConsume !== undefined && preparedChangeKey.current === changeToConsume) {
+        // Adoption, rather than dispatch, fulfills a confirmed mutation. Aborted
+        // windows leave this obligation pending for the next usable activation.
+        consumedChange.current = changeToConsume;
+        failedReconciliation.current = null;
+      }
+      flushSync(() => {
+        commitRows({ type: 'replace', rows: page.media }, page.media);
+        cursorRef.current = page.nextCursor; setCursor(page.nextCursor);
+        setSnapshotSequence(page.snapshotSequence);
+        if (viewer !== null && !page.media.some(photo => photo.id === viewer)) {
+          setViewerPhotoId(null); viewerOrigin.current = null;
+        }
+      });
+      if (root && anchor) restoreRenderedGalleryAnchor(root, anchor, top);
+      if (focusWasArrival || (focused instanceof HTMLElement && !focused.isConnected)) {
+        const anchorId = anchor?.kind === 'media' ? anchor.mediaId : viewer;
+        focusPresentationFallback((anchorId ? tileForId(anchorId) : null)
+          ?? resultsRef.current?.querySelector<HTMLElement>('.gallery-mosaic__open')
+          ?? root?.closest('.manager-gallery')?.querySelector<HTMLElement>('#gallery-workspace-title')
+          ?? root);
+      }
+      if (deliberate) onArrivalsAccepted?.();
+    } catch (caught) {
+      if (controller.signal.aborted || generation !== mutationGeneration.current || owner !== currentOwner.current) return;
+      const failure = describeLoadFailure(caught, 'manager', 'Could not load new photos. Try again.');
+      if (!failure.retryable) escalate(failure);
+      else if (deliberate) setArrivalError(true);
+      else {
+        // Keep the obligation, but wait for the explicit retry control after a
+        // failure. The accepting-state transition must not create a retry loop.
+        failedReconciliation.current = changeToConsume ?? null;
+        setNotice({ message: failure.message, retry: 'reconcile' });
+      }
+    } finally {
+      if (stagedController.current === controller) { stagedController.current = null; setAccepting(false); }
+    }
+  }
+  const reconcileCurrent = useRef(reconcileWindow); reconcileCurrent.current = reconcileWindow;
+  const consumedChange = useRef<string | null>(null);
+  const consumedChangeOwner = useRef(ownerKey);
+  const preparedChangeKey = useRef<string | null>(null);
+  const lastLibrarySignal = useRef<string | null>(null);
+  const pendingChangeKind = useRef<LibraryChange['kind']>('metadata');
+  const changeKey = JSON.stringify([ownerKey, reconciliationVersion, libraryChange?.eventId, libraryChange?.version]);
+  useLayoutEffect(() => {
+    const signal = libraryChange?.eventId === eventId ? `${eventId}:${libraryChange.version}` : null;
+    if (consumedChangeOwner.current !== ownerKey) {
+      // The normal query loader owns replacements, including their failure retention.
+      consumedChangeOwner.current = ownerKey;
+      consumedChange.current = changeKey;
+      preparedChangeKey.current = changeKey;
+      lastLibrarySignal.current = signal;
+      return;
+    }
+    if (preparedChangeKey.current === changeKey) return;
+    const first = preparedChangeKey.current === null;
+    preparedChangeKey.current = changeKey;
+    pendingChangeKind.current = signal !== null && signal !== lastLibrarySignal.current
+      ? libraryChange!.kind : 'metadata';
+    lastLibrarySignal.current = signal;
+    retireStaging();
+    if (pendingChangeKind.current === 'delivered') return;
+    // Matching manager signals must not cancel the viewer's post-write continuation.
+    if (pendingChangeKind.current === 'trashed' && libraryChange?.mediaIds.length === 1
+      && viewerTrash.current?.id === libraryChange.mediaIds[0]
+      && viewerTrash.current.owner === currentOwner.current) return;
+    cancelContinuation();
+    if (!first && loading && loadController.current) {
+      beginReplacement(); setRetryEpoch(current => current + 1);
+    }
+    if (pendingChangeKind.current === 'trashed' && libraryChange) {
+      const removed = new Set(libraryChange.mediaIds);
+      const old = rowsRef.current;
+      const index = old.findIndex(photo => photo.id === currentViewer.current);
+      const kept = old.filter(photo => !removed.has(photo.id));
+      commitRows({ type: 'replace', rows: kept }, kept);
+      const selection = photoSelectionRef.current;
+      if (onPhotoExport && selection.mode === 'ids') {
+        commitPhotoSelection({ ...selection, mediaIds: selection.mediaIds.filter(id => !removed.has(id)) });
+      } else if (!onPhotoExport) {
+        const retained = new Set([...selectedIdsRef.current].filter(id => !removed.has(id)));
+        selectedIdsRef.current = retained; setSelectedIds(retained);
+      }
+      if (currentViewer.current && removed.has(currentViewer.current)) {
+        const successor = old.slice(index + 1).find(photo => !removed.has(photo.id))
+          ?? old.slice(0, index).reverse().find(photo => !removed.has(photo.id));
+        setViewerPhotoId(successor?.id ?? null);
+        viewerOrigin.current = successor ? tileForId(successor.id) : null;
+        if (!successor) restoreFocus.current = rootRef.current;
+      }
+      onPhotoExportSourceChange?.();
+    }
+  }, [changeKey, ownerKey, eventId, libraryChange, loading, commitRows, retireStaging, cancelContinuation, beginReplacement, onPhotoExport, onPhotoExportSourceChange]);
+  useEffect(() => {
+    if (consumedChange.current === changeKey || snapshotSequence === null || !visibleOwner.current || loading) return;
+    const initial = consumedChange.current === null;
+    if (initial || pendingChangeKind.current === 'trashed' || pendingChangeKind.current === 'delivered') {
+      consumedChange.current = changeKey;
+      if (!initial && pendingChangeKind.current === 'delivered') void arrivals.checkNow();
+      return;
+    }
+    if (accepting || loadingMore || nextPageRequest.current || failedReconciliation.current === changeKey) return;
+    onPhotoExportSourceChange?.();
+    void reconcileCurrent.current(snapshotSequence, false, changeKey);
+  }, [changeKey, snapshotSequence, active, suspended, readsPaused, loading, accepting, loadingMore, reconciliationRetryEpoch, eventId, libraryChange, arrivals.checkNow, onPhotoExportSourceChange]);
+  useEffect(() => { if (deliveryVersion > 0) void arrivals.checkNow(); }, [deliveryVersion, arrivals.checkNow]);
 
   function tileForId(photoId: string): HTMLElement | null {
     return resultsRef.current
@@ -509,14 +713,74 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
 
   function changeViewerPhoto(photoId: string) {
     if (!rowsRef.current.some((photo) => photo.id === photoId)) return;
+    viewerOrigin.current = tileForId(photoId);
     setViewerPhotoId(photoId);
   }
 
   function closeViewer() {
-    if (active) restoreFocus.current = viewerOrigin.current;
+    if (active) restoreFocus.current = rowsRef.current.length === 0 ? rootRef.current
+      : (currentViewer.current && rowsRef.current.some(photo => photo.id === currentViewer.current)
+        ? tileForId(currentViewer.current) : tileForId(rowsRef.current[0]!.id)) ?? rootRef.current;
     setViewerPhotoId(null);
     viewerOrigin.current = null;
+    viewerTrash.current = null;
   }
+
+  async function continueAfterTrash(): Promise<ViewerContinuationOutcome> {
+    const transaction = viewerTrash.current;
+    if (!transaction || transaction.owner !== currentOwner.current) return { status: 'exhausted' };
+    const known = new Set(rowsRef.current.map(photo => photo.id));
+    while (cursorRef.current !== null) {
+      const result = await appendNextPage();
+      if (viewerTrash.current !== transaction || transaction.owner !== currentOwner.current) return { status: 'exhausted' };
+      if (result.status === 'failed' || result.status === 'retired') return { status: 'failed' };
+      if (result.status !== 'appended') break;
+      const next = result.rows.find(photo => !known.has(photo.id));
+      if (next) return { status: 'advanced', nextPhotoId: next.id };
+    }
+    const index = transaction.before.indexOf(transaction.id);
+    const previous = transaction.before.slice(0, index).reverse()
+      .find(id => rowsRef.current.some(photo => photo.id === id));
+    return previous ? { status: 'advanced', nextPhotoId: previous } : { status: 'exhausted' };
+  }
+
+  async function confirmViewerRemoval(photoId: string): Promise<ViewerContinuationOutcome> {
+    const transaction = viewerTrash.current;
+    if (!transaction || transaction.id !== photoId || transaction.owner !== currentOwner.current) return { status: 'exhausted' };
+    transaction.confirmed = true;
+    const kept = rowsRef.current.filter(photo => photo.id !== photoId);
+    commitRows({ type: 'replace', rows: kept }, kept);
+    const selection = photoSelectionRef.current;
+    if (onPhotoExport && selection.mode === 'ids') {
+      commitPhotoSelection({ ...selection, mediaIds: selection.mediaIds.filter(id => id !== photoId) });
+    } else if (!onPhotoExport) {
+      const retained = new Set([...selectedIdsRef.current].filter(id => id !== photoId));
+      selectedIdsRef.current = retained; setSelectedIds(retained);
+    }
+    onPhotoExportSourceChange?.();
+    const index = transaction.before.indexOf(photoId);
+    const next = transaction.before.slice(index + 1).find(id => kept.some(photo => photo.id === id));
+    return next ? { status: 'advanced', nextPhotoId: next } : continueAfterTrash();
+  }
+
+  const viewerFileActions: LibraryFileActions | undefined = fileActions && {
+    canTrash: fileActions.canTrash,
+    async trash(photo, activation) {
+      retireStaging(); cancelContinuation();
+      const transaction = { id: photo.id, owner: currentOwner.current,
+        before: rowsRef.current.map(row => row.id), confirmed: false };
+      viewerTrash.current = transaction;
+      try {
+        const result = await fileActions.trash(photo, activation);
+        if (transaction.owner !== currentOwner.current || viewerTrash.current !== transaction) return { status: 'retired' };
+        if (result.status === 'retired') viewerTrash.current = null;
+        return result;
+      } catch (caught) {
+        if (viewerTrash.current === transaction) viewerTrash.current = null;
+        throw caught;
+      }
+    },
+  };
 
   async function toggleFavorite(photo: ManagerGalleryMediaView, origin?: HTMLElement, input: 'keyboard' | 'pointer' = 'pointer') {
     if (favoriteRequests.current.has(photo.id) || !undo.canPresent) return;
@@ -890,6 +1154,12 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       void toggleFavorite(notice.retry.photo);
       return;
     }
+    if (notice.retry === 'reconcile') {
+      failedReconciliation.current = null;
+      setNotice(null);
+      setReconciliationRetryEpoch(current => current + 1);
+      return;
+    }
     if (notice.retry === 'append') {
       void loadMore();
       return;
@@ -931,7 +1201,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     } else {
       content = <div className="empty-state">
         <h3 ref={emptyRef} tabIndex={-1}>No photos have been delivered yet.</h3>
-        <p>New delivered photos appear in Live intake as event guests send them.</p>
+        <p>Photos added by you or your guests appear here.</p>
       </div>;
     }
   } else {
@@ -956,11 +1226,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
     </div>;
   }
 
-  const viewerIndex = viewerPhotoId === null
-    ? null
-    : rows.findIndex((photo) => photo.id === viewerPhotoId);
-
-  return <div ref={rootRef} className="gallery-private gallery-private--wall">
+  return <div ref={rootRef} tabIndex={-1} className="gallery-private gallery-private--wall">
     <form className="gallery-search" role="search" onSubmit={submitSearch}>
       <label className="sr-only" htmlFor="gallery-search-input">Find photos</label>
       <div className="gallery-search__field">
@@ -1008,6 +1274,13 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
         aria-label={selecting ? 'Done selecting' : 'Select photos'}
         onClick={toggleSelecting}
       ><SquareDashedMousePointer aria-hidden="true" /><span className="sr-only">{selecting ? 'Done selecting' : 'Select photos'}</span></button>
+    </div>
+    <div className="library-arrivals">
+      {arrivals.count > 0 && <button type="button" ref={arrivalButton}
+        className="text-button library-arrivals__accept" disabled={accepting}
+        onClick={() => { if (arrivals.latestSnapshotSequence !== null) void reconcileWindow(arrivals.latestSnapshotSequence, true); }}
+      >{accepting ? 'Loading new photos…' : `${arrivals.count} new ${arrivals.count === 1 ? 'photo' : 'photos'}`}</button>}
+      {arrivalError && <span role="alert">Could not load new photos. Try again.</span>}
     </div>
     {/* Under the row, not in it. `Select all n loaded photos` appears only while a selection runs
         and it is a sentence with no short form: in the row it took the phone's four controls from
@@ -1069,7 +1342,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       }}
       onClear={clearSelection}
     />}
-    {viewerPhotoId !== null && viewerIndex !== null && viewerIndex >= 0 && <GalleryViewer
+    {viewerPhotoId !== null && <GalleryViewer
       photos={rows}
       photoId={viewerPhotoId}
       timeZone={event.eventTimezone}
@@ -1079,6 +1352,8 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       loadNextAfter={loadNextAfter}
       onClose={closeViewer}
       onFavorite={(photo) => void toggleFavorite(photo)}
+      fileActions={viewerFileActions}
+      onTrashConfirmed={confirmViewerRemoval}
       live={live}
       onAnnouncement={onAnnouncement}
     />}

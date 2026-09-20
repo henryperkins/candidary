@@ -169,6 +169,7 @@ function managerFetch(overrides: {
     if (url.pathname === '/api/manage/events/event-a/photo-exports/capabilities' && method === 'GET') {
       return success({ enabled: false, destinations: [], activeJob: null });
     }
+    if (url.pathname === '/api/manage/events/event-a/gallery/arrivals') return success({afterSequence: Number(url.searchParams.get('after')), snapshotSequence: 4, count: 0});
     if (url.pathname === '/api/manage/events/event-a/gallery' && method === 'GET') {
       const query = url.searchParams.get('query');
       const favorites = url.searchParams.get('favorites') === '1';
@@ -179,7 +180,7 @@ function managerFetch(overrides: {
         || item.originalFilename.toLowerCase().includes(query.toLowerCase())
       ));
       if (favorites) result = result.filter((item) => item.isFavorite);
-      return success({ media: result, nextCursor: overrides.nextCursor ?? null });
+      return success({ media: result, nextCursor: overrides.nextCursor ?? null, ...(url.searchParams.get('live') === '1' ? { snapshotSequence: Number(url.searchParams.get('snapshot') ?? 4) } : {}) });
     }
     if (url.pathname === '/api/manage/events/event-a/gallery/summary' && method === 'GET') {
       return gallerySummary(galleryRows, overrides.guestGalleryVisible);
@@ -274,7 +275,16 @@ function renderGalleryWithFetch(
       throw caught;
     }
   });
-  vi.stubGlobal('fetch', fetchMock);
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'https://candidary.test');
+    if (url.pathname.endsWith('/gallery/arrivals')) return success({ afterSequence: Number(url.searchParams.get('after')), snapshotSequence: Number(url.searchParams.get('after')), count: 0 });
+    const response = await fetchMock(input, init);
+    if (url.pathname.endsWith('/gallery') && url.searchParams.get('live') === '1' && response.ok) {
+      const body = await response.clone().json();
+      return new Response(JSON.stringify({ ...body, data: { ...body.data, snapshotSequence: Number(url.searchParams.get('snapshot') ?? 4) } }), { status: response.status, headers: response.headers });
+    }
+    return response;
+  });
   const onPrepare = overrides.onPrepare ?? vi.fn(noop);
   const onStatusChange = vi.fn();
   const onGalleryInvalidated = overrides.onGalleryInvalidated ?? vi.fn();
@@ -755,8 +765,8 @@ describe('host private gallery', () => {
     await user.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByRole('button', { name: 'Open Replacement photo, from Maya' })).toBeVisible();
     expect(replacementRequests).toEqual([
-      '/api/manage/events/event-a/gallery?query=Maya&order=newest',
-      '/api/manage/events/event-a/gallery?query=Maya&order=newest',
+      '/api/manage/events/event-a/gallery?live=1&query=Maya&order=newest',
+      '/api/manage/events/event-a/gallery?live=1&query=Maya&order=newest',
     ]);
   });
 
@@ -1933,7 +1943,16 @@ describe('host private gallery', () => {
       }
       return base(input, init);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'https://candidary.test');
+    if (url.pathname.endsWith('/gallery/arrivals')) return success({ afterSequence: Number(url.searchParams.get('after')), snapshotSequence: Number(url.searchParams.get('after')), count: 0 });
+    const response = await fetchMock(input, init);
+    if (url.pathname.endsWith('/gallery') && url.searchParams.get('live') === '1' && response.ok) {
+      const body = await response.clone().json();
+      return new Response(JSON.stringify({ ...body, data: { ...body.data, snapshotSequence: Number(url.searchParams.get('snapshot') ?? 4) } }), { status: response.status, headers: response.headers });
+    }
+    return response;
+  });
     renderWorkspaceWithUndo(<ControlledGalleryWorkspace
       event={{ ...event, galleryVisible: false }}
       eventId="event-a"

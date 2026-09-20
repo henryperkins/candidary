@@ -9,6 +9,7 @@ import type { EventView } from '../../shared/contracts';
 import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { createAppRouter } from '../../src/app/router';
+import { ManagerLibraryTrash } from '../../src/features/gallery/ManagerLibraryTrash';
 
 function json(data: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify({ data, requestId: 'request-a' }), {
@@ -78,6 +79,8 @@ function managerFetch(options: {
   onRestore?: () => Promise<Response>;
   onIntakeLoad?: () => Promise<Response> | null;
   onExports?: () => Promise<Response>;
+  onGallery?: (url: string, rows: typeof FIRST[]) => Promise<Response>;
+  onTrashList?: (url: string) => Promise<Response>;
 } = {}) {
   const calls: string[] = [];
   const event = options.event ?? EVENT;
@@ -88,6 +91,7 @@ function managerFetch(options: {
     const method = init?.method ?? 'GET';
     calls.push(`${method} ${url.replace('http://localhost', '')}`);
     if (url.endsWith('/api/manage/events/event-a')) return json({ event });
+    if (url.endsWith('/api/manage/events/event-b')) return json({ event: { ...event, id: 'event-b', name: 'Next event' } });
     if (url.endsWith('/gallery/summary')) return json({ summary: {
       albumPhotoCount: 0,
       albumEntryCount: 0,
@@ -95,8 +99,14 @@ function managerFetch(options: {
       guestGalleryVisible: true,
       guestGalleryPublishedCount: 0,
     } });
+    if (url.includes('/gallery/arrivals')) return json({ afterSequence: 2, snapshotSequence: 2, count: 0 });
+    if (url.includes('/photo-exports/capabilities')) return json({ enabled: false });
+    if (url.includes('/gallery?')) return options.onIntakeLoad?.() ?? options.onGallery?.(url, activeMedia) ?? json({
+      media: activeMedia.map(row => ({ ...row, receivedAt: row.createdAt, timelineAt: row.createdAt, timelineSource: 'received', isFavorite: false })),
+      nextCursor: null, snapshotSequence: 2,
+    });
     if (url.includes('/media/trash')) {
-      return json({ media: retainedMedia, nextCursor: null });
+      return options.onTrashList?.(url) ?? json({ media: retainedMedia, nextCursor: null });
     }
     if (url.includes('/media/') && url.endsWith('/trash')) {
       if (options.onTrash) return options.onTrash();
@@ -145,13 +155,157 @@ async function openManager(fetchMock: ReturnType<typeof vi.fn>) {
   vi.stubGlobal('fetch', fetchMock);
   const router = createAppRouter(['/manage/event/event-a']);
   render(<RouterProvider router={router} />);
-  await screen.findByRole('heading', { name: 'Live intake' });
+  await screen.findByRole('heading', { name: 'Library' });
+  return router;
+}
+
+async function openConfirmation(user: ReturnType<typeof userEvent.setup>, filename = 'first-dance.jpg') {
+  if (!screen.queryByRole('dialog')) {
+    await waitFor(() => expect(document.querySelector(`[data-photo-id="${filename === 'cake.jpg' ? 'media-2' : 'media-1'}"] .gallery-mosaic__open`)).not.toBeNull());
+    await user.click(document.querySelector<HTMLButtonElement>(`[data-photo-id="${filename === 'cake.jpg' ? 'media-2' : 'media-1'}"] .gallery-mosaic__open`)!);
+  }
+  await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
 }
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('Library manager trash ownership', () => {
+  async function openLibrary(options: Parameters<typeof managerFetch>[0] = {}) {
+    const fixtures = managerFetch(options);
+    await openManager(fixtures.fetchMock);
+    await screen.findByRole('heading', { name: 'Library', exact: true });
+    await waitFor(() => expect(document.querySelector('.gallery-mosaic__open')).not.toBeNull());
+    return fixtures;
+  }
+  async function trashOpen(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }));
+  }
+  it('advances next then previous without double advancement and preserves Undo after close', async () => {
+    const user = userEvent.setup();
+    const { calls } = await openLibrary();
+    await user.click(document.querySelector<HTMLButtonElement>('[data-photo-id="media-1"] .gallery-mosaic__open')!);
+    await trashOpen(user);
+    expect(await screen.findByRole('dialog', { name: 'cake.jpg' })).toBeVisible();
+    expect(document.querySelector('[data-photo-id="media-1"]')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Close viewer' }));
+    await user.click(screen.getByRole('button', { name: 'Undo' }));
+    await waitFor(() => expect(document.querySelector('[data-photo-id="media-1"]')).not.toBeNull());
+    await user.click(document.querySelector<HTMLButtonElement>('[data-photo-id="media-2"] .gallery-mosaic__open')!);
+    await trashOpen(user);
+    expect(await screen.findByRole('dialog', { name: 'first-dance.jpg' })).toBeVisible();
+    expect(calls.filter(call => call.includes('/trash') && call.startsWith('POST'))).toHaveLength(2);
+  });
+  it('closes after deleting the only photo and restores meaningful Library focus', async () => {
+    const user = userEvent.setup();
+    await openLibrary({ media: [FIRST] });
+    await user.click(document.querySelector<HTMLButtonElement>('.gallery-mosaic__open')!);
+    await trashOpen(user);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.querySelector('.gallery-private')).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeVisible();
+  });
+  it('removes the confirmed row before a failed next-page read, retains Undo, and retries that read', async () => {
+    const user = userEvent.setup();
+    let continuationCalls = 0;
+    const { calls } = await openLibrary({ media: [FIRST], onGallery: url => {
+      if (url.includes('cursor=')) {
+        continuationCalls += 1;
+        return continuationCalls === 1 ? apiError('INTERNAL_ERROR', 'Next page failed', 500)
+          : json({ media: [{ ...SECOND, receivedAt: SECOND.createdAt, timelineAt: SECOND.createdAt, timelineSource: 'received', isFavorite: false }], nextCursor: null, snapshotSequence: 2 });
+      }
+      return json({ media: [{ ...FIRST, receivedAt: FIRST.createdAt, timelineAt: FIRST.createdAt, timelineSource: 'received', isFavorite: false }], nextCursor: 'page-two', snapshotSequence: 2 });
+    } });
+    await user.click(document.querySelector<HTMLButtonElement>('.gallery-mosaic__open')!);
+    await trashOpen(user);
+    expect(await screen.findByText('Photo moved to Trash. Could not load the next photo.')).toBeVisible();
+    expect(document.querySelector('[data-photo-id="media-1"]')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeVisible();
+    const retry = screen.getByRole('button', { name: 'Retry' });
+    const back = screen.getByRole('button', { name: 'Back to Library' });
+    const undo = screen.getByRole('button', { name: 'Undo' });
+    const dismiss = screen.getByRole('button', { name: 'Dismiss' });
+    const background = screen.getByRole('button', { name: 'Gallery' });
+    expect(background.closest('[inert]')).not.toBeNull();
+    expect(undo.closest('[inert]')).toBeNull();
+    expect(retry).toHaveFocus();
+    // Recovery is one keyboard boundary, including its explicitly allowed portal.
+    for (const target of [undo, dismiss, back, retry]) {
+      await user.tab();
+      expect(target).toHaveFocus();
+      expect(background).not.toHaveFocus();
+    }
+    for (const target of [back, dismiss, undo, retry]) {
+      await user.tab({ shift: true });
+      expect(target).toHaveFocus();
+      expect(background).not.toHaveFocus();
+    }
+    // Keyboard trash may initially put focus on Undo; it must reach Dismiss next.
+    undo.focus();
+    await user.tab();
+    expect(dismiss).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('dialog', { name: 'cake.jpg' })).toBeVisible();
+    expect(calls.filter(call => call.endsWith('/trash') && call.startsWith('POST'))).toHaveLength(1);
+  });
+  it('does not adopt a direct restore response after the event owner changes', async () => {
+    const user = userEvent.setup();
+    let finish!: (value: Response) => void;
+    const response = new Promise<Response>(resolve => { finish = resolve; });
+    const { fetchMock, calls } = managerFetch({ trash: [TRASHED], onRestore: () => response });
+    const router = await openManager(fetchMock);
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
+    await user.click(await screen.findByRole('button', { name: 'Restore first-dance.jpg' }));
+    expect(screen.getByRole('button', { name: 'Restore first-dance.jpg' })).toBeDisabled();
+    await act(async () => { await router.navigate('/manage/event/event-b'); });
+    await screen.findByRole('heading', { name: 'Next event' });
+    await user.click(screen.getByRole('button', { name: /^Trash/ }));
+    expect(await screen.findByRole('button', { name: 'Restore first-dance.jpg' })).toBeEnabled();
+    const readsBefore = calls.filter(call => call === 'GET /api/manage/events/event-b').length;
+    await act(async () => { finish(await json({ media: FIRST })); });
+    expect(screen.getByRole('button', { name: 'Restore first-dance.jpg' })).toBeEnabled();
+    expect(calls.filter(call => call === 'GET /api/manage/events/event-b')).toHaveLength(readsBefore);
+    expect(screen.queryByText(/is back in Library/)).toBeNull();
+  });
+  it('loads later Trash pages for a retained recovery target and focuses its Restore action', async () => {
+    const user = userEvent.setup();
+    const later = { ...TRASHED, id: 'later-photo', originalFilename: 'later.jpg' };
+    const { fetchMock } = managerFetch({ onTrashList: url => json({
+      media: url.includes('cursor=') ? [later] : [TRASHED],
+      nextCursor: url.includes('cursor=') ? null : 'trash-next',
+    }) });
+    const router = await openManager(fetchMock);
+    await act(async () => { await router.navigate('/manage/event/event-a', { state: {
+      __candidaryManager: { version: 1, eventId: 'event-a', intent: { kind: 'open-recently-deleted', focusMediaId: later.id } },
+    } }); });
+    expect(await screen.findByRole('button', { name: 'Restore later.jpg' })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Back to Library' }));
+    expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
+  });
+});
+
+it('keeps extracted Trash metadata-only, with exact deadlines, expired exclusions and owner callbacks', async () => {
+  const user = userEvent.setup();
+  const onRestore = vi.fn();
+  const onBack = vi.fn();
+  render(<ManagerLibraryTrash rows={[TRASHED, { ...TRASHED, id: 'expired', restoreUntil: '2020-01-01T00:00:00Z' }]}
+    now={Date.parse('2026-09-20T01:00:00Z')} timeZone="America/Chicago" pendingIds={new Set()}
+    hasMore={false} loadingMore={false} onRestore={onRestore} onLoadMore={vi.fn()} onBackToLibrary={onBack} />);
+  const deadline = document.querySelector('time');
+  expect(deadline).toHaveAttribute('datetime', TRASHED.restoreUntil);
+  expect(deadline).toHaveTextContent('October 18, 2026');
+  expect(screen.getAllByRole('button', { name: 'Restore first-dance.jpg' })).toHaveLength(1);
+  expect(screen.queryByRole('img')).toBeNull();
+  expect(screen.queryByRole('link')).toBeNull();
+  const restore = screen.getByRole('button', { name: 'Restore first-dance.jpg' });
+  await user.click(restore);
+  expect(onRestore).toHaveBeenCalledWith(TRASHED, restore);
+  await user.click(screen.getByRole('button', { name: 'Back to Library' }));
+  expect(onBack).toHaveBeenCalledOnce();
 });
 
 describe('the event retention deadline', () => {
@@ -167,6 +321,7 @@ describe('the event retention deadline', () => {
 
       await openManager(fetchMock);
 
+      fireEvent.click(screen.getByText('Event details'));
       const deadline = screen.getByText('September 19, 2026 at 9:30 PM CDT', {
         selector: 'time',
       });
@@ -186,6 +341,7 @@ describe('the event retention deadline', () => {
 
     await openManager(fetchMock);
 
+    fireEvent.click(screen.getByText('Event details'));
     const deadline = screen.getByText('Time unavailable');
     const retention = deadline.closest('p');
     expect(retention).toHaveTextContent('Files delete Time unavailable');
@@ -212,19 +368,19 @@ describe('manager access recovery destinations', () => {
   });
 });
 
-describe('moving a photo to Recently deleted', () => {
+describe('moving a photo to Trash', () => {
   it('safety ladder consequential: sends no request until the confirmation is explicitly activated', async () => {
     const user = userEvent.setup();
     const { calls, fetchMock } = managerFetch();
     await openManager(fetchMock);
 
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
+    await openConfirmation(user);
 
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByRole('heading', { name: /Move this photo to Recently deleted\?/i })).toBeInTheDocument();
-    expect(calls.some((call) => call.includes('/trash'))).toBe(false);
+    expect(within(dialog).getByRole('heading', { name: /Move this photo to Trash\?/i })).toBeInTheDocument();
+    expect(calls.some((call) => call.startsWith('POST ') && call.includes('/trash'))).toBe(false);
 
-    await user.click(within(dialog).getByRole('button', { name: 'Move to Recently deleted' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Move to Trash' }));
     await waitFor(() => {
       expect(calls.filter((call) => call === 'POST /api/manage/events/event-a/media/media-1/trash')).toHaveLength(1);
     });
@@ -234,7 +390,7 @@ describe('moving a photo to Recently deleted', () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch();
     await openManager(fetchMock);
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
+    await openConfirmation(user);
 
     const dialog = await screen.findByRole('dialog');
     const body = dialog.textContent ?? '';
@@ -258,17 +414,17 @@ describe('moving a photo to Recently deleted', () => {
     const { calls, fetchMock } = managerFetch();
     await openManager(fetchMock);
 
-    const trigger = await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i });
-    await user.click(trigger);
+    await openConfirmation(user);
+    const trigger = () => screen.getByRole('button', { name: 'Move to Trash' });
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => {
       expect(within(dialog).getByRole('button', { name: 'Keep photo' })).toHaveFocus();
     });
 
     await user.click(within(dialog).getByRole('button', { name: 'Keep photo' }));
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(trigger).toHaveFocus();
-    expect(calls.some((call) => call.includes('/trash'))).toBe(false);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Keep photo' })).toBeNull());
+    expect(trigger()).toHaveFocus();
+    expect(calls.some((call) => call.startsWith('POST ') && call.includes('/trash'))).toBe(false);
   });
 
   it('cancels on Escape without sending a request', async () => {
@@ -276,32 +432,32 @@ describe('moving a photo to Recently deleted', () => {
     const { calls, fetchMock } = managerFetch();
     await openManager(fetchMock);
 
-    const trigger = await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i });
-    await user.click(trigger);
+    await openConfirmation(user);
+    const trigger = () => screen.getByRole('button', { name: 'Move to Trash' });
     await screen.findByRole('dialog');
     await user.keyboard('{Escape}');
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(trigger).toHaveFocus();
-    expect(calls.some((call) => call.includes('/trash'))).toBe(false);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Keep photo' })).toBeNull());
+    expect(trigger()).toHaveFocus();
+    expect(calls.some((call) => call.startsWith('POST ') && call.includes('/trash'))).toBe(false);
   });
 
   it('is not the dialog default submit and stays idempotent under double activation', async () => {
     const user = userEvent.setup();
     const { calls, fetchMock } = managerFetch();
     await openManager(fetchMock);
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
+    await openConfirmation(user);
 
     const dialog = await screen.findByRole('dialog');
-    const destructive = within(dialog).getByRole('button', { name: 'Move to Recently deleted' });
+    const destructive = within(dialog).getByRole('button', { name: 'Move to Trash' });
     expect(destructive).toHaveAttribute('type', 'button');
     // Enter on the initially focused control must not reach the destructive one.
     await user.keyboard('{Enter}');
     expect(calls.some((call) => call.includes('/media/media-1/trash'))).toBe(false);
 
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
+    await openConfirmation(user);
     const reopened = await screen.findByRole('dialog');
-    const button = within(reopened).getByRole('button', { name: 'Move to Recently deleted' });
+    const button = within(reopened).getByRole('button', { name: 'Move to Trash' });
     await user.click(button);
     await user.click(button).catch(() => undefined);
     await waitFor(() => {
@@ -313,13 +469,13 @@ describe('moving a photo to Recently deleted', () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch();
     await openManager(fetchMock);
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Recently deleted' }));
+    await openConfirmation(user);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
 
     // The deadline comes from the response, rendered in the event's zone —
     // 2026-10-19T00:00Z is still the 18th in America/Chicago.
     const announced = () => screen.getAllByRole('status').map((node) => node.textContent ?? '').join(' ');
-    await waitFor(() => expect(announced()).toMatch(/first-dance\.jpg moved to Recently deleted/));
+    await waitFor(() => expect(announced()).toMatch(/first-dance\.jpg moved to Trash/));
     expect(announced()).toMatch(/October 18, 2026/);
     expect(await screen.findByRole('button', { name: 'Undo' })).toBeInTheDocument();
   });
@@ -343,32 +499,33 @@ describe('moving a photo to Recently deleted', () => {
     const user = userEvent.setup();
     await openManager(fetchMock);
 
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
+    await openConfirmation(user);
     await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
+      .getByRole('button', { name: 'Move to Trash' }));
     expect(await screen.findByRole('button', { name: 'Undo' })).toBeVisible();
 
-    await user.click(await screen.findByRole('button', { name: /Move cake\.jpg to Recently deleted/i }));
+    await openConfirmation(user, 'cake.jpg');
     await user.click(within(await screen.findByRole('dialog'))
-      .getByRole('button', { name: 'Move to Recently deleted' }));
+      .getByRole('button', { name: 'Move to Trash' }));
     await waitFor(() => expect(trashRequest).toBe(2));
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
 
     resolveSecondTrash(await json({ media: secondTrashed }));
     const replacement = await screen.findByRole('button', { name: 'Undo' });
     expect(replacement.closest('.album-undo__bar'))
-      .toHaveTextContent('cake.jpg moved to Recently deleted.');
+      .toHaveTextContent('cake.jpg moved to Trash.');
   });
 
-  it('keeps one Manager Undo bar and its API-only restore offer across an Intake unmount', async () => {
+  it('keeps one Manager Undo bar and its API-only restore offer across an Library unmount', async () => {
     const user = userEvent.setup();
     const { calls, fetchMock } = managerFetch();
     await openManager(fetchMock);
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Recently deleted' }));
+    await openConfirmation(user);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
 
     const undo = await screen.findByRole('button', { name: 'Undo' });
-    expect(document.querySelectorAll('.manager-main > .album-undo')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-gallery-live-host="true"] > .album-undo')).toHaveLength(1);
+    if (screen.queryByRole('button', { name: 'Close viewer' })) await user.click(screen.getByRole('button', { name: 'Close viewer' }));
     await user.click(screen.getByRole('button', { name: 'Share' }));
     expect(await screen.findByRole('heading', { name: 'Share your event' })).toBeVisible();
     expect(undo).toBeInTheDocument();
@@ -392,12 +549,12 @@ describe('moving a photo to Recently deleted', () => {
       expect(count('/entry')).toBe(1);
     });
 
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Recently deleted' }));
+    await openConfirmation(user);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
 
     await waitFor(() => {
       expect(count('/api/manage/events/event-a')).toBe(2);
-      expect(count('/media')).toBe(2);
+      expect(count('/media/trash')).toBe(2);
       expect(count('/gallery/summary')).toBe(2);
       expect(count('/guestbook/summary')).toBe(2);
     });
@@ -409,13 +566,13 @@ describe('moving a photo to Recently deleted', () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch();
     await openManager(fetchMock);
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Recently deleted' }));
+    await openConfirmation(user);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i })).toBeNull();
+      expect(document.querySelector('[data-photo-id="media-1"]')).toBeNull();
     });
-    expect(screen.getByRole('button', { name: /Move cake\.jpg to Recently deleted/i })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'cake.jpg' })).toBeInTheDocument();
   });
 
   it.each([
@@ -423,44 +580,43 @@ describe('moving a photo to Recently deleted', () => {
       label: 'next card',
       media: [FIRST, SECOND],
       filename: 'first-dance.jpg',
-      fallback: () => screen.getByRole('link', { name: 'Download original cake.jpg' }),
+      fallback: () => screen.getByRole('button', { name: 'Move to Trash' }),
     },
     {
       label: 'previous card',
       media: [FIRST, SECOND],
       filename: 'cake.jpg',
-      fallback: () => screen.getByRole('link', { name: 'Download original first-dance.jpg' }),
+      fallback: () => screen.getByRole('button', { name: 'Move to Trash' }),
     },
     {
       label: 'Intake heading',
       media: [FIRST],
       filename: 'first-dance.jpg',
-      fallback: () => screen.getByRole('heading', { name: 'Live intake' }),
+      fallback: () => document.querySelector('.gallery-private'),
     },
   ])('establishes the $label fallback before a pointer trash offer', async ({ media, filename, fallback }) => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch({ media });
     await openManager(fetchMock);
-    await user.click(await screen.findByRole('button', {
-      name: `Move ${filename} to Recently deleted`,
-    }));
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Recently deleted' }));
+    await openConfirmation(user, filename);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
 
     await screen.findByRole('button', { name: 'Undo' });
     expect(fallback()).toHaveFocus();
   });
 
-  it('focuses Undo for keyboard confirmation and falls back to the current section heading once Intake disconnects', async () => {
+  it('focuses Undo for keyboard confirmation and falls back to the current section heading once Library disconnects', async () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch();
     await openManager(fetchMock);
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
+    await openConfirmation(user);
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', {
-      name: 'Move to Recently deleted',
+      name: 'Move to Trash',
     }), { detail: 0 });
 
     const undo = await screen.findByRole('button', { name: 'Undo' });
     await waitFor(() => expect(undo).toHaveFocus());
+    if (screen.queryByRole('button', { name: 'Close viewer' })) await user.click(screen.getByRole('button', { name: 'Close viewer' }));
     await user.click(screen.getByRole('button', { name: 'Share' }));
     const shareHeading = await screen.findByRole('heading', { name: 'Share your event' });
     await user.click(screen.getByRole('button', { name: 'Dismiss' }));
@@ -473,17 +629,17 @@ describe('moving a photo to Recently deleted', () => {
       onTrash: () => apiError('MEDIA_STATE_CONFLICT', 'This photo is no longer available.', 409),
     });
     await openManager(fetchMock);
-    await user.click(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i }));
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Recently deleted' }));
+    await openConfirmation(user);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Move to Trash' }));
 
-    expect(await screen.findByText('This photo is no longer available.')).toBeInTheDocument();
+    expect(await within(screen.getByRole('dialog')).findByText('This photo is no longer available.')).toBeInTheDocument();
     // The photo is still on screen: a refused removal removes nothing.
-    expect(screen.getByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'first-dance.jpg' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Library', hidden: true })).toBeInTheDocument();
   });
 });
 
-describe('Recently deleted', () => {
+describe('Trash', () => {
   it('shows only the alternate Intake destination', async () => {
     const user = userEvent.setup();
     const { fetchMock } = managerFetch({
@@ -493,11 +649,11 @@ describe('Recently deleted', () => {
     await openManager(fetchMock);
 
     expect(screen.getByRole('button', { name: 'Trash (1)' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Live intake' })).not.toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Gallery mode' }).querySelectorAll('button')).toHaveLength(3);
 
     await user.click(screen.getByRole('button', { name: 'Trash (1)' }));
-    await screen.findByRole('heading', { name: 'Recently deleted' });
-    expect(screen.getByRole('button', { name: 'Live intake' })).toBeVisible();
+    await screen.findByRole('heading', { name: 'Trash' });
+    expect(screen.getByRole('button', { name: 'Back to Library' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Trash (1)' })).not.toBeInTheDocument();
   });
 
@@ -506,14 +662,14 @@ describe('Recently deleted', () => {
     const { calls, fetchMock } = managerFetch({ trash: [TRASHED] });
     await openManager(fetchMock);
 
-    await user.type(screen.getByLabelText('Filter by guest name'), 'Avery');
-    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await user.type(screen.getByPlaceholderText('Search photos'), 'Avery');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
     await waitFor(() => {
-      expect(calls.some((call) => call.includes('guestName=Avery'))).toBe(true);
+      expect(calls.some((call) => call.includes('query=Avery'))).toBe(true);
     });
 
     await user.click(screen.getByRole('button', { name: /^Trash/ }));
-    await screen.findByRole('heading', { name: 'Recently deleted' });
+    await screen.findByRole('heading', { name: 'Trash' });
 
     const trashCalls = calls.filter((call) => call.includes('/media/trash'));
     expect(trashCalls.length).toBeGreaterThan(0);
@@ -539,7 +695,7 @@ describe('Recently deleted', () => {
     expect(within(rows[1]!).queryByRole('button', { name: /Restore/ })).toBeNull();
   });
 
-  it('removes Restore while Recently deleted stays open through its nearest deadline', async () => {
+  it('removes Restore while Trash stays open through its nearest deadline', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date('2026-09-20T01:00:00.000Z'));
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -587,7 +743,7 @@ describe('Recently deleted', () => {
     });
     await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(0));
     const announcements = screen.getAllByRole('status').map((node) => node.textContent ?? '').join(' ');
-    expect(announcements).toMatch(/first-dance\.jpg is back in Live intake/);
+    expect(announcements).toMatch(/first-dance\.jpg is back in Library/);
   });
 
   it('uses the same exact four-owner invalidation boundary for direct Restore', async () => {
@@ -622,7 +778,7 @@ describe('the capacity meter', () => {
 
     const capacity = screen.getByText('Event capacity').closest('section');
     expect(capacity?.textContent).toMatch(/5 of 10,000/);
-    expect(capacity?.textContent).toMatch(/Includes 3 in Recently deleted/);
+    expect(capacity?.textContent).toMatch(/Includes 3 in Trash/);
   });
 });
 
@@ -634,9 +790,9 @@ describe('Manager resource ownership', () => {
     await openManager(fetchMock);
 
     // The shell, the header, the nav and Intake are all still here.
-    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Library', hidden: true })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Maya & Theo' })).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i })).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector('[data-photo-id="media-1"]')).not.toBeNull());
     expect(screen.queryByText('Event manager unavailable')).toBeNull();
   });
 
@@ -648,7 +804,7 @@ describe('Manager resource ownership', () => {
         intakeReads += 1;
         return intakeReads === 1
           ? apiError('INTERNAL_ERROR', 'Something went wrong.', 500)
-          : json({ media: [FIRST], nextCursor: null });
+          : json({ media: [{ ...FIRST, timelineAt: FIRST.createdAt, receivedAt: FIRST.createdAt, timelineSource: 'received', isFavorite: false }], nextCursor: null, snapshotSequence: 2 });
       },
     });
     await openManager(fetchMock);
@@ -657,7 +813,7 @@ describe('Manager resource ownership', () => {
     expect(screen.getByRole('heading', { name: 'Maya & Theo' })).toBeInTheDocument();
 
     await user.click(retry);
-    expect(await screen.findByRole('button', { name: /Move first-dance\.jpg to Recently deleted/i })).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector('[data-photo-id="media-1"]')).not.toBeNull());
   });
 
   it('escalates a credential failure from a noncritical resource to the recovery surface', async () => {
@@ -674,7 +830,7 @@ describe('Manager resource ownership', () => {
     expect(notice).toHaveTextContent('Open the latest management link you saved to start again.');
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
     // And the Manager the host was working in survives it.
-    expect(screen.getByRole('heading', { name: 'Live intake' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Library', hidden: true })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Maya & Theo' })).toBeInTheDocument();
   });
 

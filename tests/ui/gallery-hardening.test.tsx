@@ -28,11 +28,20 @@ const unavailable = () => new Response(JSON.stringify({ code: 'INTERNAL_ERROR', 
 function stubFetch(handle: (path: string, init: RequestInit) => Response | Promise<Response> | undefined) {
   const fetcher = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const path = String(input);
+    const url = new URL(path, 'https://candidary.test');
+    if (url.pathname.endsWith('/gallery/arrivals')) return ok({ afterSequence: Number(url.searchParams.get('after')), snapshotSequence: Number(url.searchParams.get('after')), count: 0 });
     const handled = handle(path, init);
-    if (handled !== undefined) return handled;
+    if (handled !== undefined) {
+      const response = await handled;
+      if (response.ok && url.pathname.endsWith('/gallery') && url.searchParams.get('live') === '1') {
+        const body = await response.clone().json();
+        return ok({ ...body.data, snapshotSequence: Number(url.searchParams.get('snapshot') ?? 2) });
+      }
+      return response;
+    }
     if (path === '/api/event/maya-theo') return ok({ event: GUEST_EVENT_FIXTURE, role: 'guest' });
     if (path.includes('/photo-exports/capabilities')) return ok({ enabled: false, activeJob: null });
-    if (path.includes('/gallery')) return ok({ media: [], nextCursor: null });
+    if (path.includes('/gallery')) return ok({ media: [], nextCursor: null, ...(url.searchParams.get('live') === '1' ? { snapshotSequence: 2 } : {}) });
     throw new Error(`Unexpected request: ${init.method ?? 'GET'} ${path}`);
   });
   vi.stubGlobal('fetch', fetcher);

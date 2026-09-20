@@ -129,7 +129,9 @@ describe('ManagerUploadDialog', () => {
     expect(await within(dialog).findByRole('heading', { name: '1 photo was added.' })).toBeVisible();
     expect(within(dialog).getAllByRole('heading', { name: 'Add photos' })).toHaveLength(1);
     expect(onFinalized).toHaveBeenCalledOnce();
-    const done = within(dialog).getByRole('button', { name: 'Done' });
+    expect(within(dialog).getByText('The delivered photos are now in Library.')).toBeVisible();
+    expect(dialog.querySelector('.photo-drop--manager')).not.toBeNull();
+    const done = within(dialog).getByRole('button', { name: 'Return to Library' });
     expect(done).toBeEnabled();
     expect(done).toHaveFocus();
     await user.click(done);
@@ -297,7 +299,7 @@ describe('ManagerUploadDialog', () => {
     await user.click(removeRejected);
 
     expect(await screen.findByRole('heading', { name: '1 photo was added.' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Done' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Return to Library' })).toHaveFocus();
   });
 
   it('reaches terminal handoff from a real flat RESOURCE_FORBIDDEN content response', async () => {
@@ -399,7 +401,7 @@ describe('ManagerUploadDialog', () => {
     expect(await screen.findByText('Temporary uploads will expire automatically.')).toBeVisible();
     expect(onRefreshAfterTerminal).toHaveBeenCalledOnce();
     expect(onEscalate).not.toHaveBeenCalled();
-    const returnToIntake = screen.getByRole('button', { name: 'Return to Intake' });
+    const returnToIntake = screen.getByRole('button', { name: 'Return to Library' });
     expect(returnToIntake).toHaveFocus();
     await user.click(returnToIntake);
     expect(onClose).toHaveBeenCalledOnce();

@@ -1520,6 +1520,10 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     return route.fulfill({ json: { data: { summary }, requestId: 'request-a' } });
   });
   await page.route(`${base}/gallery**`, (route) => {
+    if (new URL(route.request().url()).pathname.endsWith('/gallery/arrivals')) {
+      const after = Number(new URL(route.request().url()).searchParams.get('after') ?? 0);
+      return route.fulfill({ json: { data: { afterSequence: after, snapshotSequence: after, count: 0 }, requestId: 'library-arrivals' } });
+    }
     if (new URL(route.request().url()).pathname.endsWith('/gallery/summary')) {
       return route.fallback();
     }
@@ -1538,7 +1542,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
       timelineSource: 'received',
       isFavorite: false,
     }));
-    return route.fulfill({ json: { data: { media, nextCursor: null }, requestId: 'request-a' } });
+    return route.fulfill({ json: { data: { media, nextCursor: null, ...(new URL(route.request().url()).searchParams.get('live') === '1' ? { snapshotSequence: initialMedia.length } : {}) }, requestId: 'request-a' } });
   });
   await page.route(new RegExp(`/api/manage/events/${event.id}/media/[^/?]+/favorite$`, 'u'), (route) => {
     const mediaId = new URL(route.request().url()).pathname.split('/').at(-2)!;
@@ -2074,6 +2078,10 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
   });
 
   await page.route(`${base}/gallery**`, (route) => {
+    if (new URL(route.request().url()).pathname.endsWith('/gallery/arrivals')) {
+      const after = Number(new URL(route.request().url()).searchParams.get('after') ?? 0);
+      return route.fulfill({ json: { data: { afterSequence: after, snapshotSequence: after, count: 0 }, requestId: 'library-arrivals' } });
+    }
     if (new URL(route.request().url()).pathname.endsWith('/gallery/summary')) {
       return route.fallback();
     }
@@ -2090,7 +2098,7 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
         : right.timelineAt.localeCompare(left.timelineAt));
     observeAlbumRoute(route, 200);
     return route.fulfill({
-      json: { data: { media, nextCursor: null }, requestId: 'request-a' },
+      json: { data: { media, nextCursor: null, ...(new URL(route.request().url()).searchParams.get('live') === '1' ? { snapshotSequence: initialMedia.length } : {}) }, requestId: 'request-a' },
     });
   });
 
@@ -2354,5 +2362,67 @@ export async function stubManagerRoutes(page: Page, options: ManagerRouteOptions
     ...audit,
     album: { requests: albumRequests },
     managerLinkRotation: { requests: managerLinkRotationRequests },
+  };
+}
+
+/** Local snapshot fixture for the consolidated Library acceptance suite. */
+export async function stubLibraryRoutes(page: Page, count = 96, uploadOptions?: ManagerUploadRouteOptions) {
+  const originals = makeMedia(count, 'unpublished');
+  await stubManagerRoutes(page, { mediaPages: { first: { media: originals.slice(0, 48), nextCursor: null } }, event: { storedMediaCount: count }, uploads: uploadOptions });
+  let sequence = count;
+  let rows = originals.map((row, i) => ({ ...row, receivedAt: row.createdAt, timelineAt: row.createdAt, timelineSource: 'received' as const, isFavorite: i % 2 === 0, previewAvailable: i !== 1, deliverySequence: i + 1 }));
+  let trash: ManagerTrashedMediaView[] = [];
+  const requests: string[] = [];
+  let failPoll = false, failRefresh = false, failTrash = false, failContinuation = false;
+  const base = `/api/manage/events/${EVENT_FIXTURE.id}`;
+  const json = (route: Route, data: unknown) => route.fulfill({ json: { data, requestId: 'local-library' } });
+  const failure = (route: Route) => route.fulfill({ status: 500, json: { code: 'INTERNAL_ERROR', message: 'Local connection interrupted.', requestId: 'local-library-failure' } });
+  const matching = (query: URLSearchParams) => rows.filter(row => query.get('favorites') !== '1' || row.isFavorite).filter(row => !query.get('query') || [row.caption, row.guestName, row.originalFilename].some(value => value?.toLowerCase().includes(query.get('query')!.toLowerCase())));
+  await page.route(`**${base}/gallery**`, route => {
+    const url = new URL(route.request().url()), query = url.searchParams;
+    if (url.pathname.endsWith('/summary')) return route.fallback();
+    requests.push(url.pathname + url.search);
+    if (url.pathname.endsWith('/arrivals')) {
+      if (failPoll) return failure(route);
+      const after = Number(query.get('after'));
+      return json(route, { afterSequence: after, snapshotSequence: sequence, count: matching(query).filter(row => row.deliverySequence > after).length });
+    }
+    if (query.has('snapshot') && failRefresh || query.has('cursor') && failContinuation) return failure(route);
+    const cursor = query.get('cursor')?.split(':');
+    const snapshotSequence = Number(cursor?.[0] ?? query.get('snapshot') ?? sequence);
+    const offset = Number(cursor?.[1] ?? 0);
+    const sorted = matching(query).filter(row => row.deliverySequence <= snapshotSequence).toSorted((a, b) => (query.get('order') === 'earliest' ? 1 : -1) * (a.timelineAt.localeCompare(b.timelineAt) || a.id.localeCompare(b.id)));
+    return json(route, { media: sorted.slice(offset, offset + 48), snapshotSequence, nextCursor: offset + 48 < sorted.length ? `${snapshotSequence}:${offset + 48}` : null });
+  });
+  await page.route(`**${base}/media/trash*`, route => {
+    const offset = Number(new URL(route.request().url()).searchParams.get('cursor') ?? 0);
+    requests.push(new URL(route.request().url()).pathname + new URL(route.request().url()).search);
+    return json(route, { media: trash.slice(offset, offset + 48), nextCursor: offset + 48 < trash.length ? String(offset + 48) : null });
+  });
+  await page.route(new RegExp(`${base}/media/[^/]+/(trash|restore|favorite)$`), route => {
+    const url = new URL(route.request().url()), parts = url.pathname.split('/'), id = parts.at(-2)!, action = parts.at(-1);
+    requests.push(`${route.request().method()} ${url.pathname}`);
+    if (action === 'trash') {
+      if (failTrash) return failure(route);
+      const row = rows.find(row => row.id === id)!;
+      const retained = { id, originalFilename: row.originalFilename, caption: row.caption, guestName: row.guestName, trashedAt: new Date().toISOString(), restoreUntil: '2026-10-19T00:00:00.000Z' };
+      trash.unshift(retained); rows = rows.filter(row => row.id !== id);
+      return json(route, { media: retained });
+    }
+    if (action === 'restore') {
+      const retained = trash.find(row => row.id === id)!;
+      const original = originals.find(row => row.id === id) ?? { ...originals[0]!, ...retained, createdAt: '2026-07-27T12:00:00.000Z' };
+      rows.push({ ...original, receivedAt: original.createdAt, timelineAt: original.createdAt, timelineSource: 'received', isFavorite: false, previewAvailable: true, deliverySequence: 1 });
+      trash = trash.filter(row => row.id !== id);
+      return json(route, { media: original });
+    }
+    rows = rows.map(row => row.id === id ? { ...row, isFavorite: route.request().postDataJSON().favorite } : row);
+    return json(route, { media: { id, isFavorite: route.request().postDataJSON().favorite } });
+  });
+  await page.route(`**${base}`, route => json(route, { event: { ...EVENT_FIXTURE, storedMediaCount: rows.length, recoverableMediaCount: trash.length } }));
+  return { requests, originals,
+    deliver(amount: number) { for (let i = 0; i < amount; i++) { sequence++; const id = `20000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`; const time = new Date(Date.UTC(2026, 7, 1, 0, 0, sequence)).toISOString(); rows.push({ ...makeMedia(1, 'unpublished')[0]!, id, caption: `Arrival ${sequence}`, originalFilename: `arrival-${sequence}.jpg`, guestName: 'Avery Stone', createdAt: time, receivedAt: time, timelineAt: time, timelineSource: 'received', isFavorite: true, previewAvailable: true, deliverySequence: sequence }); } },
+    setFailures(flags: { poll?: boolean; refresh?: boolean; trash?: boolean; continuation?: boolean }) { if (flags.poll !== undefined) failPoll = flags.poll; if (flags.refresh !== undefined) failRefresh = flags.refresh; if (flags.trash !== undefined) failTrash = flags.trash; if (flags.continuation !== undefined) failContinuation = flags.continuation; },
+    setTrash(value: ManagerTrashedMediaView[]) { trash = value; },
   };
 }

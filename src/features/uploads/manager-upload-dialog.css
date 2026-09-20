@@ -1,0 +1,25 @@
+.manager-upload-dialog {
+  --field: #fffdf8;
+  --event-surface: var(--paper); --event-text: var(--ink); --event-raised-surface: var(--field);
+  --event-remembered-name-border: var(--border); --event-input-radius: 8px; --event-action-radius: 8px;
+  --event-primary: var(--chestnut); --event-primary-foreground: var(--paper); --event-primary-shadow: none;
+  --event-primary-hover: var(--chestnut-strong); --event-primary-on-surface: var(--chestnut);
+  --event-muted-text: var(--muted); --event-review-divider: var(--border); --event-border: var(--border);
+  --event-card-radius: 12px; --event-media-placeholder-start: var(--field); --event-media-placeholder-end: var(--paper);
+  --event-media-placeholder-foreground: var(--muted); --event-card-text: var(--ink);
+  --event-selection-summary-text: var(--muted); --event-quiet-text: var(--muted);
+  --event-frame-radius: 0px; --event-frame-shadow: none;
+  color: var(--ink);
+}
+.manager-upload-dialog .manager-upload-dialog__card { width: min(680px, calc(100vw - 32px)); max-height: calc(100svh - 32px); overflow: auto; background: var(--paper); color: var(--ink); padding: 20px; }
+.manager-upload-dialog__header { display: grid; grid-template-columns: minmax(0, 1fr) 44px; align-items: start; gap: 12px; }
+.manager-upload-dialog__header h2 { margin: 6px 0 16px; }
+.manager-upload-dialog__close { min-width: 44px; min-height: 44px; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); color: var(--chestnut); display: grid; place-items: center; cursor: pointer; }
+.manager-upload-dialog .photo-drop--manager { min-height: 0; width: 100%; max-width: none; box-sizing: border-box; margin: 0; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: var(--paper); color: var(--ink); }
+.manager-upload-dialog .photo-drop__card { padding: 0; }
+.manager-upload-dialog .source-button { min-height: 48px; background: var(--paper); color: var(--chestnut); border: 1px solid var(--chestnut); }
+.manager-upload-dialog .photo-drop--manager h3 { font: 700 1.5rem/1.25 Manrope, sans-serif; letter-spacing: -.025em; margin: 12px 0; overflow-wrap: anywhere; }
+.manager-upload-dialog .delivery-receipt { padding: 16px 0; }
+.manager-upload-dialog .delivery-receipt__eyebrow { display: none; }
+.manager-upload-dialog :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.manager-upload-dialog .selection-summary, .manager-upload-dialog .photo-drop__fine-print { overflow-wrap: anywhere; }
