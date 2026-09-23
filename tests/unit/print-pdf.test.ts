@@ -4,7 +4,10 @@ import { decodePDFRawStream, PDFDict, PDFDocument, PDFName, PDFRawStream, PDFStr
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as printPack from '../../src/features/print/print-pack';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.doUnmock('../../src/features/print/print-pdf'); });
+
+const LINK = 'https://candidary.app/join#a.b';
+const ONE_PIXEL_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 function stubFonts() {
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
@@ -14,6 +17,50 @@ function stubFonts() {
     const bytes = readFileSync(resolve('node_modules/@fontsource', family, 'files', family + '-latin-' + weight + '-normal.woff'));
     return new Response(bytes);
   });
+}
+
+interface DrawnLine { text: string; font: string; top: number; bottom: number; left: number; right: number; width: number; height: number }
+
+/**
+ * jsdom has no canvas. This one records each line of fallback text and where its ink lands in the
+ * bitmap, for marks that reach well outside the em box above, below and to the side, as stacked
+ * Vietnamese marks do. Resizing resets the context, as it does in a browser.
+ */
+function stubCanvas(): DrawnLine[] {
+  const drawn: DrawnLine[] = [];
+  vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(ONE_PIXEL_PNG);
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+    let [width, height, sx, sy, tx, ty] = [300, 150, 1, 1, 0, 0];
+    const context = {
+      font: '10px sans-serif', fillStyle: '#000000', textBaseline: 'alphabetic',
+      scale(x: number, y: number) { sx *= x; sy *= y; },
+      translate(x: number, y: number) { tx += x * sx; ty += y * sy; },
+      measureText(text: string) {
+        const size = Number.parseFloat(/([\d.]+)px/u.exec(context.font)![1]!);
+        const advance = [...text].length * size * .6;
+        return {
+          width: advance, actualBoundingBoxLeft: size * .1, actualBoundingBoxRight: advance + size * .1,
+          actualBoundingBoxAscent: size * 1.3, actualBoundingBoxDescent: size * .35, emHeightAscent: size * .8, emHeightDescent: size * .2,
+        };
+      },
+      fillText(text: string, x: number, y: number) {
+        const ink = context.measureText(text);
+        const baseline = context.textBaseline === 'alphabetic' ? y : context.textBaseline === 'top' ? y + ink.emHeightAscent : Number.NaN;
+        drawn.push({
+          text, font: context.font, width, height,
+          top: (baseline - ink.actualBoundingBoxAscent) * sy + ty, bottom: (baseline + ink.actualBoundingBoxDescent) * sy + ty,
+          left: (x - ink.actualBoundingBoxLeft) * sx + tx, right: (x + ink.actualBoundingBoxRight) * sx + tx,
+        });
+      },
+    };
+    const reset = () => { [sx, sy, tx, ty] = [1, 1, 0, 0]; context.font = '10px sans-serif'; context.textBaseline = 'alphabetic'; };
+    Object.defineProperties(this, {
+      width: { configurable: true, get: () => width, set: (value: number) => { width = value; reset(); } },
+      height: { configurable: true, get: () => height, set: (value: number) => { height = value; reset(); } },
+    });
+    return context as unknown as CanvasRenderingContext2D;
+  } as unknown as HTMLCanvasElement['getContext']);
+  return drawn;
 }
 
 describe('event print PDF output', () => {
@@ -46,6 +93,56 @@ describe('event print PDF output', () => {
     const shortCode = await artworkFills('https://candidary.app/join#a.b');
     const longCode = await artworkFills('https://candidary.app/join#Ab3dEf6hIj9kLm2nOp5qRs.Tu8vWx1yZa4bCd7eFg0hIj3kLm6nOp9qRs2tUv5wXy8');
     expect(longCode).toBe(shortCode);
+  });
+
+  it('draws a name outside the bundled fonts at the heading weight with every mark inside the image', async () => {
+    stubFonts();
+    const drawn = stubCanvas();
+    await printPack.createPrintPdf({ name: 'Nguyễn Thị Ểm', eventDate: '2026-09-12', eventLink: LINK }, 'celebration', { kind: 'cards', style: 'tent', paper: 'letter', count: 1 });
+    const name = drawn.filter(({ text }) => /Nguy|Ểm/u.test(text));
+    expect(name.length).toBeGreaterThan(0);
+    for (const line of name) {
+      expect(line.font).toMatch(/^700 /u);
+      expect(line.top).toBeGreaterThanOrEqual(0);
+      expect(line.bottom).toBeLessThanOrEqual(line.height);
+      expect(line.left).toBeGreaterThanOrEqual(0);
+      expect(line.right).toBeLessThanOrEqual(line.width);
+    }
+  });
+
+  it('keeps the joiners that shape a name instead of printing them as spaces', async () => {
+    stubFonts();
+    const drawn = stubCanvas();
+    await printPack.createPrintPdf({ name: 'مهر\u200Cآرا 👩\u200D❤\uFE0F\u200D👨', eventDate: '2026-09-12', eventLink: LINK }, 'celebration', { kind: 'sign', size: 'letter' });
+    const printed = drawn.map(({ text }) => text).join('\n');
+    expect(printed).toContain('مهر\u200Cآرا');
+    expect(printed).toContain('👩\u200D❤\uFE0F\u200D👨');
+  });
+
+  it('wraps a long unspaced name only between whole characters', async () => {
+    stubFonts();
+    const drawn = stubCanvas();
+    const name = 'e\u0301\u0302\u0303'.repeat(24);
+    await printPack.createPrintPdf({ name, eventDate: '2026-09-12', eventLink: LINK }, 'celebration', { kind: 'stickers', layout: '22806', sheets: 1 });
+    const lines = drawn.filter(({ text }) => text.includes('e\u0301')).map(({ text }) => text);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.join('')).toBe(name);
+    for (const line of lines) expect(line).toMatch(/^e/u);
+  });
+
+  it('asks for a reload when this build’s font files are gone', async () => {
+    // A deploy removes the previous build's hashed files, and the app shell answers for them.
+    vi.stubGlobal('fetch', async () => new Response('<!doctype html><title>Candidary</title>', { headers: { 'Content-Type': 'text/html' } }));
+    await expect(printPack.createPrintPdf({ name: 'Zoë & René', eventDate: '2026-09-12', eventLink: LINK }, 'celebration', { kind: 'sign', size: 'letter' }))
+      .rejects.toBeInstanceOf(printPack.PrintToolsUnavailableError);
+  });
+
+  it('asks for a reload when this build’s PDF code is gone', async () => {
+    vi.resetModules();
+    vi.doMock('../../src/features/print/print-pdf', () => { throw new TypeError('Failed to fetch dynamically imported module'); });
+    const fresh = await import('../../src/features/print/print-pack');
+    await expect(fresh.createPrintPdf({ name: 'Zoë & René', eventDate: '2026-09-12', eventLink: LINK }, 'celebration', { kind: 'sign', size: 'letter' }))
+      .rejects.toBeInstanceOf(fresh.PrintToolsUnavailableError);
   });
 
   it('refuses a management credential as the printed destination', async () => {
