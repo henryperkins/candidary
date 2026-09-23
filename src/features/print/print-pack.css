@@ -51,7 +51,7 @@
 .print-pack__mini-art { width: 70px; height: 70px; }
 .print-pack__qr-placeholder { width: 22px; height: 22px; background: var(--border); }
 .print-pack__result { margin-top: 16px; color: var(--ink); font-size: .875rem; }
-.print-pack__result:empty { display: none; }
+.print-pack__result:empty { margin-top: 0; }
 .print-pack__result p { margin: 0; }
 .print-pack__result-links { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 8px; }
 .print-pack__result-links a { display: inline-flex; align-items: center; min-height: 44px; color: var(--chestnut); text-decoration: underline; text-underline-offset: 3px; }
