@@ -1208,7 +1208,7 @@ describe('event print pack integration', () => {
     expect(screen.getByText('Share a photograph with the family.')).toBeVisible();
     await user.click(screen.getByRole('radio', { name: /Flat 4 × 6/ }));
     expect(screen.getByText('8 cards on 4 Letter sheets')).toBeVisible();
-    await user.click(screen.getByRole('radio', { name: 'A4', exact: true }));
+    await user.click(screen.getByRole('radio', { name: 'A4' }));
     expect(screen.getByText('8 cards on 4 A4 sheets')).toBeVisible();
     await user.click(screen.getByRole('radio', { name: /Avery 22806/ }));
     expect(screen.getByText('36 stickers')).toBeVisible();

@@ -184,14 +184,14 @@ describe('mobile guest photo delivery', () => {
     expect(screen.getByText('Photos go privately to the host.')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Take another photo' })).not.toBeInTheDocument();
 
-    const add = screen.getByRole('button', { name: 'Add photos', exact: true });
+    const add = screen.getByRole('button', { name: 'Add photos' });
     await user.click(add);
     expect(add).toHaveAttribute('aria-expanded', 'true');
     const library = screen.getByLabelText('Choose recent photos from your library');
     const camera = screen.getByLabelText('Take a photo from your camera');
     const libraryClick = vi.spyOn(library, 'click');
     const cameraClick = vi.spyOn(camera, 'click');
-    await user.click(screen.getByRole('button', { name: 'Choose photos', exact: true }));
+    await user.click(screen.getByRole('button', { name: 'Choose photos' }));
     expect(libraryClick).toHaveBeenCalledOnce();
     await user.click(screen.getByRole('button', { name: 'Take another photo' }));
     expect(cameraClick).toHaveBeenCalledOnce();
@@ -264,11 +264,11 @@ describe('mobile guest photo delivery', () => {
     fireEvent.change(camera, { target: { files: [new File(['new'], 'just-taken.jpg', { type: 'image/jpeg' })] } });
     expect(screen.getByRole('button', { name: 'Remove just-taken.jpg' })).toBeEnabled();
     expect(screen.getAllByRole('listitem')).toHaveLength(1);
-    const addPhotos = screen.getByRole('button', { name: 'Add photos', exact: true });
+    const addPhotos = screen.getByRole('button', { name: 'Add photos' });
     await waitFor(() => expect(addPhotos).toHaveFocus());
 
     await user.click(addPhotos);
-    await user.click(screen.getByRole('button', { name: 'Choose photos', exact: true }));
+    await user.click(screen.getByRole('button', { name: 'Choose photos' }));
     fireEvent.change(library, { target: { files: [new File(['recent'], 'recent.jpg', { type: 'image/jpeg' })] } });
     expect(screen.getAllByRole('listitem')).toHaveLength(2);
     await waitFor(() => expect(addPhotos).toHaveFocus());

@@ -25,7 +25,7 @@ function cards() { return screen.getByRole('article', { name: 'Table cards' }); 
     render(<EventPrintPack event={EVENT} qr="" />);
     fireEvent.change(screen.getByLabelText('Wording'), { target: { value: 'memorial' } });
     fireEvent.click(screen.getByRole('radio', { name: /Flat 4 × 6/ }));
-    fireEvent.click(screen.getByRole('radio', { name: 'A4', exact: true }));
+    fireEvent.click(screen.getByRole('radio', { name: 'A4' }));
     fireEvent.click(within(cards()).getByRole('button', { name: 'Print 4 sheets' }));
     expect(await screen.findByRole('link', { name: 'Open print PDF' })).toHaveAttribute('href', 'blob:print-pdf');
     expect(generatePdf).toHaveBeenCalledWith(EVENT, 'memorial', { kind: 'cards', style: '4x6', paper: 'a4', count: 8 });
@@ -37,7 +37,7 @@ function cards() { return screen.getByRole('article', { name: 'Table cards' }); 
     render(<EventPrintPack event={EVENT} qr="" />);
     fireEvent.click(within(cards()).getByRole('button', { name: 'Print 8 sheets' }));
     await screen.findByRole('link', { name: 'Open print PDF' });
-    fireEvent.click(screen.getByRole('radio', { name: 'A4', exact: true }));
+    fireEvent.click(screen.getByRole('radio', { name: 'A4' }));
     expect(screen.queryByRole('link', { name: 'Open print PDF' })).not.toBeInTheDocument();
   });
 
