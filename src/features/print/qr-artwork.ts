@@ -12,6 +12,24 @@ export function assertGuestEventLink(link: string): void {
   } catch { /* The event entry must be a complete URL from the manager API. */ }
   if (!valid) throw new Error('A valid guest event link is required to print.');
 }
+/**
+ * Every dark module as one path in whole-module units, quiet zone included. Painting it in a
+ * single fill lets a rasterizer cover neighbouring modules together; separately filled runs leave
+ * anti-aliased seams through dark areas that stop standard decoders at common resolutions.
+ */
+export function qrModulePath(link: string): { size: number; path: string } {
+  const { modules } = QRCode.create(link, { errorCorrectionLevel: 'M' });
+  let path = '';
+  for (let row = 0; row < modules.size; row++) {
+    for (let column = 0; column < modules.size;) {
+      if (!modules.get(row, column)) { column++; continue; }
+      const start = column;
+      while (column < modules.size && modules.get(row, column)) column++;
+      path += 'M' + String(start + QR_MARGIN) + ' ' + String(row + QR_MARGIN) + 'h' + String(column - start) + 'v1h-' + String(column - start) + 'z';
+    }
+  }
+  return { size: modules.size + QR_MARGIN * 2, path };
+}
 export async function createQrArtwork(link: string, format: 'svg' | 'png'): Promise<Blob> {
   assertGuestEventLink(link);
   const options = { margin: QR_MARGIN, errorCorrectionLevel: 'M' as const, color: { dark: QR_INK, light: '#ffffff' } };

@@ -2,8 +2,7 @@ import fontkit from '@pdf-lib/fontkit';
 import manropeUrl from '@fontsource/manrope/files/manrope-latin-700-normal.woff?url';
 import dmSansUrl from '@fontsource/dm-sans/files/dm-sans-latin-400-normal.woff?url';
 import { PDFDocument, PrintScaling, degrees, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
-import QRCode from 'qrcode';
-import { assertGuestEventLink, QR_MARGIN } from './qr-artwork';
+import { assertGuestEventLink, qrModulePath } from './qr-artwork';
 import { getPrintLayout, printableEventDate, printableLink, PRINT_EXPLAINER, PRINT_WORDING, type PrintEvent, type PrintJob, type PrintWording } from './print-pack';
 
 const INK = rgb(74 / 255, 36 / 255, 21 / 255);
@@ -81,19 +80,10 @@ async function textBox(pdf: PDFDocument, page: PDFPage, font: PDFFont, family: s
 }
 
 function drawQr(page: PDFPage, eventLink: string, x: number, y: number, size: number): void {
-  const { modules } = QRCode.create(eventLink, { errorCorrectionLevel: 'M' });
-  const cell = size / (modules.size + QR_MARGIN * 2);
+  const { size: cells, path } = qrModulePath(eventLink);
   page.drawRectangle({ x, y: page.getHeight() - y - size, width: size, height: size, color: rgb(1, 1, 1) });
-  // Merge horizontal dark runs. Integer module geometry is preserved at any print size.
-  for (let row = 0; row < modules.size; row++) {
-    for (let column = 0; column < modules.size;) {
-      if (!modules.get(row, column)) { column++; continue; }
-      const start = column;
-      while (column < modules.size && modules.get(row, column)) column++;
-      page.drawRectangle({ x: x + (start + QR_MARGIN) * cell, y: page.getHeight() - y - (row + QR_MARGIN + 1) * cell,
-        width: (column - start) * cell, height: cell, color: INK });
-    }
-  }
+  // The path is in whole modules with a top-left origin; one fill keeps neighbouring modules seamless.
+  page.drawSvgPath(path, { x, y: page.getHeight() - y, scale: size / cells, color: INK });
 }
 
 export async function renderPrintPdf(event: PrintEvent, wording: PrintWording, job: PrintJob): Promise<Uint8Array<ArrayBuffer>> {
