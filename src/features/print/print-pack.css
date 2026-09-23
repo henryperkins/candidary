@@ -11,7 +11,7 @@
 .print-pack__options { display: flex; flex-wrap: wrap; gap: 8px; }
 .print-pack__option { position: relative; display: grid; min-width: 0; min-height: 44px; max-width: 100%; gap: 2px; padding: 8px 12px 8px 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--paper); color: var(--ink); cursor: pointer; }
 .print-pack__option[data-selected='true'] { border-color: var(--denim); outline: 1px solid var(--denim); }
-.print-pack__option:hover { background: var(--parchment); }
+.print-pack__option:hover { background: #f7f1e7; }
 .print-pack__option input { position: absolute; top: 13px; left: 12px; width: 16px; height: 16px; min-width: 0; min-height: 0; margin: 0; padding: 0; accent-color: var(--chestnut); }
 .print-pack__option span { align-self: center; font-size: .875rem; font-weight: 600; line-height: 1.4; }
 .print-pack__option small { color: var(--muted); font-size: .875rem; line-height: 1.4; }
@@ -33,7 +33,7 @@
 .print-pack__quantity button:disabled, .print-pack__choices:disabled { opacity: .55; cursor: default; }
 .print-pack__quantity svg { width: 16px; height: 16px; }
 .print-pack__quantity output { min-width: 34px; text-align: center; color: var(--ink); font: 700 1rem 'Manrope', sans-serif; font-variant-numeric: tabular-nums; }
-.print-pack__thumbnail { display: grid; place-items: center; align-self: start; height: 112px; border: 1px solid var(--border); border-radius: 8px; background: var(--parchment); }
+.print-pack__thumbnail { display: grid; place-items: center; align-self: start; height: 112px; border: 1px solid var(--border); border-radius: 8px; background: #f7f1e7; }
 .print-pack__mini-card { display: grid; width: 58px; height: 86px; border: 1px solid var(--border); background: white; }
 .print-pack__mini-card--tent { width: 62px; height: 92px; grid-template-rows: 1fr 1fr; }
 .print-pack__mini-card--4x6 { width: 70px; height: 47px; }
