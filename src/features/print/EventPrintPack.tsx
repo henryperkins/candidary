@@ -121,7 +121,8 @@ export function EventPrintPack({ event, qr }: { event: PrintEvent; qr: string })
     const action = isPrint ? kind.kind : kind;
     setBusy(action); setError(''); setMessage(''); setReady(null);
     let target: Window | null = null;
-    if (isPrint) {
+    // A browser that downloads PDFs instead of showing them would strand the waiting tab.
+    if (isPrint && navigator.pdfViewerEnabled !== false) {
       // Open synchronously from the gesture. File generation must not consume activation first.
       try {
         target = window.open('', '_blank');

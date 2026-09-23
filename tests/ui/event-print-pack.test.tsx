@@ -17,7 +17,10 @@ beforeEach(() => {
   generatePdf.mockReset().mockResolvedValue(new Uint8Array([37, 80, 68, 70]));
   vi.spyOn(window, 'open').mockReturnValue(null);
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); Reflect.deleteProperty(navigator, 'share'); });
+afterEach(() => {
+  cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks();
+  Reflect.deleteProperty(navigator, 'share'); Reflect.deleteProperty(navigator, 'pdfViewerEnabled');
+});
 function cards() { return screen.getByRole('article', { name: 'Table cards' }); }
 
  describe('print pack file actions', () => {
@@ -31,6 +34,15 @@ function cards() { return screen.getByRole('article', { name: 'Table cards' }); 
     expect(generatePdf).toHaveBeenCalledWith(EVENT, 'memorial', { kind: 'cards', style: '4x6', paper: 'a4', count: 8 });
     expect(screen.getByText(/Your PDF is ready/)).toBeVisible();
     expect(screen.getByRole('link', { name: 'Download PDF' })).toHaveAttribute('download', 'candidary-Zoe-Rene-cards.pdf');
+  });
+
+  it('offers the file without a waiting tab when the browser downloads PDFs instead of showing them', async () => {
+    Object.defineProperty(navigator, 'pdfViewerEnabled', { configurable: true, value: false });
+    render(<EventPrintPack event={EVENT} qr="" />);
+    fireEvent.click(within(cards()).getByRole('button', { name: 'Print 8 sheets' }));
+    expect(await screen.findByRole('link', { name: 'Download PDF' })).toHaveAttribute('download', 'candidary-Zoe-Rene-cards.pdf');
+    expect(window.open).not.toHaveBeenCalled();
+    expect(screen.getByText(/Your PDF is ready/)).toBeVisible();
   });
 
   it('clears the previous file when the host changes the print selection', async () => {
