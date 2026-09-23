@@ -3760,6 +3760,7 @@ describe('manager experience', () => {
       'Guest gallery': 'On, 0 published',
     });
     await user.click(within(navigation).getByRole('button', { name: 'Share' }));
+    await screen.findByRole('heading', { name: 'Share your event' });
     await user.click(within(navigation).getByRole('button', { name: 'Gallery' }));
     expect(await galleryAudienceFacts()).toEqual({
       Album: '0 photos',
@@ -5516,7 +5517,7 @@ describe('manager experience', () => {
       const user = userEvent.setup();
       expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
       await user.click(screen.getByRole('button', { name: 'Share' }));
-      const trigger = screen.getByRole('button', { name: 'Sign out guest devices' });
+      const trigger = await screen.findByRole('button', { name: 'Sign out guest devices' });
       await user.click(trigger);
       const dialog = await screen.findByRole('dialog');
       const confirmation = within(dialog).getByRole('group', { name: 'Sign out guest devices' });
