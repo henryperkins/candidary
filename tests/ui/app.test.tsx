@@ -1197,6 +1197,25 @@ interface MediaPage { media: unknown[]; nextCursor: string | null }
 // map that the test may mutate between requests. Guest-gallery callers still use `/media`.
 // A request that carries no `cursor` parameter is the first page: the server rejects
 // `cursor=` as malformed, so the client has to omit the parameter rather than send an empty one.
+describe('event print pack integration', () => {
+  it('provides event-specific print controls inside Share and updates quantities for the selected stock', async () => {
+    vi.stubGlobal('fetch', managerFetch({}));
+    render(<RouterProvider router={createAppRouter(['/manage/event/event-a?section=share'])} />);
+    await screen.findByRole('heading', { name: 'Share your event' });
+    expect(screen.getByRole('heading', { name: 'Print and download' })).toBeVisible();
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText('Wording'), 'memorial');
+    expect(screen.getByText('Share a photograph with the family.')).toBeVisible();
+    await user.click(screen.getByRole('radio', { name: /Flat 4 × 6/ }));
+    expect(screen.getByText('8 cards on 4 Letter sheets')).toBeVisible();
+    await user.click(screen.getByRole('radio', { name: 'A4' }));
+    expect(screen.getByText('8 cards on 4 A4 sheets')).toBeVisible();
+    await user.click(screen.getByRole('radio', { name: /Avery 22806/ }));
+    expect(screen.getByText('36 stickers')).toBeVisible();
+    expect(screen.getByRole('button', { name: /Download SVG/ })).toBeEnabled();
+  });
+});
+
 function managerFetch(pages: Record<string, MediaPage>, mediaRequests: string[] = []) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = String(input);
@@ -3741,6 +3760,7 @@ describe('manager experience', () => {
       'Guest gallery': 'On, 0 published',
     });
     await user.click(within(navigation).getByRole('button', { name: 'Share' }));
+    await screen.findByRole('heading', { name: 'Share your event' });
     await user.click(within(navigation).getByRole('button', { name: 'Gallery' }));
     expect(await galleryAudienceFacts()).toEqual({
       Album: '0 photos',
@@ -5229,7 +5249,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    expect(screen.getByText('https://example.test/join#entry-id.entry-secret')).toBeVisible();
+    expect(await screen.findByText('https://example.test/join#entry-id.entry-secret')).toBeVisible();
     for (const copy of screen.getAllByRole('button', { name: 'Copy event link' })) {
       expect(copy).toBeEnabled();
     }
@@ -5324,7 +5344,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    await user.click(screen.getByRole('button', { name: 'Disable printed event QR' }));
+    await user.click(await screen.findByRole('button', { name: 'Disable printed event QR' }));
 
     const confirmation = screen.getByRole('group', { name: 'Disable printed event QR' });
     expect(confirmation).toHaveTextContent('every invitation and sign using this QR stop working');
@@ -5338,6 +5358,7 @@ describe('manager experience', () => {
     await waitFor(() => expect(bodies).toEqual([{ confirmName: 'Maya & Theo' }]));
     expect(await screen.findByText(/cannot be replaced/iu)).toBeVisible();
     expect(screen.queryByAltText('Event QR code')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Print and download' })).not.toBeInTheDocument();
     // There is no replacement to offer, so the action itself retires.
     expect(screen.queryByRole('button', { name: 'Disable printed event QR' }))
       .not.toBeInTheDocument();
@@ -5496,7 +5517,7 @@ describe('manager experience', () => {
       const user = userEvent.setup();
       expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
       await user.click(screen.getByRole('button', { name: 'Share' }));
-      const trigger = screen.getByRole('button', { name: 'Sign out guest devices' });
+      const trigger = await screen.findByRole('button', { name: 'Sign out guest devices' });
       await user.click(trigger);
       const dialog = await screen.findByRole('dialog');
       const confirmation = within(dialog).getByRole('group', { name: 'Sign out guest devices' });

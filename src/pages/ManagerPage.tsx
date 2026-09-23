@@ -1,5 +1,5 @@
 import type { LibraryChange, TrashOutcome } from '../features/gallery/library-file-actions';
-import { Check, ClipboardCheck, Copy, EyeOff, Image as ImageIcon, Link as LinkIcon, MessageCircle, QrCode, Settings, Trash2, X } from 'lucide-react';
+import { Check, ClipboardCheck, Copy, EyeOff, Image as ImageIcon, Link as LinkIcon, MessageCircle, Settings, Trash2, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -56,6 +56,7 @@ import { Brand } from '../components/Brand';
 import { ManagerNavigation } from '../features/manager/ManagerNavigation';
 import { useWideViewport } from '../features/gallery/viewport';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
+import { EventPrintPack, ShareGuestLink } from '../features/print/EventPrintPack';
 import { EventAccountCard } from '../components/EventAccountCard';
 import { EventAppearanceEditor } from '../components/EventAppearanceEditor';
 import { EventSettingsEditor } from '../components/EventSettingsEditor';
@@ -2971,14 +2972,19 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         />}
         <div className="share-layout">
           <div>{eventLink
-            ? <CopyableLinkCard label="Event link" value={eventLink} />
+            ? <><CopyableLinkCard label="Event link" value={eventLink} /><ShareGuestLink key={eventLink} eventLink={eventLink} eventName={event.name} /></>
             : <p ref={entryDisabledResult} className="manager-notice" tabIndex={-1}>{entryDisabledAt
               ? 'This event QR was disabled and cannot be replaced.'
               : 'This event has no printed entry.'}</p>}
             <p className="form-note">One code for RSVPs now and event photos later. Print it once.</p>
           </div>
-          {qr && <div className="manager-qr"><img src={qr} alt="Event QR code" /><a className="button button--secondary" href={qr} download="candidary-event-qr.png"><QrCode aria-hidden="true" /> Download QR</a></div>}
+          {qr && <div className="manager-qr"><img src={qr} alt="Event QR code" /></div>}
         </div>
+        {eventLink && <EventPrintPack
+          key={event.id + ':' + eventLink + ':' + event.name + ':' + event.eventDate}
+          event={{ name: event.name, eventDate: event.eventDate, eventLink }}
+          qr={qr}
+        />}
         {eventLink && <section className="entry-controls" aria-labelledby="entry-controls-title">
           <h3 id="entry-controls-title">Event entry controls</h3>
           <div className="entry-controls__choices">
