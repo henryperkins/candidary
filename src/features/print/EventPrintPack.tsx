@@ -2,7 +2,7 @@ import { Download, Minus, Plus, Printer, Share2 } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import {
   CARD_STYLES, STICKER_LAYOUTS, PRINT_EXPLAINER, PRINT_WORDING, MAX_CARDS, MAX_STICKER_SHEETS,
-  clampCardCount, counted, createPrintPdf, getPrintLayout,
+  PrintToolsUnavailableError, clampCardCount, counted, createPrintPdf, getPrintLayout,
   type CardStyle, type PrintEvent, type PrintJob, type PrintPaper, type PrintWording, type StickerLayout,
 } from './print-pack';
 import { createQrArtwork } from './qr-artwork';
@@ -89,6 +89,7 @@ export function EventPrintPack({ event, qr }: { event: PrintEvent; qr: string })
   const [signSize, setSignSize] = useState<'sheet' | 'poster'>('sheet');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [reloadRequired, setReloadRequired] = useState(false);
   const [message, setMessage] = useState('');
   const [ready, setReady] = useState<{ url: string; filename: string } | null>(null);
   const attempt = useRef(0);
@@ -96,8 +97,13 @@ export function EventPrintPack({ event, qr }: { event: PrintEvent; qr: string })
   const urls = useRef(new Set<string>());
   const printWindow = useRef<Window | null>(null);
   useEffect(() => {
-    setReady(null); setMessage(''); setError('');
+    setReady(null); setMessage(''); setError(''); setReloadRequired(false);
   }, [wording, paper, style, cardCount, stickerLayout, stickerSheets, signSize]);
+  // A PDF stays in memory only while it is offered. The next file or a new selection releases it.
+  useEffect(() => {
+    if (!ready) return;
+    return () => { URL.revokeObjectURL(ready.url); urls.current.delete(ready.url); };
+  }, [ready]);
   useEffect(() => () => {
     attempt.current++;
     for (const url of urls.current) URL.revokeObjectURL(url);
@@ -111,7 +117,8 @@ export function EventPrintPack({ event, qr }: { event: PrintEvent; qr: string })
   const per = style === '4x6' ? 2 : 1;
   const paperName = paper === 'a4' ? 'A4' : 'Letter';
   const disabled = busy !== null;
-  const filePrefix = 'candidary-' + (event.name.normalize('NFKD').replace(/[^a-zA-Z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 60) || 'event');
+  // Decomposing leaves each accent as a separate mark; dropping the marks keeps `Renée` as `Renee`.
+  const filePrefix = 'candidary-' + (event.name.normalize('NFKD').replace(/\p{M}+/gu, '').replace(/[^a-zA-Z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 60) || 'event');
 
   async function prepare(kind: PrintJob | 'svg' | 'png') {
     if (working.current) return;
@@ -119,7 +126,7 @@ export function EventPrintPack({ event, qr }: { event: PrintEvent; qr: string })
     const current = ++attempt.current;
     const isPrint = typeof kind !== 'string';
     const action = isPrint ? kind.kind : kind;
-    setBusy(action); setError(''); setMessage(''); setReady(null);
+    setBusy(action); setError(''); setReloadRequired(false); setMessage(''); setReady(null);
     let target: Window | null = null;
     // A browser that downloads PDFs instead of showing them would strand the waiting tab.
     if (isPrint && navigator.pdfViewerEnabled !== false) {
@@ -143,11 +150,17 @@ export function EventPrintPack({ event, qr }: { event: PrintEvent; qr: string })
       } else {
         const anchor = document.createElement('a');
         anchor.href = url; anchor.download = filename; anchor.click();
+        // The browser reads the file as the download starts; this copy is not needed after that.
+        window.setTimeout(() => { URL.revokeObjectURL(url); urls.current.delete(url); }, 60_000);
         setMessage((kind === 'svg' ? 'SVG' : '2400 px PNG') + ' download prepared.');
       }
-    } catch {
+    } catch (reason) {
       target?.close();
-      if (attempt.current === current) setError('The print file could not be prepared. Try again, or copy the event link above.');
+      if (attempt.current === current) {
+        const outdated = reason instanceof PrintToolsUnavailableError;
+        setError(outdated ? reason.message : 'The print file could not be prepared. Try again, or copy the event link above.');
+        setReloadRequired(outdated);
+      }
     } finally {
       if (attempt.current === current) { working.current = false; setBusy(null); printWindow.current = null; }
     }
@@ -196,6 +209,7 @@ export function EventPrintPack({ event, qr }: { event: PrintEvent; qr: string })
     </PrintRow>
     <div className="print-pack__result" aria-live="polite" aria-atomic="true">
       {error && <p className="print-pack__error">{error}</p>}
+      {reloadRequired && <div className="print-pack__result-links"><button type="button" className="button button--secondary" onClick={() => window.location.reload()}>Reload page</button></div>}
       {message && <p>{message}</p>}
       {ready && <div className="print-pack__result-links"><a href={ready.url} target="_blank" rel="noopener noreferrer">Open print PDF</a><a href={ready.url} download={ready.filename}>Download PDF</a></div>}
     </div>

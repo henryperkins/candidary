@@ -1,6 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventPrintPack, ShareGuestLink } from '../../src/features/print/EventPrintPack';
+import { PrintToolsUnavailableError } from '../../src/features/print/print-pack';
 import type * as PrintPackModule from '../../src/features/print/print-pack';
 
 const { generatePdf } = vi.hoisted(() => ({ generatePdf: vi.fn() }));
@@ -62,6 +63,50 @@ function cards() { return screen.getByRole('article', { name: 'Table cards' }); 
     unmount();
     await act(async () => { finish(new Uint8Array([37, 80, 68, 70])); });
     expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it('names the file after the event without splitting accented letters', async () => {
+    render(<EventPrintPack event={{ ...EVENT, name: 'Renée Côté' }} qr="" />);
+    fireEvent.click(within(cards()).getByRole('button', { name: 'Print 8 sheets' }));
+    expect(await screen.findByRole('link', { name: 'Download PDF' })).toHaveAttribute('download', 'candidary-Renee-Cote-cards.pdf');
+  });
+
+  it('keeps only the PDF it still offers in memory', async () => {
+    createObjectURL.mockReturnValueOnce('blob:first').mockReturnValueOnce('blob:second');
+    render(<EventPrintPack event={EVENT} qr="" />);
+    fireEvent.click(within(cards()).getByRole('button', { name: 'Print 8 sheets' }));
+    expect(await screen.findByRole('link', { name: 'Open print PDF' })).toHaveAttribute('href', 'blob:first');
+    fireEvent.click(within(cards()).getByRole('button', { name: 'Print 8 sheets' }));
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Open print PDF' })).toHaveAttribute('href', 'blob:second'));
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:first');
+    expect(revokeObjectURL).not.toHaveBeenCalledWith('blob:second');
+    fireEvent.click(screen.getByRole('radio', { name: 'A4' }));
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:second');
+  });
+
+  it('releases downloaded artwork once the download has had time to start', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    createObjectURL.mockReturnValueOnce('blob:artwork');
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    render(<EventPrintPack event={EVENT} qr="" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Download SVG' }));
+    expect(await screen.findByText('SVG download prepared.')).toBeVisible();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(60_000); });
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:artwork');
+  });
+
+  it('offers a reload when this page’s print tools are gone after an update', async () => {
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    generatePdf.mockRejectedValueOnce(new PrintToolsUnavailableError());
+    render(<EventPrintPack event={EVENT} qr="" />);
+    fireEvent.click(within(cards()).getByRole('button', { name: 'Print 8 sheets' }));
+    expect(await screen.findByText('The print tools could not load. Reload the page, then print again.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload page' }));
+    expect(reload).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('radio', { name: 'A4' }));
+    expect(screen.queryByRole('button', { name: 'Reload page' })).not.toBeInTheDocument();
   });
 
   it('recovers from file generation failure without claiming a PDF exists', async () => {

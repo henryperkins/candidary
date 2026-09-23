@@ -82,8 +82,16 @@ export function printableEventDate(eventDate: string): string {
   return Number.isNaN(parsed.getTime()) ? '' : new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(parsed);
 }
 
+/**
+ * This page's print files could not be fetched. After a deploy the previous build's hashed files are
+ * gone and the app shell answers in their place, so trying again cannot help; a reload can.
+ */
+export class PrintToolsUnavailableError extends Error {
+  constructor(cause?: unknown) { super('The print tools could not load. Reload the page, then print again.', { cause }); }
+}
+
 /** Keep the PDF renderer and font engine out of the initial Manager bundle. */
 export async function createPrintPdf(event: PrintEvent, wording: PrintWording, job: PrintJob): Promise<Uint8Array<ArrayBuffer>> {
-  const { renderPrintPdf } = await import('./print-pdf');
+  const { renderPrintPdf } = await import('./print-pdf').catch((reason: unknown) => { throw new PrintToolsUnavailableError(reason); });
   return renderPrintPdf(event, wording, job);
 }

@@ -3,20 +3,29 @@ import manropeUrl from '@fontsource/manrope/files/manrope-latin-700-normal.woff?
 import dmSansUrl from '@fontsource/dm-sans/files/dm-sans-latin-400-normal.woff?url';
 import { PDFDocument, PrintScaling, degrees, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
 import { assertGuestEventLink, qrModulePath } from './qr-artwork';
-import { getPrintLayout, printableEventDate, printableLink, PRINT_EXPLAINER, PRINT_WORDING, type PrintEvent, type PrintJob, type PrintWording } from './print-pack';
+import {
+  getPrintLayout, printableEventDate, printableLink, PrintToolsUnavailableError, PRINT_EXPLAINER, PRINT_WORDING,
+  type PrintEvent, type PrintJob, type PrintWording,
+} from './print-pack';
 
 const INK = rgb(74 / 255, 36 / 255, 21 / 255);
 const MUTED = rgb(83 / 255, 76 / 255, 72 / 255);
 const RULE = rgb(.68, .64, .60);
+const WOFF_SIGNATURE = 0x774f4646;
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 interface TextBox { x: number; y: number; width: number; height: number; size: number; align?: 'left' | 'center'; muted?: boolean }
+interface Face { font: PDFFont; family: string; weight: number }
 
 async function loadFont(url: string): Promise<ArrayBuffer> {
   const response = await fetch(url);
   if (!response.ok) throw new Error('The print fonts could not be loaded. Try again.');
-  return response.arrayBuffer();
+  const bytes = await response.arrayBuffer();
+  // A deploy removes this build's font files, and the app shell answers for them with a 200.
+  if (bytes.byteLength < 4 || new DataView(bytes).getUint32(0) !== WOFF_SIGNATURE) throw new PrintToolsUnavailableError();
+  return bytes;
 }
 
-/** Wrap even a single long name or URL without clipping or silently deleting text. */
+/** Wrap even a single long name or URL without clipping, deleting text, or splitting a character. */
 function linesFor(text: string, width: number, measure: (text: string) => number): string[] {
   const lines: string[] = [];
   let line = '';
@@ -24,18 +33,19 @@ function linesFor(text: string, width: number, measure: (text: string) => number
     const candidate = line ? line + ' ' + word : word;
     if (measure(candidate) <= width) { line = candidate; continue; }
     if (line) { lines.push(line); line = ''; }
-    for (const character of word) {
-      if (line && measure(line + character) > width) { lines.push(line); line = ''; }
-      line += character;
+    for (const { segment } of graphemes.segment(word)) {
+      if (line && measure(line + segment) > width) { lines.push(line); line = ''; }
+      line += segment;
     }
   }
   if (line) lines.push(line);
   return lines;
 }
 
-async function textBox(pdf: PDFDocument, page: PDFPage, font: PDFFont, family: string, raw: string, box: TextBox): Promise<void> {
-  // Control characters have no visible print representation. Normal Unicode names remain intact.
-  const text = raw.replace(/[\p{Cc}\p{Cf}]/gu, ' ');
+async function textBox(pdf: PDFDocument, page: PDFPage, { font, family, weight }: Face, raw: string, box: TextBox): Promise<void> {
+  // Control characters have no printed form. Format characters stay: joiners and direction marks
+  // shape a name without printing, but a soft hyphen would print as a hyphen mid-word.
+  const text = raw.replace(/\p{Cc}/gu, ' ').replace(/\u00AD/gu, '');
   const supported = new Set(font.getCharacterSet());
   const useCanvas = [...text].some((character) => !supported.has(character.codePointAt(0)!));
   let canvas: HTMLCanvasElement | undefined;
@@ -49,9 +59,10 @@ async function textBox(pdf: PDFDocument, page: PDFPage, font: PDFFont, family: s
     if (!context) throw new Error('This browser could not prepare the event name for printing.');
   }
   let size = box.size;
+  const canvasFont = () => String(weight) + ' ' + String(size) + 'px "' + family + '", sans-serif';
   const measure = (value: string) => {
     if (!context) return font.widthOfTextAtSize(value, size);
-    context.font = size + 'px "' + family + '", sans-serif';
+    context.font = canvasFont();
     return context.measureText(value).width;
   };
   let lines = linesFor(text, box.width, measure);
@@ -60,16 +71,30 @@ async function textBox(pdf: PDFDocument, page: PDFPage, font: PDFFont, family: s
     lines = linesFor(text, box.width, measure);
   }
   if (canvas && context) {
+    // Baselines sit where the vector text would. Marks that reach outside the em box, such as
+    // stacked Vietnamese accents, widen the image around the box instead of being cut off.
+    context.font = canvasFont();
+    const placed = lines.map((line, index) => {
+      const ink = context!.measureText(line);
+      return { line, ink, x: box.align === 'center' ? (box.width - ink.width) / 2 : 0, baseline: size + index * size * 1.22 };
+    });
+    const left = Math.min(0, ...placed.map(({ ink, x }) => x - ink.actualBoundingBoxLeft));
+    const right = Math.max(box.width, ...placed.map(({ ink, x }) => x + ink.actualBoundingBoxRight));
+    const top = Math.min(0, ...placed.map(({ ink, baseline }) => baseline - ink.actualBoundingBoxAscent));
+    const bottom = Math.max(box.height, ...placed.map(({ ink, baseline }) => baseline + ink.actualBoundingBoxDescent));
     const scale = 4;
-    canvas.width = Math.ceil(box.width * scale);
-    canvas.height = Math.ceil(box.height * scale);
+    canvas.width = Math.ceil((right - left) * scale);
+    canvas.height = Math.ceil((bottom - top) * scale);
     context.scale(scale, scale);
-    context.font = size + 'px "' + family + '", sans-serif';
+    context.font = canvasFont();
     context.fillStyle = box.muted ? '#534c48' : '#4a2415';
-    context.textBaseline = 'top';
-    lines.forEach((line, index) => context!.fillText(line, box.align === 'center' ? (box.width - context!.measureText(line).width) / 2 : 0, index * size * 1.22));
+    context.textBaseline = 'alphabetic';
+    for (const { line, x, baseline } of placed) context.fillText(line, x - left, baseline - top);
     const image = await pdf.embedPng(canvas.toDataURL('image/png'));
-    page.drawImage(image, { x: box.x, y: page.getHeight() - box.y - box.height, width: box.width, height: box.height });
+    page.drawImage(image, {
+      x: box.x + left, y: page.getHeight() - box.y - top - canvas.height / scale,
+      width: canvas.width / scale, height: canvas.height / scale,
+    });
     return;
   }
   lines.forEach((line, index) => page.drawText(line, {
@@ -104,7 +129,8 @@ export async function renderPrintPdf(event: PrintEvent, wording: PrintWording, j
   const template = pdf.addPage([w, h]);
   const title = PRINT_WORDING[wording].headline;
   const name = event.name + ' · ' + printableEventDate(event.eventDate);
-  const text = (value: string, box: TextBox, bold = false) => textBox(pdf, template, bold ? heading : body, bold ? 'Manrope' : 'DM Sans', value, box);
+  const text = (value: string, box: TextBox, bold = false) => textBox(pdf, template,
+    bold ? { font: heading, family: 'Manrope', weight: 700 } : { font: body, family: 'DM Sans', weight: 400 }, value, box);
 
   if (job.kind === 'stickers' && job.layout === '22806') {
     await text(event.name, { x: 10, y: 7, width: 124, height: 24, size: 9, align: 'center' }, true);
