@@ -232,7 +232,7 @@ describe('household RSVP guest flow', () => {
       />
     </>);
 
-    expect(await screen.findByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Your RSVP is saved' })).toBeVisible();
     await waitFor(() => expect(householdGets).toBe(2));
     expect(outside).toHaveFocus();
   });
@@ -737,7 +737,7 @@ describe('household RSVP guest flow', () => {
     const closed = { ...event, phase: 'before-start' as const, rsvpState: 'closed' as const };
 
     const readable = render(<GuestRsvpFlow event={{ ...closed, rsvpAccess: 'read-only' }} presentation="embedded" />);
-    expect(await screen.findByText('We appreciate your RSVP. Your saved household response is below.')).toBeVisible();
+    expect(await screen.findByText('RSVP changes are closed.')).toBeVisible();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     readable.unmount();
 

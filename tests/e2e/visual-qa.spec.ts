@@ -202,12 +202,12 @@ test('the before-start surface keeps its saved response readable without an acti
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-  await expect(page.getByRole('heading', { name: "The event hasn't started yet" })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: "The event is coming up" })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Your RSVP is saved' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Change RSVP' })).toHaveCount(0);
   await settle(page);
-  // The whole surface, not the card alone: the start line and the appreciation
-  // copy are the two things this state exists to say, and both sit above it.
+  // The whole surface keeps event identity, the zoned start, and saved response
+  // together while the host's note remains available as secondary content.
   await expect(page.locator('.guest-before-start')).toHaveScreenshot('rsvp-before-start-390.png');
 });
 

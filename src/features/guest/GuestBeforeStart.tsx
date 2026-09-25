@@ -19,6 +19,7 @@ function startTime(value: string, timeZone: string) {
     hour: 'numeric',
     minute: '2-digit',
     timeZone,
+    timeZoneName: 'short',
   }).format(new Date(value));
 }
 
@@ -44,14 +45,9 @@ export function GuestBeforeStart({
       event={event}
       sourceFor={(slot) => guestEventCoverSlotPath(event.slug, slot)}
       lookup={false}
-      welcomeIsHeading={false}
+      welcomePresentation="note"
     />
     <div className="rsvp-flow__body">
-      <header className="rsvp-identity">
-        <h1>The event hasn't started yet</h1>
-        <p>{event.name} begins {startDate(event.eventStartAt, event.eventTimezone)} at {startTime(event.eventStartAt, event.eventTimezone)}.</p>
-        <p>Come back when the event begins to take or add photos.</p>
-      </header>
       {/* An event that never adopted RSVP — and one whose household window has closed for good —
           gets no household affordance here, and issues no household request either. */}
       {event.rsvpAccess !== 'unavailable' && <GuestRsvpFlow
@@ -60,6 +56,14 @@ export function GuestBeforeStart({
         guestName={guestName}
         onGuestNameChange={onGuestNameChange}
       />}
+      <section className="guest-before-start__schedule" aria-labelledby="event-start-heading">
+        <h2 id="event-start-heading">The event is coming up</h2>
+        <p>
+          Starts {startDate(event.eventStartAt, event.eventTimezone)}{' '}
+          <span className="guest-before-start__time">at {startTime(event.eventStartAt, event.eventTimezone)}.</span>
+        </p>
+        <p>Return to this page when the event begins to take or add photos.</p>
+      </section>
     </div>
   </section>;
 }

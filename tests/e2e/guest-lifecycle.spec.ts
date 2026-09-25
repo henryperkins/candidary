@@ -21,7 +21,7 @@ const PHONES = [
   { width: 320, height: 844 },
 ] as const;
 const EVENT_URL = `/event/${GUEST_EVENT_FIXTURE.slug}`;
-const BEFORE_START_HEADING = "The event hasn't started yet";
+const BEFORE_START_HEADING = "The event is coming up";
 // Short enough to watch inside one test, long enough that the surface is
 // demonstrably on screen before it elapses.
 const BOUNDARY_MS = 1_000;
@@ -309,12 +309,12 @@ for (const { width, height } of PHONES) {
       });
       await page.goto(EVENT_URL);
 
-      // The page owns the level-one; the embedded household content sits beneath
-      // it. Two level-one headings on one page is what `embedded` exists to stop.
-      await expect(page.getByRole('heading', { name: BEFORE_START_HEADING, level: 1 })).toBeVisible();
-      await expect(page.getByRole('heading', { name: 'Your RSVP', level: 2 })).toBeVisible();
+      // Event identity owns the level-one, followed by household and schedule sections.
+      await expect(page.getByRole('heading', { name: GUEST_EVENT_FIXTURE.name, level: 1 })).toBeVisible();
+      await expect(page.getByRole('heading', { name: BEFORE_START_HEADING, level: 2 })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Your RSVP is saved', level: 2 })).toBeVisible();
       await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
-      await expect(page.getByText('We appreciate your RSVP. Your saved household response is below.')).toBeVisible();
+      await expect(page.getByText('RSVP changes are closed.')).toBeVisible();
       await expectAccessible(page, `before-start at ${width}`);
       await expectContained(page, `before-start at ${width}`);
     });
@@ -330,7 +330,7 @@ for (const { width, height } of PHONES) {
       await expect(page.getByText(/Guestbook/)).toBeVisible();
       await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
       // RSVP has left the guest experience entirely at this point.
-      await expect(page.getByRole('heading', { name: 'Your RSVP' })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Your RSVP is saved' })).toHaveCount(0);
       await expect(page.getByRole('button', { name: 'Find my invitation' })).toHaveCount(0);
       await expectAccessible(page, `waiting at ${width}`);
       await expectContained(page, `waiting at ${width}`);

@@ -44,6 +44,11 @@ export function RsvpReceipt({
     && !household.renewalRequired;
   const HeadingTag = presentation === 'embedded' ? 'h2' : 'h1';
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const hasSavedResponse = Boolean(household.firstRespondedAt);
+  let heading = mode === 'receipt' ? "You're all set" : 'Your RSVP';
+  if (event.phase === 'before-start' && mode === 'before-start' && hasSavedResponse) {
+    heading = 'Your RSVP is saved';
+  }
   let plusOneNumber = 0;
 
   useEffect(() => {
@@ -52,11 +57,10 @@ export function RsvpReceipt({
 
   return <RsvpShell event={event} presentation={presentation} className="rsvp-flow--receipt">
     <div className="rsvp-card rsvp-receipt" aria-live="polite">
-      {/* The before-start page names the event in its hero and again in its start line; a third
-          reading of it here would be the only new copy on that surface. */}
+      {/* The containing page already identifies the event for an embedded receipt. */}
       {presentation !== 'embedded' && <p className="rsvp-eyebrow">{event.name}</p>}
       <HeadingTag ref={headingRef} tabIndex={-1}>
-        {mode === 'receipt' ? "You're all set" : 'Your RSVP'}
+        {heading}
       </HeadingTag>
       {mode === 'receipt' && <p>Your household response has been saved.</p>}
       {mode === 'read-only' && event.rsvpState !== 'open' && <p>
@@ -64,13 +68,16 @@ export function RsvpReceipt({
       </p>}
       {/* Whether this household answered is stated outright. Inferring it from closed copy is what
           left a household that never responded reading the same page as one that did. */}
-      {mode === 'before-start' && <p>{household.firstRespondedAt
-        ? 'We appreciate your RSVP. Your saved household response is below.'
-        : "There isn't a saved RSVP for this household."}</p>}
+      {mode === 'before-start' && <>
+        {!hasSavedResponse && <p>There isn't a saved RSVP for this household.</p>}
+        <p>{hasSavedResponse ? 'RSVP changes are closed.' : 'RSVP is closed.'}</p>
+      </>}
       {mode === 'paused' && <p>RSVP is paused. Your saved response is still here.</p>}
       {renewalRequired && <p>The deadline was extended. Find your invitation again before making changes.</p>}
 
-      <p className="rsvp-counts">{attending} attending · {declined} not attending</p>
+      {(mode !== 'before-start' || household.invitees.length > 1) && <p className="rsvp-counts">
+        {attending} attending · {declined} not attending
+      </p>}
       <ul className="rsvp-receipt__roster">
         {household.invitees.map((invitee) => {
           if (invitee.kind === 'plus_one') plusOneNumber += 1;

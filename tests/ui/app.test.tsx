@@ -9047,12 +9047,14 @@ describe('guest event phase composition', () => {
       throw new Error(`Unexpected request ${path}`);
     }));
     renderEvent(beforeStart);
-    await screen.findByText('Maya & Theo begins September 19, 2026 at 5:00 PM.');
+    await waitFor(() => expect(screen.getByRole('region', { name: 'The event is coming up' }))
+      .toHaveTextContent('Starts September 19, 2026 at 5:00 PM CDT.'));
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
 
     await act(async () => { window.dispatchEvent(new Event('pageshow')); });
 
-    expect(await screen.findByText('Maya & Theo begins September 19, 2026 at 6:00 PM.')).toBeVisible();
+    await waitFor(() => expect(screen.getByRole('region', { name: 'The event is coming up' }))
+      .toHaveTextContent('Starts September 19, 2026 at 6:00 PM CDT.'));
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
     expect(eventReads).toBe(3);
@@ -9104,7 +9106,7 @@ describe('guest event phase composition', () => {
 
     expect(await screen.findByText('Please RSVP by Sep 6, 2026.')).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-    expect(screen.getByRole('heading', { name: "The event hasn't started yet" })).toBeVisible();
+    expect(screen.getByRole('heading', { name: "The event is coming up" })).toBeVisible();
     expect(eventReads).toBe(3);
   });
 

@@ -97,18 +97,20 @@ describe('guest before-start surface', () => {
     vi.stubGlobal('fetch', rsvpFetch(() => success({ household: responded })));
     render(<GuestBeforeStart event={event} />);
 
-    expect(screen.getByRole('heading', { level: 1, name: "The event hasn't started yet" })).toBeVisible();
-    expect(screen.getByText('Maya & Theo begins September 19, 2026 at 6:00 PM.')).toBeVisible();
-    expect(screen.getByText('Come back when the event begins to take or add photos.')).toBeVisible();
-    await screen.findByRole('heading', { name: 'Your RSVP' });
+    expect(screen.getByRole('heading', { level: 1, name: event.name })).toBeVisible();
+    expect(screen.getByRole('heading', { level: 2, name: 'The event is coming up' })).toBeVisible();
+    expect(screen.getByRole('region', { name: 'The event is coming up' }))
+      .toHaveTextContent('Starts September 19, 2026 at 6:00 PM GMT+1.');
+    expect(screen.getByText('Return to this page when the event begins to take or add photos.')).toBeVisible();
+    await screen.findByRole('heading', { name: 'Your RSVP is saved' });
   });
 
-  it('thanks a household that responded and shows what it sent', async () => {
+  it('confirms a saved household response and explains that editing is closed', async () => {
     vi.stubGlobal('fetch', rsvpFetch(() => success({ household: responded })));
     render(<GuestBeforeStart event={event} />);
 
-    await screen.findByRole('heading', { name: 'Your RSVP' });
-    expect(screen.getByText('We appreciate your RSVP. Your saved household response is below.')).toBeVisible();
+    await screen.findByRole('heading', { name: 'Your RSVP is saved' });
+    expect(screen.getByText('RSVP changes are closed.')).toBeVisible();
     expect(screen.getByText('2 attending · 0 not attending')).toBeVisible();
     expect(screen.getByText('Taylor Morgan')).toBeVisible();
     // The deadline is already behind this household, and repeating it is exactly
@@ -122,7 +124,8 @@ describe('guest before-start surface', () => {
 
     await screen.findByRole('heading', { name: 'Your RSVP' });
     expect(screen.getByText("There isn't a saved RSVP for this household.")).toBeVisible();
-    expect(screen.queryByText(/We appreciate your RSVP/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Your RSVP is saved' })).not.toBeInTheDocument();
+    expect(screen.getByText('RSVP is closed.')).toBeVisible();
     expect(screen.queryByText(/deadline/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Submit RSVP' })).not.toBeInTheDocument();
   });
@@ -143,8 +146,9 @@ describe('guest before-start surface', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<GuestBeforeStart event={{ ...event, rsvpAccess: 'unavailable' }} />);
 
-    expect(screen.getByRole('heading', { level: 1, name: "The event hasn't started yet" })).toBeVisible();
-    expect(screen.getByText('Maya & Theo begins September 19, 2026 at 6:00 PM.')).toBeVisible();
+    expect(screen.getByRole('heading', { level: 1, name: event.name })).toBeVisible();
+    expect(screen.getByRole('region', { name: 'The event is coming up' }))
+      .toHaveTextContent('Starts September 19, 2026 at 6:00 PM GMT+1.');
     // An event that never adopted RSVP must not advertise a lookup that can only
     // miss, and must not ask on the guest's behalf either.
     expect(rsvpRequests(fetchMock)).toEqual([]);
@@ -152,14 +156,16 @@ describe('guest before-start surface', () => {
     expect(screen.queryByRole('heading', { name: 'Your RSVP' })).not.toBeInTheDocument();
   });
 
-  it('keeps one level-one heading and puts the embedded household content beneath it', async () => {
+  it('keeps event identity first, then the household, then the schedule in heading and reading order', async () => {
     vi.stubGlobal('fetch', rsvpFetch(() => success({ household: responded })));
     const view = render(<GuestBeforeStart event={event} />);
 
-    const receipt = await screen.findByRole('heading', { name: 'Your RSVP' });
+    const receipt = await screen.findByRole('heading', { name: 'Your RSVP is saved' });
     expect(screen.getAllByRole('heading', { level: 1 }).map((heading) => heading.textContent))
-      .toEqual(["The event hasn't started yet"]);
+      .toEqual([event.name]);
     expect(receipt.tagName).toBe('H2');
+    const schedule = screen.getByRole('heading', { name: 'The event is coming up', level: 2 });
+    expect(receipt.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // The page already drew the hero, so the embedded flow may not draw a second one.
     expect(view.container.querySelectorAll('.photo-drop__hero')).toHaveLength(1);
 
@@ -170,5 +176,17 @@ describe('guest before-start surface', () => {
     const lookup = await screen.findByRole('heading', { name: 'Find your household to view a saved response.' });
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
     expect(lookup.tagName).toBe('H2');
+  });
+
+  it('keeps an outdated host instruction in a closed note without changing the authored message', async () => {
+    vi.stubGlobal('fetch', rsvpFetch(() => success({ household: responded })));
+    render(<GuestBeforeStart event={{ ...event, welcomeMessage: 'RSVP for the event.' }} />);
+
+    expect(screen.getByText('Maya & Theo', { exact: true })).toBeVisible();
+    const note = screen.getByText('A note from your host').closest('details');
+    expect(note).not.toHaveAttribute('open');
+    expect(screen.getByText('RSVP for the event.')).not.toBeVisible();
+    expect(note).toHaveTextContent('RSVP for the event.');
+    await screen.findByRole('heading', { name: 'Your RSVP is saved' });
   });
 });

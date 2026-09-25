@@ -191,7 +191,7 @@ describe('guest-facing Guestbook', () => {
     if (phase === 'rsvp-primary') {
       await screen.findByRole('button', { name: 'Find my invitation' });
     } else if (phase === 'before-start') {
-      await screen.findByRole('heading', { name: "The event hasn't started yet" });
+      await screen.findByRole('heading', { name: "The event is coming up" });
     } else {
       await screen.findByRole('heading', { name: 'Photo delivery is paused' });
     }

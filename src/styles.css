@@ -432,6 +432,11 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .photo-drop__hero h1, .photo-drop__welcome { max-width: 520px; margin: 0; color: var(--event-fullscreen-foreground); font-size: clamp(1.9rem, 8vw, 3.1rem); line-height: 1.05; overflow-wrap: anywhere; text-wrap: balance; }
 .photo-drop__welcome--clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .photo-drop__welcome-toggle { min-height: 44px; margin-top: 4px; padding: 8px 0; display: inline-flex; align-self: flex-start; align-items: center; border: 0; background: transparent; color: var(--event-fullscreen-foreground); font-size: .875rem; font-weight: 700; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
+.photo-drop__event-date { margin: 8px 0 0; font-size: .875rem; line-height: 1.5; }
+.photo-drop__host-note { margin-top: 8px; }
+.photo-drop__host-note summary { min-height: 44px; padding: 12px 0; font-size: .875rem; font-weight: 700; line-height: 1.5; cursor: pointer; }
+.photo-drop__host-note summary:focus-visible { outline: 3px solid var(--event-fullscreen-foreground); outline-offset: 3px; }
+.photo-drop__host-note > p { margin: 8px 0 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .photo-drop__card { padding: 22px 20px 28px; }
 .photo-drop__name { display: grid; gap: 7px; margin: 0; color: var(--event-text); font-size: .8rem; font-weight: 700; }
 .photo-drop__name > span { display: flex; justify-content: space-between; align-items: baseline; }
@@ -666,7 +671,6 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 
 /* Before-start and waiting are the same product as the RSVP surface — same frame, same hero, same
    card — so they add only the air their own copy needs. */
-.guest-before-start .rsvp-identity { gap: 10px; }
 .guest-waiting .rsvp-card { gap: 12px; }
 
 @media (min-width: 700px) and (min-height: 760px) {
@@ -816,6 +820,31 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .photo-drop__card { padding-inline: 17px; }
   .selection-grid { gap: 6px; }
   .selection-add-actions { grid-template-columns: 1fr; }
+}
+
+/* Before-start is a readback: event identity, household response, then the schedule.
+   Keep one inset at narrow widths and let this short page determine its own height. */
+.guest-shell--drop:has(> .guest-drop-main > .guest-before-start) { display: flex; flex-direction: column; }
+.guest-drop-main:has(> .guest-before-start) { min-height: 0; flex: 1; }
+.guest-shell--drop:has(> .guest-drop-main > .guest-before-start) > footer { width: 100%; }
+.rsvp-flow.rsvp-flow--with-hero.guest-before-start { box-sizing: border-box; min-height: 0; padding: 0; }
+.guest-before-start .photo-drop__hero { min-height: 0; padding: 24px 20px 16px; }
+.guest-before-start .photo-drop__hero h1 { font-size: 1.6rem; line-height: 1.2; }
+.guest-before-start .photo-drop__hero:has(.responsive-cover--image) .photo-drop__hero-copy { padding: 16px; }
+.guest-before-start .rsvp-flow__body { gap: 24px; padding: 24px 20px 32px; }
+.guest-before-start .rsvp-receipt { gap: 12px; padding: 20px; box-shadow: none; }
+.guest-before-start .rsvp-receipt h2 { font-size: 1.6rem; line-height: 1.2; }
+.guest-before-start .rsvp-receipt__roster li { align-items: baseline; flex-wrap: wrap; gap: 4px 16px; }
+.guest-before-start .rsvp-receipt__roster li > span { flex: 1 1 8rem; }
+.guest-before-start .rsvp-receipt__roster li:last-child { padding-bottom: 0; }
+.guest-before-start .rsvp-response { font-size: .875rem; }
+.guest-before-start__schedule { display: grid; gap: 8px; }
+.guest-before-start__schedule h2 { margin: 0; color: var(--event-page-text); font-size: 1rem; line-height: 1.5; }
+.guest-before-start__schedule p { margin: 0; color: var(--event-muted-text); line-height: 1.5; }
+.guest-before-start__time { display: inline-block; max-width: 100%; vertical-align: top; }
+@media (min-width: 700px) and (min-height: 760px) {
+  .guest-before-start .photo-drop__hero { padding: 32px; }
+  .guest-before-start .rsvp-flow__body { padding: 32px; }
 }
 
 /* Gallery recovery and shared publication controls. */

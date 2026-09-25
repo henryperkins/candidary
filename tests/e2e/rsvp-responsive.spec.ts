@@ -204,7 +204,7 @@ test('the before-start receipt stays contained with maximum names', async ({ pag
   for (const width of NARROW) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto(`/event/${EVENT_FIXTURE.slug}`);
-    await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Your RSVP is saved' })).toBeVisible();
     await expectContained(page, page.locator('.guest-before-start'), `before-start receipt at ${width}`);
   }
 });

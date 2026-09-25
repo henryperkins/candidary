@@ -342,13 +342,13 @@ test('a closed deadline names the start and reads the saved response back', asyn
   });
   await scanPrintedEntry(page);
 
-  // The surface names when the event begins instead of a deadline nobody can act
-  // on, and thanks a household that answered rather than reading it closed copy.
-  await expect(page.getByRole('heading', { name: "The event hasn't started yet" })).toBeVisible();
-  await expect(page.getByText('Maya & Theo begins September 19, 2026 at 5:00 PM.')).toBeVisible();
-  await expect(page.getByText('Come back when the event begins to take or add photos.')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
-  await expect(page.getByText('We appreciate your RSVP. Your saved household response is below.')).toBeVisible();
+  // The surface names the zoned start and distinguishes a saved response from the
+  // closed editing window without offering an action nobody can take.
+  await expect(page.getByRole('heading', { name: "The event is coming up" })).toBeVisible();
+  await expect(page.getByText('Starts September 19, 2026 at 5:00 PM CDT.')).toBeVisible();
+  await expect(page.getByText('Return to this page when the event begins to take or add photos.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Your RSVP is saved' })).toBeVisible();
+  await expect(page.getByText('RSVP changes are closed.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Change RSVP' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Submit RSVP' })).toHaveCount(0);
 });
@@ -368,7 +368,7 @@ test('a device that never held a session may still look up a saved response', as
   await page.getByLabel('Full name').fill('Taylor Morgan');
   await page.getByRole('button', { name: 'Find my invitation' }).click();
 
-  await expect(page.getByRole('heading', { name: 'Your RSVP' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Your RSVP is saved' })).toBeVisible();
   await expect(page.getByText('2 attending · 1 not attending')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Change RSVP' })).toHaveCount(0);
 });

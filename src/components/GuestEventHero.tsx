@@ -17,6 +17,8 @@ export interface GuestEventHeroProps {
   /* Photo drop owns the page heading here. RSVP keeps its task heading, so the
      welcome is painted the same size without claiming another level-one. */
   welcomeIsHeading?: boolean;
+  /** Keep authored welcome copy available without presenting it as the current task. */
+  welcomePresentation?: 'primary' | 'note';
 }
 
 function eventDateLabel(eventDate: string) {
@@ -29,6 +31,7 @@ export function GuestEventHero({
   sourceFor,
   lookup,
   welcomeIsHeading = true,
+  welcomePresentation = 'primary',
 }: GuestEventHeroProps) {
   const refreshEvent = useGuestEventRefresh();
   const [welcomeExpanded, setWelcomeExpanded] = useState(false);
@@ -53,19 +56,28 @@ export function GuestEventHero({
       }}
     />
     <div className="photo-drop__hero-copy">
-      <p className="photo-drop__event">{event.name} <span aria-hidden="true">·</span> {eventDateLabel(event.eventDate)}</p>
-      <WelcomeTag id="guest-welcome" className={welcomeIsHeading ? welcomeClass : `photo-drop__welcome${welcomeClass ? ` ${welcomeClass}` : ''}`}>
-        {message}
-      </WelcomeTag>
-      {welcomeNeedsDisclosure && <button
-        type="button"
-        className="photo-drop__welcome-toggle"
-        aria-controls="guest-welcome"
-        aria-expanded={welcomeExpanded}
-        onClick={() => setWelcomeExpanded((current) => !current)}
-      >
-        {welcomeExpanded ? 'Show less' : 'Read full welcome'}
-      </button>}
+      {welcomePresentation === 'note' ? <>
+        <WelcomeTag className="photo-drop__welcome">{event.name}</WelcomeTag>
+        <p className="photo-drop__event-date">{eventDateLabel(event.eventDate)}</p>
+        {event.welcomeMessage && <details className="photo-drop__host-note">
+          <summary>A note from your host</summary>
+          <p>{event.welcomeMessage}</p>
+        </details>}
+      </> : <>
+        <p className="photo-drop__event">{event.name} <span aria-hidden="true">·</span> {eventDateLabel(event.eventDate)}</p>
+        <WelcomeTag id="guest-welcome" className={welcomeIsHeading ? welcomeClass : `photo-drop__welcome${welcomeClass ? ` ${welcomeClass}` : ''}`}>
+          {message}
+        </WelcomeTag>
+        {welcomeNeedsDisclosure && <button
+          type="button"
+          className="photo-drop__welcome-toggle"
+          aria-controls="guest-welcome"
+          aria-expanded={welcomeExpanded}
+          onClick={() => setWelcomeExpanded((current) => !current)}
+        >
+          {welcomeExpanded ? 'Show less' : 'Read full welcome'}
+        </button>}
+      </>}
     </div>
   </div>;
 }
