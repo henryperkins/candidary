@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
-import { MAX_IMAGE_BYTES, SUPPORTED_IMAGE_TYPES } from '../../shared/constants';
+import { isReadableOriginal,MAX_READABLE_ORIGINAL_BYTES } from '../../shared/image-formats';
 import { ApiError } from '../../shared/errors';
 import { createPhotoExportSchema, DEVICE_EXPORT_MAX_FILES, PHOTO_EXPORT_BODY_MAX_BYTES,
   type PhotoExportActiveConflict, type PhotoExportView } from '../../shared/photo-exports';
@@ -9,6 +9,7 @@ import { PhotoExportsRepository, type PhotoExportReadLease } from '../db/photo-e
 import { ExportsRepository } from '../db/exports';
 import type { AppBindings } from '../env';
 import { sanitizeFilename } from '../security/filenames';
+import { recordOriginalRead } from '../observability/image-metrics';
 import { attemptKeys, deleteExportKeys, ensureInitialWorkflow, ensureRetryWorkflow } from './exports';
 
 const empty = z.object({}).strict();
@@ -84,11 +85,10 @@ async function original(context: Context<AppBindings>, repository: PhotoExportsR
   };
   try {
     await assertActive();
-    if (!Number.isSafeInteger(lease.byteSize) || lease.byteSize < 1 || lease.byteSize > MAX_IMAGE_BYTES
-      || !SUPPORTED_IMAGE_TYPES.some(type => type === lease.mimeType)) throw unavailable();
+    if (!isReadableOriginal(lease.mimeType,lease.byteSize)) throw unavailable();
     const bucket = lease.objectBucketGeneration === 'canonical' ? context.env.CANONICAL_MEDIA_BUCKET : context.env.MEDIA_BUCKET;
     const object = await bucket.get(lease.objectKey);
-    if (object?.body) reader = object.body.getReader();
+    if (object?.body) { reader = object.body.getReader(); recordOriginalRead(context.env, lease.eventId, 'export', object.size); }
     await assertActive();
     if (!reader || !object || object.size !== lease.byteSize
       || object.httpMetadata?.contentType !== lease.mimeType) throw unavailable();
@@ -105,7 +105,7 @@ async function original(context: Context<AppBindings>, repository: PhotoExportsR
             await finish('prepared'); value.close(); return;
           }
           received += chunk.value.byteLength;
-          if (received > lease.byteSize || received > MAX_IMAGE_BYTES) throw unavailable();
+          if (received > lease.byteSize || received > MAX_READABLE_ORIGINAL_BYTES) throw unavailable();
           value.enqueue(chunk.value);
         } catch (error) {
           // EOF receipt persistence may fail after finish has retired the timer.

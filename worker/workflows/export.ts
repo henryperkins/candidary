@@ -1,4 +1,5 @@
-import { MAX_EXPORT_PART_SOURCE_BYTES, MAX_IMAGE_BYTES, SUPPORTED_IMAGE_TYPES } from '../../shared/constants';
+import { MAX_EXPORT_PART_SOURCE_BYTES } from '../../shared/constants';
+import { isReadableOriginal,MAX_READABLE_ORIGINAL_BYTES } from '../../shared/image-formats';
 import type { AppEnv } from '../env';
 import {
   ExportsRepository,
@@ -18,6 +19,7 @@ import { partitionExportSnapshot } from '../export/partition';
 import { exportPartDeliveryName, exportPartName, exportPath, exportPathWidth } from '../export/paths';
 import { buildExportZipStream } from '../export/zip-stream';
 import { multipartPut } from '../storage/multipart';
+import { recordOriginalRead } from '../observability/image-metrics';
 
 export { partitionExportSnapshot } from '../export/partition';
 
@@ -85,7 +87,7 @@ function ownedSourceStream(body: ReadableStream<Uint8Array>, assertActive: () =>
           const chunk = await reader.read();
           if (chunk.done) { done = true; break; }
           readBytes += chunk.value.byteLength;
-          if (expectedBytes !== undefined && (readBytes > expectedBytes || readBytes > MAX_IMAGE_BYTES)) throw new Error('EXPORT_SOURCE_MISSING');
+          if (expectedBytes !== undefined && (readBytes > expectedBytes || readBytes > MAX_READABLE_ORIGINAL_BYTES)) throw new Error('EXPORT_SOURCE_MISSING');
           chunks.push(chunk.value);
           batchBytes += chunk.value.byteLength;
         } while (batchBytes < readBatchBytes);
@@ -213,13 +215,14 @@ export async function processExport(
           await assertActive();
           const object = await bucket.get(media.objectKey);
           if (!object?.body) throw new Error('EXPORT_SOURCE_MISSING');
+          recordOriginalRead(env, job.eventId, 'export', object.size);
           const source = ownedSourceStream(object.body, assertActive,
             job.kind === 'selection' ? media.byteSize ?? media.declaredByteSize : undefined,
             job.kind === 'album' ? ALBUM_SOURCE_READ_BYTES : 0);
           sources.push(source);
           await assertActive();
           if (job.kind === 'selection' && (object.size !== (media.byteSize ?? media.declaredByteSize)
-            || object.size > MAX_IMAGE_BYTES || !SUPPORTED_IMAGE_TYPES.includes(media.mimeType)
+            || !isReadableOriginal(media.mimeType,object.size)
             || object.httpMetadata?.contentType !== media.mimeType)) throw new Error('EXPORT_SOURCE_MISSING');
           entries.push({ media, body: source.body });
         }

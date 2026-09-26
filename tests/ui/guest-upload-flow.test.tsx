@@ -2,6 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StrictMode, useState } from 'react';
+import { File as RuntimeFile } from 'node:buffer';
+import { webcrypto } from 'node:crypto';
+import { BASELINE_UPLOAD_CAPABILITIES } from '../../src/features/uploads/upload-selection';
 
 import {
   GuestUploadFlow as ControlledGuestUploadFlow,
@@ -165,6 +168,37 @@ afterEach(() => {
 });
 
 describe('mobile guest photo delivery', () => {
+  it.each(['creation', 'decode'] as const)('delivers the same original after thumbnail %s failure and cleans up only created URLs', async (failure) => {
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+    const revoke = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: () => {
+      if (failure === 'creation') throw new Error('unavailable');
+      return 'blob:guest-original';
+    } });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revoke });
+    const queueTransport = transport();
+    const view = render(<GuestUploadFlow event={event} slug="alex-jordan" guestName="Taylor" transport={queueTransport} />);
+    try {
+      const file = new File(['untouched original'], 'original.jpg', { type: 'image/jpeg' });
+      fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), { target: { files: [file] } });
+      if (failure === 'decode') fireEvent.error(view.container.querySelector('.selection-card__image img')!);
+      expect(view.container.querySelector('.selection-card__image img')).toBeNull();
+      expect(screen.getByText('original.jpg')).toBeVisible();
+      await userEvent.click(screen.getByRole('button', { name: 'Send 1 photo' }));
+      expect(await screen.findByRole('heading', { name: 'Your 1 photo was sent.' })).toBeVisible();
+      expect(vi.mocked(queueTransport.upload).mock.calls[0]?.[0].file).toBe(file);
+      view.unmount();
+      expect(revoke.mock.calls).toEqual(failure === 'creation' ? [] : [['blob:guest-original']]);
+    } finally {
+      view.unmount();
+      if (originalCreate) Object.defineProperty(URL, 'createObjectURL', originalCreate);
+      else Reflect.deleteProperty(URL, 'createObjectURL');
+      if (originalRevoke) Object.defineProperty(URL, 'revokeObjectURL', originalRevoke);
+      else Reflect.deleteProperty(URL, 'revokeObjectURL');
+    }
+  });
+
   it('distills review to previews and one add action while preserving source choice and name editing', async () => {
     const user = userEvent.setup();
     const session = {
@@ -505,6 +539,37 @@ describe('mobile guest photo delivery', () => {
      as the contract writes them. `{ id, mimeType, uploadState }` is everything the server says about
      the photo; the filename on the card, the bytes on the wire, and the receipt the guest reads all
      come from the file this device has held since it was chosen. */
+  it('uses admitted formats, shows confirming without a receipt and aborts polling on unmount', async () => {
+    sessionStorage.clear(); vi.stubGlobal('crypto',webcrypto);
+    const transfer={id:'transfer-a',mediaId:'media-a',state:'receiving',partBytes:8*1024**2,partCount:1,
+      acceptedParts:[] as number[],expiresAt:new Date(Date.now()+3600_000).toISOString(),hardExpiresAt:new Date(Date.now()+6*3600_000).toISOString(),previewState:'pending'};
+    let pollingSignal:AbortSignal|undefined;
+    const fetchMock=vi.fn(async (input:RequestInfo|URL,init:RequestInit={}) => {
+      const url=String(input);
+      if (url.endsWith('/capabilities')) return uploadJson({...BASELINE_UPLOAD_CAPABILITIES,mimeTypes:[...BASELINE_UPLOAD_CAPABILITIES.mimeTypes,'image/dng'],extensions:['dng'],maxOriginalBytes:512*1024**2});
+      if (url.endsWith('/batch')) return uploadJson({items:[{idempotencyKey:JSON.parse(String(init.body)).files[0].idempotencyKey,
+        status:'accepted',transport:'parts-v1',media:{id:'media-a',mimeType:'image/dng',uploadState:'reserved'},transfer}]});
+      if (url.endsWith('/verify')) return uploadJson({verifiedParts:transfer.acceptedParts});
+      if (url.endsWith('/parts/0')) {expect(new Uint8Array(init.body as ArrayBuffer)).toEqual(new Uint8Array([1,2,3])); transfer.acceptedParts=[0]; return uploadJson({index:0,accepted:true});}
+      if (url.endsWith('/complete')) {transfer.state='processing'; return uploadJson({transfer});}
+      pollingSignal=init.signal ?? undefined; return uploadJson({transfer});
+    });
+    vi.stubGlobal('fetch',fetchMock);
+    const view=render(<GuestUploadFlow event={event} slug="alex-jordan" guestName="Avery" />);
+    const picker=screen.getByLabelText('Choose recent photos from your library');
+    await waitFor(() => expect(picker.getAttribute('accept')).toContain('image/dng'));
+    expect(picker.getAttribute('accept')).toContain('.dng');
+    const original=new RuntimeFile([new Uint8Array([1,2,3])],'original.dng',{type:'image/dng'}) as unknown as File;
+    fireEvent.change(picker,{target:{files:[original]}});
+    await userEvent.click(screen.getByRole('button',{name:'Send 1 photo'}));
+    expect(await screen.findByText('Confirming delivery')).toBeVisible();
+    expect(screen.queryByRole('heading',{name:'Your 1 photo was sent.'})).toBeNull();
+    await waitFor(() => expect(pollingSignal).toBeDefined());
+    view.unmount(); expect(pollingSignal!.aborted).toBe(true);
+    expect(fetchMock.mock.calls.some(([,init]) => init?.method==='DELETE')).toBe(false);
+    sessionStorage.clear();
+  });
+
   it('delivers through the shipped adapter on the allowlisted upload answers alone', async () => {
     const user = userEvent.setup();
     vi.stubGlobal('XMLHttpRequest', DeliveringXMLHttpRequest as unknown as typeof XMLHttpRequest);
@@ -547,6 +612,7 @@ describe('mobile guest photo delivery', () => {
     expect(transfer.headers['Content-Type']).toBe('image/jpeg');
     expect((transfer.body as File).name).toBe('keeper.jpg');
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      '/api/event/alex-jordan/uploads/capabilities',
       '/api/event/alex-jordan/uploads/batch',
       '/api/event/alex-jordan/uploads/media-a/finalize',
     ]);

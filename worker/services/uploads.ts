@@ -1,12 +1,12 @@
 import {
   MAX_IMAGE_BYTES,
-  SUPPORTED_IMAGE_TYPES,
   UPLOAD_BATCH_SIZE,
   UPLOAD_RESERVATION_TTL_SECONDS,
   type SupportedImageType,
 } from '../../shared/constants';
 import type { UploadBatchItemView } from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
+import { isLegacyUploadMimeType, resolveImageDeclaration, type KnownImageMimeType } from '../../shared/image-formats';
 import { resolvePhotoIntake } from '../../shared/rsvp';
 import { MediaRepository, uploadMediaView, type ReserveMediaRecord } from '../db/media';
 import type { EventRecord } from '../db/types';
@@ -15,6 +15,9 @@ import { assertWorkerIngressEnabled } from '../media-upload-release';
 import { sanitizeFilename } from '../security/filenames';
 import { mediaReservationObjectKey } from '../storage/media-keys';
 import type { UploadAuthority } from './upload-authority';
+import { getDeclarationAdmission } from '../mobile-image-release';
+import { UploadTransferRepository, uploadTransferView } from '../db/upload-transfers';
+import { MAX_MOBILE_ORIGINAL_BYTES } from '../../shared/mobile-image-contract';
 
 export interface InitiateUploadInput {
   filename: string;
@@ -23,33 +26,16 @@ export interface InitiateUploadInput {
   idempotencyKey: string;
   guestName?: string;
   caption?: string | null;
+  transport?: 'parts-v1';
 }
 
 export type BatchUploadFile = Omit<InitiateUploadInput, 'guestName'>;
 
 export type BatchUploadResult = UploadBatchItemView;
 
-const PROVISIONAL_MIME_TYPES = new Set(['', 'application/octet-stream', 'binary/octet-stream']);
-const VENDOR_HEIF_TYPES = new Map<string, SupportedImageType>([
-  ['image/x-heic', 'image/heic'],
-  ['image/x-heic-sequence', 'image/heic-sequence'],
-  ['image/x-heif', 'image/heif'],
-  ['image/x-heif-sequence', 'image/heif-sequence'],
-]);
-
 export function resolveSupportedImageType(filename: string, mimeType: string): SupportedImageType {
-  const normalized = mimeType.trim().toLowerCase();
-  if (SUPPORTED_IMAGE_TYPES.includes(normalized as SupportedImageType)) return normalized as SupportedImageType;
-  if (normalized === 'image/jpg') return 'image/jpeg';
-  const extension = filename.trim().toLowerCase().split('.').pop();
-  const vendorType = VENDOR_HEIF_TYPES.get(normalized);
-  if (vendorType && ((vendorType.includes('heic') && extension === 'heic') || (vendorType.includes('heif') && extension === 'heif'))) {
-    return vendorType;
-  }
-  if (PROVISIONAL_MIME_TYPES.has(normalized)) {
-    if (extension === 'heic') return 'image/heic';
-    if (extension === 'heif') return 'image/heif';
-  }
+  const declaration = resolveImageDeclaration(filename, mimeType);
+  if (declaration && isLegacyUploadMimeType(declaration.mimeType)) return declaration.mimeType;
   throw new ApiError('FILE_TYPE_UNSUPPORTED', 'Choose a JPG, PNG, WebP, HEIC, or HEIF photo.', 415);
 }
 
@@ -96,9 +82,10 @@ export class UploadService {
     input: InitiateUploadInput,
     attribution: string,
     now: Date,
+    admitted?: {mimeType:KnownImageMimeType;maxBytes:number},
   ): ReserveMediaRecord {
-    const mimeType = resolveSupportedImageType(input.filename, input.mimeType);
-    if (!Number.isInteger(input.byteSize) || input.byteSize < 1 || input.byteSize > MAX_IMAGE_BYTES) {
+    const mimeType = admitted?.mimeType ?? resolveSupportedImageType(input.filename, input.mimeType);
+    if (!Number.isInteger(input.byteSize) || input.byteSize < 1 || input.byteSize > (admitted?.maxBytes ?? MAX_IMAGE_BYTES)) {
       throw new ApiError('FILE_TOO_LARGE', 'Choose a photo no larger than 20 MB.', 413);
     }
     if (!input.idempotencyKey || input.idempotencyKey.length > 128) {
@@ -132,6 +119,50 @@ export class UploadService {
     assertWorkerIngressEnabled();
     this.assertCanUpload(authority, event, now);
     const attribution = this.attribution(authority, input.guestName);
+    const declared = resolveImageDeclaration(input.filename,input.mimeType);
+    const extended = declared !== null && (!isLegacyUploadMimeType(declared.mimeType) || input.byteSize > MAX_IMAGE_BYTES);
+    if (extended && input.transport === 'parts-v1') {
+      const repository = new MediaRepository(this.env.DB);
+      const prepared = this.prepareReservation(authority,event,input,attribution,now,{
+        mimeType:declared.mimeType as KnownImageMimeType,maxBytes:MAX_MOBILE_ORIGINAL_BYTES,
+      });
+      // New-intake controls must not strand an already admitted transfer. A replay
+      // still checks its current actor, immutable metadata, deletion and expiry.
+      // Include the transfer even after delivery so a reselected File is verified.
+      const existing = await repository.getIdempotent(prepared);
+      const priorTransfers = new UploadTransferRepository(this.env.DB);
+      const priorId = existing ? await priorTransfers.findId(existing.id) : null;
+      if (existing && priorId) {
+        const prior = await priorTransfers.getOwned({transferId:priorId,mediaId:existing.id,eventId:event.id,authority},now.toISOString());
+        if (!prior.ok) throw new ApiError('UPLOAD_FINALIZE_CONFLICT','This upload can no longer be resumed. Choose the photo again.',409);
+        return {media:uploadMediaView(existing),alreadyDelivered:existing.uploadState === 'stored',transport:'parts-v1' as const,transfer:uploadTransferView(prior.value)};
+      }
+      const admission = await getDeclarationAdmission(declared,this.env);
+      if (!admission.enabled || !admission.currentFingerprint) {
+        if (admission.reason === 'unavailable') throw new ApiError('IMAGE_PROCESSING_UNAVAILABLE','Photo processing is temporarily unavailable. Try again shortly.',503);
+        throw new ApiError('FILE_TYPE_UNSUPPORTED','This photo format or size is not available for this event yet.',415);
+      }
+      if (!Number.isSafeInteger(input.byteSize) || input.byteSize < 1 || input.byteSize > admission.maxOriginalBytes)
+        throw new ApiError('FILE_TOO_LARGE','This photo exceeds the current upload limit.',413);
+      prepared.mobileAdmission = {caseIds:admission.caseIds};
+      const transfers = new UploadTransferRepository(this.env.DB,{buildFingerprint:admission.currentFingerprint,caseId:admission.caseIds[0]!});
+      const media = await repository.reserve(prepared);
+      if (media.uploadState === 'stored') {
+        const winner = await transfers.findId(media.id);
+        const prior = winner && await transfers.getOwned({transferId:winner,mediaId:media.id,eventId:event.id,authority},now.toISOString());
+        if (!prior || !prior.ok) throw new ApiError('UPLOAD_FINALIZE_CONFLICT','This upload changed. Choose the photo again.',409);
+        return {media:uploadMediaView(media),alreadyDelivered:true as const,transport:'parts-v1' as const,transfer:uploadTransferView(prior.value)};
+      }
+      const transferId = await transfers.findId(media.id) ?? crypto.randomUUID();
+      let outcome = await transfers.initiate({transferId,mediaId:media.id,eventId:event.id,authority,declared,byteSize:input.byteSize,now:now.toISOString()});
+      if (!outcome.ok) {
+        const winner = await transfers.findId(media.id);
+        if (winner) outcome = await transfers.getOwned({transferId:winner,mediaId:media.id,eventId:event.id,authority},now.toISOString());
+        else if (media.id === prepared.id) await repository.failReservation(media.id);
+      }
+      if (!outcome.ok) throw new ApiError('UPLOAD_FINALIZE_CONFLICT','This upload changed while it was being prepared. Try again.',409);
+      return {media:uploadMediaView(media),alreadyDelivered:false as const,transport:'parts-v1' as const,transfer:uploadTransferView(outcome.value)};
+    }
     const repository = new MediaRepository(this.env.DB);
     const media = await repository.reserve(
       this.prepareReservation(authority, event, input, attribution, now),
@@ -164,6 +195,12 @@ export class UploadService {
     const items: Array<BatchUploadResult | undefined> = new Array(input.files.length);
     for (const [index, file] of input.files.entries()) {
       try {
+        const declared = resolveImageDeclaration(file.filename,file.mimeType);
+        if (file.transport === 'parts-v1' && declared && (!isLegacyUploadMimeType(declared.mimeType) || file.byteSize > MAX_IMAGE_BYTES)) {
+          const result = await this.initiate(authority,event,{...file,guestName:input.guestName},now);
+          items[index] = {idempotencyKey:file.idempotencyKey,status:'accepted',...result};
+          continue;
+        }
         prepared.push({
           index,
           reservation: this.prepareReservation(

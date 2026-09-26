@@ -17,6 +17,7 @@ import { MediaRepository } from '../db/media';
 import type { EventRecord } from '../db/types';
 import type { AppBindings } from '../env';
 import { getSessionCookie } from '../http/cookies';
+import { recordOriginalRead, recordPreviewRead } from '../observability/image-metrics';
 import { getOrCreatePreview } from '../storage/previews';
 import { isEventCoverKey } from '../storage/event-cover-keys';
 
@@ -161,29 +162,43 @@ contentRoutes.get('/manage/events/:eventId/cover/:revision/:profile/:slot', asyn
   return revisionedCoverResponse(context, auth.event);
 });
 
-async function previewResponse(context: Context<AppBindings>) {
+async function authorizePreview(context: Context<AppBindings>) {
   const repository = new MediaRepository(context.env.DB);
   const media = await repository.getById(context.req.param('mediaId')!);
   if (!media || media.uploadState !== 'stored' || media.deletedAt || media.trashedAt) {
+    if (media) recordPreviewRead(context.env, media.eventId, 'denied');
     throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
   }
   // The event comes from the row here, not the path, so authorization is asked per
   // photo: hosting the event by either credential is enough, and anyone else falls
   // back to the guest rules for their own upload or a published one.
-  if (!await resolveManager(context, media.eventId)) {
-    const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
-    const guestCanRead = auth.event.id === media.eventId
-      && (media.uploaderSessionId === auth.session.id
-        || (media.publicationStatus === 'published' && auth.event.galleryVisible));
-    if (!guestCanRead) throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
+  try {
+    if (!await resolveManager(context, media.eventId)) {
+      const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
+      const guestCanRead = auth.event.id === media.eventId
+        && (media.uploaderSessionId === auth.session.id
+          || (media.publicationStatus === 'published' && auth.event.galleryVisible));
+      if (!guestCanRead) throw new ApiError('ROLE_FORBIDDEN', 'This photo is not available.', 403);
+    }
+  } catch (error) {
+    if (error instanceof ApiError) recordPreviewRead(context.env, media.eventId, 'denied');
+    throw error;
   }
 
+  return media;
+}
+
+async function previewResponse(context: Context<AppBindings>) {
+  const media=await authorizePreview(context);
   const object = await getOrCreatePreview(context.env, media);
+  try {await authorizePreview(context);} catch (error) {await object.body.cancel(); throw error;}
   return new Response(object.body, {
     headers: {
       'Content-Type': object.httpMetadata?.contentType ?? 'image/webp',
       'Content-Length': String(object.size),
       'Cache-Control': 'private, no-store',
+      Vary: 'Cookie',
+      'Cross-Origin-Resource-Policy': 'same-origin',
       'X-Content-Type-Options': 'nosniff',
     },
   });
@@ -206,6 +221,7 @@ contentRoutes.get('/media/:mediaId/original', async (context) => {
     : context.env.MEDIA_BUCKET;
   const object = await bucket.get(media.objectKey);
   if (!object?.body) throw new ApiError('UPLOAD_OBJECT_MISSING', 'This original photo is temporarily unavailable.', 404);
+  recordOriginalRead(context.env, media.eventId, 'original-download', object.size);
   const filename = encodeURIComponent(media.originalFilename);
   return new Response(object.body, {
     headers: {

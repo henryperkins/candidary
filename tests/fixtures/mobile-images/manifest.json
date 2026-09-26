@@ -1,0 +1,1858 @@
+{
+  "version": 1,
+  "description": "Required mobile cases remain missing until licensed originals and independent local, live and physical-device evidence are recorded. Structural parser fixtures and decoder self-reports never qualify a case.",
+  "cases": [
+    {
+      "id": "jpeg-baseline",
+      "fixtures": [
+        {
+          "id": "pillow-hopper-jpg",
+          "path": "originals/hopper.jpg",
+          "sha256": "ffe89a0ab0e94114e10777e7313d7fa83d634e34ebc2ea7479085cffa504c920",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/Tests/images/hopper.jpg",
+            "license": "MIT-CMU / public-domain US Navy portrait",
+            "licenseFile": "licenses/pillow.txt",
+            "attribution": "Pillow contributors; Grace Hopper portrait by James S. Davis, US Navy (DN-SC-84-05971).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg",
+            "width": 128,
+            "height": 128,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/pillow-hopper-jpg.png",
+            "sha256": "e45419b4c1e4d0153aa3f4f867daadb00b3ec6303a994fdff1cfe3fbe2ef4860",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 3
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "jpeg-progressive",
+      "fixtures": [
+        {
+          "id": "libjxl-flower-progressive",
+          "path": "originals/flower-progressive.jpg",
+          "sha256": "376ea09db11fad472ea164e5920c1c31746136b0e9db46bc3d527ee192b855e9",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/libjxl/testdata/73695d303670c90e4d506ea89d9901b081385089/jxl/flower/flower.png.im_q85_420_progr.jpg",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/libjxl-testdata.txt",
+            "attribution": "JPEG XL project contributors, flower test photograph, CC-BY-4.0.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg",
+            "width": 2268,
+            "height": 1512,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/libjxl-flower-progressive.png",
+            "sha256": "de037cdfc5e953ca6582af25c84cfb1a3358222d43b701c9e84648a6bb03e317",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "jpeg-exif-orientation",
+      "fixtures": [
+        {
+          "id": "pillow-hopper-orientation-6-jpg",
+          "path": "originals/hopper_orientation_6.jpg",
+          "sha256": "2e78bb18895fa23eddbb2afa1228950700d97e4ef9d7bfae6935604d01eb1b61",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/Tests/images/hopper_orientation_6.jpg",
+            "license": "MIT-CMU / public-domain US Navy portrait",
+            "licenseFile": "licenses/pillow.txt",
+            "attribution": "Pillow contributors; Grace Hopper portrait by James S. Davis, US Navy (DN-SC-84-05971).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg",
+            "width": 128,
+            "height": 128,
+            "frames": 1,
+            "orientation": 6
+          },
+          "reference": {
+            "path": "references/pillow-hopper-orientation-6-jpg.png",
+            "sha256": "0d1565a88246f43658b1b3dcd4f0e317a39e7ec118e864a33f8cb5f9cd8b6598",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 3
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "jpeg-hdr",
+      "fixtures": [
+        {
+          "id": "libultrahdr-apple-gainmap-new",
+          "path": "originals/apple_gainmap_new.jpg",
+          "sha256": "492a94bd0636bcf15b3f560c68142a7783936c1597e78b0d0461d8be7fddc078",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/google/libultrahdr/f3e36226914289cfefcf0d81a6471cf6266c79fb/tests/data/apple_gainmap_new.jpg",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/libultrahdr-test-data.txt",
+            "attribution": "Google libultrahdr contributors, Apple HDR gain-map JPEG test photograph.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "iPhone 13 mini (EXIF); resized upstream test asset",
+            "os": "iOS 18.7.1 (EXIF)",
+            "settings": "Display P3 with auxiliary Apple gain map; original capture settings unknown; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg-with-apple-hdr-gainmap",
+            "width": 384,
+            "height": 512,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/libultrahdr-apple-gainmap-new.png",
+            "sha256": "d1c9b85bd16c2e56035835cdf4f6dc3c199b69b1297d935dc47692e8b006d68e",
+            "method": "pillow-jpeg-primary-srgb-v1",
+            "renderer": "Pillow 12.1.1; SDR primary, Display P3 to sRGB",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "libultrahdr-apple-gainmap-old",
+          "path": "originals/apple_gainmap_old.jpg",
+          "sha256": "2e4310a0dd37a98678e057e25d936bbc4f936bb6fe17380c0ce99e58ecaa603b",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/google/libultrahdr/f3e36226914289cfefcf0d81a6471cf6266c79fb/tests/data/apple_gainmap_old.jpg",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/libultrahdr-test-data.txt",
+            "attribution": "Google libultrahdr contributors, Apple HDR gain-map JPEG test photograph.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "iPhone 13 mini (EXIF); resized upstream test asset",
+            "os": "iOS 18.7.1 (EXIF)",
+            "settings": "Display P3 with auxiliary Apple gain map; original capture settings unknown; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg-with-apple-hdr-gainmap",
+            "width": 384,
+            "height": 512,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/libultrahdr-apple-gainmap-old.png",
+            "sha256": "d1c9b85bd16c2e56035835cdf4f6dc3c199b69b1297d935dc47692e8b006d68e",
+            "method": "pillow-jpeg-primary-srgb-v1",
+            "renderer": "Pillow 12.1.1; SDR primary, Display P3 to sRGB",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "jpeg-ultra-hdr-gainmap",
+      "fixtures": [
+        {
+          "id": "commons-montseny-pixel-8a-ultrahdr",
+          "path": "originals/commons-montseny-pixel-8a.jpg",
+          "sha256": "135e61715bc37947f96d87a03f467f205dd1866daf29758563f379bf326bbff3",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/9/97/Montseny_from_Puigmal_massif.jpg",
+            "license": "CC0-1.0",
+            "licenseFile": "licenses/wikimedia-commons-records.json",
+            "attribution": "Alan Mattingly, 'Montseny from Puigmal massif' (own work), Wikimedia Commons, CC0 1.0; attribution not required.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Google Pixel 8a (EXIF)",
+            "os": "Android version unknown; EXIF Software HDR+ 1.0.641377693zd (Pixel Camera)",
+            "settings": "1/3003 s, f/1.89, ISO 55, 5.43 mm; 2024-09-28 12:21:05+02:00; sRGB ICC; hdrgm 1.0 XMP, GContainer and MPF 1096x824 gain map; EXIF GPS present; single Commons upload; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg-ultrahdr-v1-hdrgm-mpf-gainmap",
+            "width": 4624,
+            "height": 3472,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/commons-montseny-pixel-8a-ultrahdr.png",
+            "sha256": "f88ea97add525dbc0523f6eddebe55c63063f5d27c3f68b193692b98016108d6",
+            "method": "pillow-jpeg-primary-srgb-v1",
+            "renderer": "Pillow 12.1.1; SDR primary JPEG only (gain map/video trailer ignored), embedded ICC to sRGB",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "commons-mtmurone-pixel-9-ultrahdr",
+          "path": "originals/commons-mtmurone-pixel-9.jpg",
+          "sha256": "052e851958e72ec4c54ef05baf942e34bdf1a350bd920d351b3cc55d10c45c58",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/c/c9/MtMurone.jpg",
+            "license": "CC-BY-SA-4.0",
+            "licenseFile": "licenses/wikimedia-commons-records.json",
+            "attribution": "Heavytank, 'MtMurone.jpg' (Mount Murone, own work), Wikimedia Commons, CC BY-SA 4.0. Reference renderings are CC BY-SA 4.0 adaptations (resized, colour converted).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Google Pixel 9 (EXIF)",
+            "os": "Android version unknown; EXIF Software HDR+ 1.0.936816820zd; C2PA claim generator Google C2PA SDK for Android",
+            "settings": "1/1167 s, f/1.68, ISO 23, 6.9 mm; 2026-08-05 12:55:48+09:00; sRGB ICC; hdrgm 1.0 XMP, GContainer and MPF 516x388 gain map; C2PA action c2pa.created 'Created by Pixel Camera' (signature not validated); single Commons upload; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg-ultrahdr-v1-hdrgm-mpf-gainmap-c2pa",
+            "width": 4080,
+            "height": 3072,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/commons-mtmurone-pixel-9-ultrahdr.png",
+            "sha256": "ba702b8e5a8a9f3244647561d198029cd3ffef60d7806bb3c0dd9f1c8fe146f0",
+            "method": "pillow-jpeg-primary-srgb-v1",
+            "renderer": "Pillow 12.1.1; SDR primary JPEG only (gain map/video trailer ignored), embedded ICC to sRGB",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "jpeg-motion-photo-still",
+      "fixtures": [
+        {
+          "id": "commons-pxl-pixel-6a-motion-photo",
+          "path": "originals/commons-PXL_20240103_071549544.MP.jpg",
+          "sha256": "cc9143e66707145b905bc7098430e14ef26826026277107693510d1d48412ca0",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/0/08/PXL_20240103_071549544.MP.jpg",
+            "license": "CC0-1.0",
+            "licenseFile": "licenses/wikimedia-commons-records.json",
+            "attribution": "Lk1122, 'PXL 20240103 071549544.MP.jpg' (own work), Wikimedia Commons, CC0 1.0; attribution not required.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Google Pixel 6a (EXIF)",
+            "os": "Android version unknown; EXIF Software HDR+ 1.0.585804401zd",
+            "settings": "1/100 s, f/1.73, ISO 351, 4.38 mm; 2024-01-03 08:15:49+01:00; sRGB ICC; Motion Photo v1 (MP4 hvc1 trailer at the declared offset, 2.03 s) plus hdrgm MPF 756x1008 gain map; still primary only; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg-google-motion-photo-v1-gainmap-mp4-trailer",
+            "width": 3024,
+            "height": 4032,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/commons-pxl-pixel-6a-motion-photo.png",
+            "sha256": "8a07b0b72594c4d53fc48404e77cc39dbf2ee956198c0da8803aa8a05194fcf8",
+            "method": "pillow-jpeg-primary-srgb-v1",
+            "renderer": "Pillow 12.1.1; SDR primary JPEG only (gain map/video trailer ignored), embedded ICC to sRGB",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "commons-mvimg-pixel-2-microvideo",
+          "path": "originals/commons-MVIMG_20171022_140431.jpg",
+          "sha256": "ee86bb8de724a2e6f8a88027fc74ca3f79f4b51ea94fe4313917545c4dd1c100",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/5/55/MVIMG_20171022_140431.jpg",
+            "license": "CC-BY-SA-4.0",
+            "licenseFile": "licenses/wikimedia-commons-records.json",
+            "attribution": "GambaKufu, 'MVIMG 20171022 140431.jpg' (Raikes Hall Hotel, own work), Wikimedia Commons, CC BY-SA 4.0. Reference renderings are CC BY-SA 4.0 adaptations (resized, colour converted).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Google Pixel 2 (EXIF)",
+            "os": "Android version unknown; EXIF Software HDR+ 1.0.171916441z",
+            "settings": "1/1170 s, f/1.8, ISO 51, 4.44 mm; 2017-10-22 14:04:32; sRGB ICC; legacy MicroVideo v1 (MP4 avc1 trailer at MicroVideoOffset, 1.8 s), no gain map; EXIF GPS present; still primary only; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "jpeg",
+            "container": "jpeg-google-microvideo-v1-mp4-trailer",
+            "width": 4032,
+            "height": 3024,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/commons-mvimg-pixel-2-microvideo.png",
+            "sha256": "3df0170b66d1cbc79178423b965742490a2415362505adc33d584e82530ae246",
+            "method": "pillow-jpeg-primary-srgb-v1",
+            "renderer": "Pillow 12.1.1; SDR primary JPEG only (gain map/video trailer ignored), embedded ICC to sRGB",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "png",
+      "fixtures": [
+        {
+          "id": "pillow-hopper-png",
+          "path": "originals/hopper.png",
+          "sha256": "dbdcb9a9f8ec2c54ff99e99636059bbd57194ed84e2cca5e53853aef293faf42",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/Tests/images/hopper.png",
+            "license": "MIT-CMU / public-domain US Navy portrait",
+            "licenseFile": "licenses/pillow.txt",
+            "attribution": "Pillow contributors; Grace Hopper portrait by James S. Davis, US Navy (DN-SC-84-05971).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "png",
+            "container": "png",
+            "width": 128,
+            "height": 128,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/pillow-hopper-png.png",
+            "sha256": "8793a7d6a0bbe7848f30728cd325905eaa88a1f828d1fe2ee70c21c57e4f20a9",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 3
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "apng",
+      "fixtures": [
+        {
+          "id": "libjxl-icos4d-apng",
+          "path": "originals/icos4d.apng",
+          "sha256": "74fbb1d322930af5353c5d79daeda4b0a25f6168accfdfcf7cbd6486ae879c7a",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/libjxl/conformance/b1d0f990b03e57bf6d137c365cd5dc8b470b9191/testcases/animation_icos4d/orig.apng",
+            "license": "CC0-1.0",
+            "attribution": "Jason Hise, icos4d; JPEG XL upstream CC0 source credit.",
+            "redistributable": true,
+            "consent": true,
+            "licenseFile": "licenses/apng-icos4d.txt"
+          },
+          "capture": {
+            "device": "unknown; upstream full encoded asset",
+            "os": "unknown",
+            "settings": "unchanged upstream file"
+          },
+          "encoded": {
+            "codec": "png",
+            "container": "apng",
+            "width": 128,
+            "height": 128,
+            "frames": 48,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/libjxl-icos4d-apng.png",
+            "sha256": "9314dd931fb5f5a795cdef71487ef7424e210c64c3f9cfe6d15ff51f0cf4d045",
+            "method": "pillow-srgb-v1",
+            "maxChannelError": 4,
+            "renderer": "Pillow 12.1.1"
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "webp-lossy",
+      "fixtures": [
+        {
+          "id": "pillow-hopper-webp",
+          "path": "originals/hopper.webp",
+          "sha256": "3ad1cd060bff97c8090ca68efe9e25724e830bf5383397ffe7f448d5b825c6ad",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/Tests/images/hopper.webp",
+            "license": "MIT-CMU / public-domain US Navy portrait",
+            "licenseFile": "licenses/pillow.txt",
+            "attribution": "Pillow contributors; Grace Hopper portrait by James S. Davis, US Navy (DN-SC-84-05971).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "webp",
+            "container": "webp",
+            "width": 128,
+            "height": 128,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/pillow-hopper-webp.png",
+            "sha256": "8b4cff0fd7e1e9f021500d5d0987cb46fa3427744a05813878b15b2550f4b63b",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 3
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "webp-lossless",
+      "fixtures": [
+        {
+          "id": "google-yellow-rose-webp-lossless",
+          "path": "originals/yellow-rose-lossless.webp",
+          "sha256": "49a902b9c35bd2031bf26234c59ff369dd3ae18a3b58247285104a23346ba2d4",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://www.gstatic.com/webp/gallery3/1_webp_ll.webp",
+            "license": "Public Domain",
+            "attribution": "Jon Sullivan, Yellow Rose.",
+            "redistributable": true,
+            "consent": true,
+            "licenseFile": "licenses/google-webp-rose.txt"
+          },
+          "capture": {
+            "device": "unknown; upstream full encoded asset",
+            "os": "unknown",
+            "settings": "unchanged upstream file"
+          },
+          "encoded": {
+            "codec": "webp",
+            "container": "webp-lossless",
+            "width": 400,
+            "height": 301,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/google-yellow-rose-webp-lossless.png",
+            "sha256": "1e7307f53482e66ebc012d5632dad061acb1eadc2e70612dc4debdb6456fadb4",
+            "method": "pillow-srgb-v1",
+            "maxChannelError": 4,
+            "renderer": "Pillow 12.1.1"
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "webp-animated",
+      "fixtures": [
+        {
+          "id": "commons-poznan-neon-webp-animated",
+          "path": "originals/commons-poznan-neon.webp",
+          "sha256": "a9bef3616f8deec6b558760ed98d9054b10ac452a896ae88987918bd7179485a",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/a2/Pozna%C5%84skie_S%C5%82owiki_neon_%C5%9Bw._Marcin_Pozna%C5%84.webp",
+            "license": "CC-BY-SA-4.0",
+            "licenseFile": "licenses/wikimedia-commons-records.json",
+            "attribution": "Klapi, 'Poznańskie Słowiki neon, ul. św. Marcin, Poznań' (own work), Wikimedia Commons, CC BY-SA 4.0. Reference renderings are CC BY-SA 4.0 adaptations (resized, colour converted).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; uploader own-work video (no EXIF)",
+            "os": "unknown",
+            "settings": "unknown capture settings; 24-frame lossy VP8/ALPH animation, 480x270 canvas, 1590 ms, loop 0; single Commons upload; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "webp",
+            "container": "webp-animated-vp8x-anim",
+            "width": 480,
+            "height": 270,
+            "frames": 24,
+            "orientation": 1,
+            "isSequence": true
+          },
+          "reference": {
+            "path": "references/commons-poznan-neon-webp-animated.png",
+            "sha256": "f4cfc086632be4d343e492816b9214ed94b9189eb24edb659c046fda580afc0e",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1 (Ubuntu libwebp 1.5.0)",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "commons-socorro-vortices-webp-animated",
+          "path": "originals/commons-socorro-vortices.webp",
+          "sha256": "cd192233b998f3b23bf9c80e918bd63f53c7e369c241fdba1dfa77fb4a6f7bb1",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/e/ec/Socorro_Von_K%C3%A1rm%C3%A1n_Vortices.webp",
+            "license": "Public Domain (US Government work: PD-USGov, PD-USGov-NASA)",
+            "licenseFile": "licenses/wikimedia-commons-records.json",
+            "attribution": "NASA/GOES imagery via weather.ndc.nasa.gov (US Government work, public domain); animated WebP conversion by Wikimedia Commons user Carrylex. Pinned current file revision sha1 d5d094b3991491404488381e854e9f9008d933b2.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; GOES weather satellite imagery (no EXIF)",
+            "os": "unknown",
+            "settings": "unknown capture settings; 98-frame lossy VP8/ALPH animation, 750x560 canvas, 3880 ms, 36 sub-rectangle frames, loop 0; converted from a Commons GIF; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "webp",
+            "container": "webp-animated-vp8x-anim",
+            "width": 750,
+            "height": 560,
+            "frames": 98,
+            "orientation": 1,
+            "isSequence": true
+          },
+          "reference": {
+            "path": "references/commons-socorro-vortices-webp-animated.png",
+            "sha256": "49b3fb4c2ca02646be15c22298265262f2806ab9e64b200979900228d2fec660",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1 (Ubuntu libwebp 1.5.0)",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "heic-primary",
+      "fixtures": [
+        {
+          "id": "libheif-heic-primary",
+          "path": "originals/example.heic",
+          "sha256": "7f8b363e4936c0666a25f64f3a92fda10bd8e5453be4592530b65a55dd98f3f2",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/strukturag/libheif/413e2a87e6a70b3eccc3a3adc5801179dd2d9e00/examples/example.heic",
+            "license": "MIT",
+            "licenseFile": "licenses/libheif-examples.txt",
+            "attribution": "libheif example photograph, struktur AG and contributors.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream example photograph",
+            "os": "unknown",
+            "settings": "original upstream bytes; primary item selected by independent heif-dec"
+          },
+          "encoded": {
+            "codec": "heic",
+            "container": "heif",
+            "width": 1280,
+            "height": 854,
+            "orientation": 1,
+            "frames": 1
+          },
+          "reference": {
+            "path": "references/libheif-heic-primary.png",
+            "sha256": "30d1c2177e31347c4082724d14e1791f832195663610dbb6b3393208d5267bc3",
+            "method": "heif-dec-1.21.2-bilinear-primary",
+            "renderer": "Ubuntu heif-dec 1.21.2 (separate distribution build); Pillow RGBA PNG",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "heic-grid",
+      "fixtures": [
+        {
+          "id": "zenodo-14227327-img-2622-grid",
+          "path": "originals/zenodo-14227327-IMG_2622.HEIC",
+          "sha256": "95966c80c8539a3335e66c6c02300d5f25fd5bfa85e150bdb08f24a4d879e213",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://zenodo.org/records/14227327/files/IMG_2622.HEIC?download=1",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/zenodo-records.json",
+            "attribution": "Takeharu YANAGI, IMG_2622.HEIC, Zenodo (2024), doi:10.5281/zenodo.14227327, CC BY 4.0.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Apple iPhone 14 Pro (EXIF)",
+            "os": "iOS 17.5.1 (EXIF)",
+            "settings": "1/2809 s, f/1.78, ISO 80, 6.86 mm; 2024-07-31 15:58:11+09:00; Display P3 ICC; 8x6 grid of 512x512 HEVC tiles; thumbnail and hdrgainmap auxiliary; no GPS; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "heic",
+            "container": "heif-grid-8x6-hdrgainmap-aux",
+            "width": 4032,
+            "height": 3024,
+            "frames": 1,
+            "orientation": 1,
+            "primaryIndex": 0,
+            "isSequence": false
+          },
+          "reference": {
+            "path": "references/zenodo-14227327-img-2622-grid.png",
+            "sha256": "277ccae194872698b6cd650df98ebf917d33fb809bef6b841b111e4c50e60135",
+            "method": "heif-dec-1.21.2-bilinear-primary-srgb-v1",
+            "renderer": "Ubuntu heif-dec 1.21.2 with libde265 1.0.16 (separate distribution build); irot applied once; ICC to sRGB, then single-rounding float Lanczos fit, with Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "zenodo-17195716-img-007-grid-irot",
+          "path": "originals/zenodo-17195716-IMG_007.HEIC",
+          "sha256": "8a8cef63104dd3c8ea91c59e64f5a9dd1118264cc2182ad83b249d7dffc90e53",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://zenodo.org/records/17195716/files/IMG_007.HEIC?download=1",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/zenodo-records.json",
+            "attribution": "Mohammed Salah Eddine Boukli Hacene and Amina Damerdji, IMG_007.HEIC, 'Dataset on the four dominant marine bivalve species from the Western Algerian coast', Zenodo (2025), doi:10.5281/zenodo.17195716, CC BY 4.0.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Apple iPhone 11 Pro (EXIF)",
+            "os": "iOS 18.5 (EXIF)",
+            "settings": "1/122 s, f/1.8, ISO 50, 4.25 mm; 2025-07-25 11:50:26+01:00; Display P3 ICC; 8x6 grid; irot 270 and duplicate EXIF Orientation 6 (applied once); no auxiliary image; no GPS; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "heic",
+            "container": "heif-grid-8x6-irot270",
+            "width": 4032,
+            "height": 3024,
+            "frames": 1,
+            "orientation": 6,
+            "primaryIndex": 0,
+            "isSequence": false
+          },
+          "reference": {
+            "path": "references/zenodo-17195716-img-007-grid-irot.png",
+            "sha256": "c2606fe36b38f01d4843351251d6f9f2161f0626da6a85015f780938e68568d2",
+            "method": "heif-dec-1.21.2-bilinear-primary-srgb-v1",
+            "renderer": "Ubuntu heif-dec 1.21.2 with libde265 1.0.16 (separate distribution build); irot applied once; ICC to sRGB, then single-rounding float Lanczos fit, with Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "zenodo-19469154-galaxy-a16-grid",
+          "path": "originals/zenodo-19469154-20260322_104419.heic",
+          "sha256": "1b2ec2b2f7a09e3755e6f8c9eb85bf332cc654a7f5ed4421516d0b004383e1ab",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://zenodo.org/records/19469154/files/20260322_104419.heic?download=1",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/zenodo-records.json",
+            "attribution": "Libish Murugesan, 20260322_104419.heic, 'Motifs and Freize reliefs of the Narasimhaswamy Temple, Namakkal', Zenodo (2026), doi:10.5281/zenodo.19469154, CC BY 4.0.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "samsung Galaxy A16 5G (EXIF)",
+            "os": "unknown (no EXIF Software)",
+            "settings": "1/100 s, f/1.8, ISO 40, 3.86 mm; 2026-03-22 10:44:24+05:30; no colour profile; 16x12 grid of 512x512 HEVC Main tiles (about 50 MP); meta after mdat; irot 270 and duplicate EXIF Orientation 6 (applied once); no GPS; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "heic",
+            "container": "heif-grid-16x12-irot270-meta-after-mdat",
+            "width": 8160,
+            "height": 6120,
+            "frames": 1,
+            "orientation": 6,
+            "primaryIndex": 0,
+            "isSequence": false
+          },
+          "reference": {
+            "path": "references/zenodo-19469154-galaxy-a16-grid.png",
+            "sha256": "38a54d8a89cc10ead047bfa932a1d4c43ab68e29d96161d61f9916d88a5b0459",
+            "method": "heif-dec-1.21.2-bilinear-primary-srgb-v1",
+            "renderer": "Ubuntu heif-dec 1.21.2 with libde265 1.0.16 (separate distribution build); irot applied once; ICC to sRGB, then single-rounding float Lanczos fit, with Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "heic-auxiliary",
+      "fixtures": [
+        {
+          "id": "zenodo-14227327-img-2622-hdrgainmap",
+          "path": "originals/zenodo-14227327-IMG_2622.HEIC",
+          "sha256": "95966c80c8539a3335e66c6c02300d5f25fd5bfa85e150bdb08f24a4d879e213",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://zenodo.org/records/14227327/files/IMG_2622.HEIC?download=1",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/zenodo-records.json",
+            "attribution": "Takeharu YANAGI, IMG_2622.HEIC, Zenodo (2024), doi:10.5281/zenodo.14227327, CC BY 4.0.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Apple iPhone 14 Pro (EXIF)",
+            "os": "iOS 17.5.1 (EXIF)",
+            "settings": "Same original as zenodo-14227327-img-2622-grid; auxl urn:com:apple:photo:2020:aux:hdrgainmap 2016x1512 monochrome HEVC; SDR primary expected, gain map never displayed; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "heic",
+            "container": "heif-grid-apple-hdrgainmap-auxl",
+            "width": 4032,
+            "height": 3024,
+            "frames": 1,
+            "orientation": 1,
+            "primaryIndex": 0,
+            "isSequence": false
+          },
+          "reference": {
+            "path": "references/zenodo-14227327-img-2622-hdrgainmap.png",
+            "sha256": "277ccae194872698b6cd650df98ebf917d33fb809bef6b841b111e4c50e60135",
+            "method": "heif-dec-1.21.2-bilinear-primary-srgb-v1",
+            "renderer": "Ubuntu heif-dec 1.21.2 with libde265 1.0.16 (separate distribution build); irot applied once; ICC to sRGB, then single-rounding float Lanczos fit, with Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "zenodo-13623651-depth-auxiliary",
+          "path": "originals/zenodo-13623651-Beck_Stambog_KB_NKS360oktav_Image3_2024-08-21.heic",
+          "sha256": "15aa1095c4cae3953e959eefbeda4f5334647678beea98d392966ce48618d324",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://zenodo.org/records/13623651/files/Beck_Stambog_KB_NKS360oktav_Image3_2024-08-21.heic?download=1",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/zenodo-records.json",
+            "attribution": "Sara Taglialatela (University of Copenhagen), Beck_Stambog_KB_NKS360oktav_Image3_2024-08-21.heic, LEUKOS dataset of Stamboger from the Royal Danish Library, Zenodo (2024), doi:10.5281/zenodo.13623651, CC BY 4.0.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Apple iPhone 14 Pro Max (EXIF)",
+            "os": "iOS version unknown; EXIF Software Leica LUX 1.1 (third-party camera app)",
+            "settings": "1/50 s, f/1.78, ISO 250, 6.86 mm; 2024-08-21 10:49:23+02:00; Display P3 ICC; 6x8 grid; auxl urn:mpeg:hevc:2015:auxid:2 depth 576x768; EXIF GPS present; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "heic",
+            "container": "heif-grid-mpeg-depth-auxl",
+            "width": 3024,
+            "height": 4032,
+            "frames": 1,
+            "orientation": 1,
+            "primaryIndex": 0,
+            "isSequence": false
+          },
+          "reference": {
+            "path": "references/zenodo-13623651-depth-auxiliary.png",
+            "sha256": "d6f394240f33f8d356a176982f2dc9d07f567adaaad0813bc807ed8475ecfc50",
+            "method": "heif-dec-1.21.2-bilinear-primary-srgb-v1",
+            "renderer": "Ubuntu heif-dec 1.21.2 with libde265 1.0.16 (separate distribution build); irot applied once; ICC to sRGB, then single-rounding float Lanczos fit, with Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "zenodo-17114909-img-8685-apple-auxiliaries",
+          "path": "originals/zenodo-17114909-IMG_8685.HEIC",
+          "sha256": "3750704f0f0192e32e2cf7ee6856ee45770d358319e590f42062cd6a7c971d05",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://zenodo.org/records/17114909/files/IMG_8685.HEIC?download=1",
+            "license": "CC-BY-4.0",
+            "licenseFile": "licenses/zenodo-records.json",
+            "attribution": "Luke Strohbehn (Oregon State University), IMG_8685.HEIC, 'OSU_Prosser_Field_Trials_2025', Zenodo (2025), doi:10.5281/zenodo.17114909, CC BY 4.0.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Apple iPhone 16 (EXIF)",
+            "os": "iOS 18.2.1 (EXIF)",
+            "settings": "1/185 s, f/1.6, ISO 40, 5.96 mm; 2025-02-19 13:53:02-08:00; Display P3 ICC; 9x5 grid of 640x896 tiles; hdrgainmap grid, linear thumbnail, skin/sky/portrait mattes and style delta map auxiliaries; tmap item in an altr group with the primary; EXIF GPS present; SDR primary expected; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "heic",
+            "container": "heif-grid-gainmap-mattes-tmap-altr",
+            "width": 5712,
+            "height": 4284,
+            "frames": 1,
+            "orientation": 1,
+            "primaryIndex": 0,
+            "isSequence": false
+          },
+          "reference": {
+            "path": "references/zenodo-17114909-img-8685-apple-auxiliaries.png",
+            "sha256": "a9c73d2ecd6771dd1d97c4f7c264826b5473814429d5c6c9401b45ebd1a3b3e1",
+            "method": "heif-dec-1.21.2-bilinear-primary-srgb-v1",
+            "renderer": "Ubuntu heif-dec 1.21.2 with libde265 1.0.16 (separate distribution build); irot applied once; ICC to sRGB, then single-rounding float Lanczos fit, with Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "heic-sequence",
+      "fixtures": []
+    },
+    {
+      "id": "heif-generic",
+      "fixtures": [
+        {
+          "id": "libheif-heif-generic",
+          "path": "originals/example.heic",
+          "sha256": "7f8b363e4936c0666a25f64f3a92fda10bd8e5453be4592530b65a55dd98f3f2",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/strukturag/libheif/413e2a87e6a70b3eccc3a3adc5801179dd2d9e00/examples/example.heic",
+            "license": "MIT",
+            "licenseFile": "licenses/libheif-examples.txt",
+            "attribution": "libheif example photograph, struktur AG and contributors.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream example photograph",
+            "os": "unknown",
+            "settings": "original upstream bytes; primary item selected by independent heif-dec"
+          },
+          "encoded": {
+            "codec": "heif",
+            "container": "heif",
+            "width": 1280,
+            "height": 854,
+            "orientation": 1,
+            "frames": 1
+          },
+          "reference": {
+            "path": "references/libheif-heif-generic.png",
+            "sha256": "30d1c2177e31347c4082724d14e1791f832195663610dbb6b3393208d5267bc3",
+            "method": "heif-dec-1.21.2-bilinear-primary",
+            "renderer": "Ubuntu heif-dec 1.21.2 (separate distribution build); Pillow RGBA PNG",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "dng-bayer",
+      "fixtures": [
+        {
+          "id": "raw-pixls-pixel-2-xl",
+          "path": "originals/pixel-2-xl.dng",
+          "sha256": "5541093a369f0487fef92bcd1f5fef1be6e4e3cec2aa4d52ad38d2211f3309d7",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.pixls.us/getfile.php/2206/nice/Google%20-%20Pixel%202%20XL%20-%2016bit%20%284:3%29.dng",
+            "license": "CC0-1.0",
+            "licenseFile": "licenses/raw-pixls-phone-records.json",
+            "attribution": "raw.pixls.us contributor for Pixel 2 XL; individually recorded CC0 release.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Pixel 2 XL",
+            "os": "Android 8.1.0",
+            "settings": "16bit (4:3); Taken with Open Camera app in raw mode; unchanged upstream original; native expectations use active image crop"
+          },
+          "encoded": {
+            "codec": "dng",
+            "container": "tiff-dng",
+            "width": 4032,
+            "height": 3024,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/pixel-2-xl-raw.png",
+            "sha256": "95ac9ee41aaadc3e53024d4ca83b99ba29d24e0bc6e9a5a39723a5e84265056a",
+            "method": "dcraw-emu-0.21.5b-srgb-v1",
+            "renderer": "Ubuntu LibRaw 0.21.5b dcraw_emu and Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "dng-linear",
+      "fixtures": [
+        {
+          "id": "raw-pixls-galaxy-s23-ultra",
+          "path": "originals/galaxy-s23-ultra.dng",
+          "sha256": "4f9d1b085b328b6c7ae21437c4106889cb38d52fab604a786091bf5fe5ef3da4",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.pixls.us/getfile.php/6758/nice/Samsung%20-%20Galaxy%20S23%20Ultra%20-%204:3.dng",
+            "license": "CC0-1.0",
+            "licenseFile": "licenses/raw-pixls-phone-records.json",
+            "attribution": "raw.pixls.us contributor for Galaxy S23 Ultra; individually recorded CC0 release.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Galaxy S23 Ultra",
+            "os": "firmware S918BXXS3AWF7; Android version unknown",
+            "settings": "4:3; jpeg restart interval = 16; unchanged upstream original; native expectations use active image crop"
+          },
+          "encoded": {
+            "codec": "dng",
+            "container": "tiff-dng",
+            "width": 3648,
+            "height": 2736,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/galaxy-s23-ultra-raw.png",
+            "sha256": "3315dad8c75636f04dc7564c90b3995deae2a0baf4ab123367787bacf39982cf",
+            "method": "dcraw-emu-0.21.5b-srgb-v1",
+            "renderer": "Ubuntu LibRaw 0.21.5b dcraw_emu and Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "dng-proraw",
+      "fixtures": [
+        {
+          "id": "raw-pixls-iphone-12-pro",
+          "path": "originals/iphone-12-pro.dng",
+          "sha256": "e91e77a4533ed7cce551d83330676ea5c47dd5e55fb38adda7819366afdbdfc2",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.pixls.us/getfile.php/4264/nice/Apple%20-%20iPhone%2012%20Pro%20-%208bit%20%284:3%29.DNG",
+            "license": "CC0-1.0",
+            "licenseFile": "licenses/raw-pixls-phone-records.json",
+            "attribution": "raw.pixls.us contributor for iPhone 12 Pro; individually recorded CC0 release.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "iPhone 12 Pro",
+            "os": "iOS 14.3",
+            "settings": "8bit (4:3); ljpeg predictor = 7; unchanged upstream original; native expectations use active image crop"
+          },
+          "encoded": {
+            "codec": "dng",
+            "container": "tiff-dng",
+            "width": 4032,
+            "height": 3024,
+            "frames": 1,
+            "orientation": 6
+          },
+          "reference": {
+            "path": "references/iphone-12-pro-raw.png",
+            "sha256": "a715f77003bc0ce00f353d4fb18e0b7d36869ffe37cc102136040af23d2e6602",
+            "method": "dcraw-emu-0.21.5b-srgb-v1",
+            "renderer": "Ubuntu LibRaw 0.21.5b dcraw_emu and Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "dng-jpeg",
+      "fixtures": [
+        {
+          "id": "raw-pixls-iphone-8",
+          "path": "originals/iphone-8.dng",
+          "sha256": "75cc053e427c3ca2dfa8526dc6c9c77fdb265bc5d005af1fd408b5084250a9fc",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.pixls.us/getfile.php/2835/nice/Apple%20-%20iPhone%208%20-%2016bit%20%284:3%29.dng",
+            "license": "CC0-1.0",
+            "licenseFile": "licenses/raw-pixls-phone-records.json",
+            "attribution": "raw.pixls.us contributor for iPhone 8; individually recorded CC0 release.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "iPhone 8",
+            "os": "iOS 11.3.1",
+            "settings": "16bit (4:3); camera/app settings otherwise unknown; unchanged upstream original; native expectations use active image crop"
+          },
+          "encoded": {
+            "codec": "dng",
+            "container": "tiff-dng",
+            "width": 4032,
+            "height": 3024,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/iphone-8-raw.png",
+            "sha256": "2bd7ad7c4bf2a46d0afccdcd35b811483d4c46266d5c51eabf245e8267bc34ad",
+            "method": "dcraw-emu-0.21.5b-srgb-v1",
+            "renderer": "Ubuntu LibRaw 0.21.5b dcraw_emu and Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "dng-proraw-jxl",
+      "fixtures": [
+        {
+          "id": "raw-pixls-galaxy-s22-jxl",
+          "path": "originals/galaxy-s22-jxl.dng",
+          "sha256": "8f0ddc0a672503a840995a6901b16d3650f4c41b8c775e66a553b30222a69864",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.pixls.us/getfile.php/7783/nice/Samsung%20-%20SM-S901E%20-%204:3.dng",
+            "license": "CC0-1.0",
+            "licenseFile": "licenses/raw-pixls-phone-records.json",
+            "attribution": "raw.pixls.us contributor for Samsung SM-S901E; individually recorded CC0 release (record 7783).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "Samsung Galaxy S22 (SM-S901E)",
+            "os": "firmware S901EXXSAEXJ1; Android version unknown",
+            "settings": "Unchanged upstream phone original; TIFF compression 52546 (JPEG XL), 16-bit linear RGB, DNG 1.7.0.0; orientation 6."
+          },
+          "encoded": {
+            "codec": "dng",
+            "container": "tiff-dng",
+            "width": 4000,
+            "height": 3000,
+            "frames": 1,
+            "orientation": 6
+          },
+          "reference": {
+            "path": "references/galaxy-s22-jxl-raw.png",
+            "sha256": "5292d3b03cffd1bc54f63f26fb73ad22a7e53c39ba2b394efa3fa07667c567fa",
+            "method": "adobe-dng-18.6-dcraw-0.21.5b-srgb-v1",
+            "renderer": "Pinned Adobe DNG Converter 18.6 uncompressed DNG; Ubuntu LibRaw 0.21.5b dcraw_emu; Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "avif-still",
+      "fixtures": [
+        {
+          "id": "libheif-avif-still",
+          "path": "originals/example.avif",
+          "sha256": "54a0dc31d02b6f5d9d4b66027d4787861b7af15ffd8fab8eab963d10c5411469",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/strukturag/libheif/413e2a87e6a70b3eccc3a3adc5801179dd2d9e00/examples/example.avif",
+            "license": "MIT",
+            "licenseFile": "licenses/libheif-examples.txt",
+            "attribution": "libheif example photograph, struktur AG and contributors.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream example photograph",
+            "os": "unknown",
+            "settings": "original upstream bytes; primary item selected by independent heif-dec"
+          },
+          "encoded": {
+            "codec": "avif",
+            "container": "heif",
+            "width": 800,
+            "height": 533,
+            "orientation": 1,
+            "frames": 1
+          },
+          "reference": {
+            "path": "references/libheif-avif-still.png",
+            "sha256": "682d70bb5cc45812b3dc653ffbb015b1d1689297234fe42380da5609acd7ab4b",
+            "method": "heif-dec-1.21.2-bilinear-primary",
+            "renderer": "Ubuntu heif-dec 1.21.2 (separate distribution build); Pillow RGBA PNG",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "avif-sequence",
+      "fixtures": [
+        {
+          "id": "linku-star-8bpc-avifs",
+          "path": "originals/linku-star-8bpc.avifs",
+          "sha256": "ae35b161de67a5afeb195ee401f369c34990f0ff8662f70ab4065bc6931f0a66",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/link-u/avif-sample-images/c666a368b73006246694919b5dbcc078317af6cc/star-8bpc.avifs",
+            "license": "CC-BY-SA-4.0 (repository); Twinkle Star artwork CC-BY-4.0",
+            "licenseFile": "licenses/linku-avif-sample-images-LICENSE.txt",
+            "attribution": "'Twinkle Star' by Ryo Hirafuji (@ledyba-z), CC BY 4.0; AVIF sequence from Link-U avif-sample-images, CC BY-SA 4.0. Reference renderings are CC BY-SA 4.0 adaptations (resized, colour converted).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; synthetic pixel artwork, not a capture",
+            "os": "unknown",
+            "settings": "upstream ffmpeg/MP4Box encoding: lossless AV1 8-bit 4:2:0, 5 samples x 100 ms, one edit without repeat; primary still item plus pict track; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "avif",
+            "container": "heif-avis-pict-track",
+            "width": 159,
+            "height": 159,
+            "frames": 5,
+            "orientation": 1,
+            "primaryIndex": 0,
+            "isSequence": true
+          },
+          "reference": {
+            "path": "references/linku-star-8bpc-avifs.png",
+            "sha256": "08b11290fb2af28a741367536b725efc5ce671b89f67e720b44bcfd8d268225a",
+            "method": "heif-dec-1.21.2-sequence-ignore-editlist-srgb-v1",
+            "renderer": "Ubuntu heif-dec 1.21.2 -S --ignore-editlist with libaom 3.13.1; independent mdhd/stts timing; Pillow 12.1.1 APNG",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "lsf-beach-ball-avifs",
+          "path": "originals/lsf-CC0.2.beach-ball.avifs",
+          "sha256": "c99384caf966d13864b50c957f4f50cd4a64480389555555c4437afa28ef9357",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/AsherJingkongChen/lots-of-sample-files/5e009b9fc7f0d8be46472828d47e1cd466a05595/resources/samples/image/avif/files/CC0.2.beach-ball.avifs",
+            "license": "CC0-1.0 (derivative of a public-domain original)",
+            "licenseFile": "licenses/lots-of-sample-files-avif-LICENSE.2.txt",
+            "attribution": "Bouncing beach ball by Holger Will (public domain, recorded on Wikimedia Commons); AVIF sequence conversion by Asher Jingkong Chen, CC0 1.0.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; synthetic rendered clip art, not a capture",
+            "os": "unknown",
+            "settings": "upstream FFmpeg 6.1.1 conversion: AV1 8-bit 4:4:4 identity matrix, 20 samples x 75 ms, repeating edit list; primary still item plus pict track; downloaded bytes unchanged"
+          },
+          "encoded": {
+            "codec": "avif",
+            "container": "heif-avis-pict-track-repeating-edit",
+            "width": 100,
+            "height": 100,
+            "frames": 20,
+            "orientation": 1,
+            "primaryIndex": 0,
+            "isSequence": true
+          },
+          "reference": {
+            "path": "references/lsf-beach-ball-avifs.png",
+            "sha256": "251267aa87abc67578842bd679d6e261fafbfbc8ed3a2eb6bf1d1da6838e26e7",
+            "method": "heif-dec-1.21.2-sequence-ignore-editlist-srgb-v1",
+            "renderer": "Ubuntu heif-dec 1.21.2 -S --ignore-editlist with libaom 3.13.1; independent mdhd/stts timing; Pillow 12.1.1 APNG",
+            "maxChannelError": 4
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "gif-still",
+      "fixtures": [
+        {
+          "id": "pillow-hopper-gif",
+          "path": "originals/hopper.gif",
+          "sha256": "19b8e092eee2eab632a36ee5644e362cb751cecaadb40bf4615334f3ffc6f1a5",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/Tests/images/hopper.gif",
+            "license": "MIT-CMU / public-domain US Navy portrait",
+            "licenseFile": "licenses/pillow.txt",
+            "attribution": "Pillow contributors; Grace Hopper portrait by James S. Davis, US Navy (DN-SC-84-05971).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "gif",
+            "container": "gif",
+            "width": 128,
+            "height": 128,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/pillow-hopper-gif.png",
+            "sha256": "48b0bd32c438fee00b98e1713b2d9204c8904fc0788150b20f1c8ec1765086f2",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 3
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "gif-animated",
+      "fixtures": [
+        {
+          "id": "libjxl-newtons-cradle-gif",
+          "path": "originals/newtons-cradle.gif",
+          "sha256": "47f6bcd67d0fdff8074e256a034ae7cd2693613df16ccf529e48d93b62b424f0",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/libjxl/conformance/b1d0f990b03e57bf6d137c365cd5dc8b470b9191/testcases/animation_newtons_cradle/ref.gif",
+            "license": "CC-BY-SA-3.0",
+            "attribution": "Dominique Toussaint, Newtons cradle.",
+            "redistributable": true,
+            "consent": true,
+            "licenseFile": "licenses/jxl-newtons-cradle.txt"
+          },
+          "capture": {
+            "device": "unknown; upstream full encoded asset",
+            "os": "unknown",
+            "settings": "unchanged upstream file"
+          },
+          "encoded": {
+            "codec": "gif",
+            "container": "gif-animated",
+            "width": 480,
+            "height": 360,
+            "frames": 36,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/libjxl-newtons-cradle-gif.png",
+            "sha256": "222d4677ade72d098c39044dac9d8551dba53183f947303c90778933e097eb07",
+            "method": "pillow-srgb-v1",
+            "maxChannelError": 4,
+            "renderer": "Pillow 12.1.1"
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "tiff",
+      "fixtures": [
+        {
+          "id": "pillow-hopper-tif",
+          "path": "originals/hopper.tif",
+          "sha256": "eec7740ad708ec31de3f64e9106de1123508d801ee96056eed30b0900d5ee1e1",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/Tests/images/hopper.tif",
+            "license": "MIT-CMU / public-domain US Navy portrait",
+            "licenseFile": "licenses/pillow.txt",
+            "attribution": "Pillow contributors; Grace Hopper portrait by James S. Davis, US Navy (DN-SC-84-05971).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "tiff",
+            "container": "tiff",
+            "width": 128,
+            "height": 128,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/pillow-hopper-tif.png",
+            "sha256": "8793a7d6a0bbe7848f30728cd325905eaa88a1f828d1fe2ee70c21c57e4f20a9",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 3
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "bmp",
+      "fixtures": [
+        {
+          "id": "pillow-hopper-bmp",
+          "path": "originals/hopper.bmp",
+          "sha256": "f1a94f3add0a2e54365dc94b51da099bd0de8289b955fc8304a8627b7b0d6aea",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/Tests/images/hopper.bmp",
+            "license": "MIT-CMU / public-domain US Navy portrait",
+            "licenseFile": "licenses/pillow.txt",
+            "attribution": "Pillow contributors; Grace Hopper portrait by James S. Davis, US Navy (DN-SC-84-05971).",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "bmp",
+            "container": "bmp",
+            "width": 128,
+            "height": 128,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/pillow-hopper-bmp.png",
+            "sha256": "8793a7d6a0bbe7848f30728cd325905eaa88a1f828d1fe2ee70c21c57e4f20a9",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 3
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "jp2",
+      "fixtures": [
+        {
+          "id": "openpreserve-balloon-jp2",
+          "path": "originals/balloon-openjpeg.jp2",
+          "sha256": "3fe64d400739ac15e380331aed942c4a3a8754b7473bd30a77bd837cbb8a8e10",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/366f068cec399d0cdfd61fa473de3ab6dc858098/jp2k-test/resolution/balloon_oj.jp2",
+            "license": "Public Domain",
+            "licenseFile": "licenses/openpreserve-jp2.txt",
+            "attribution": "Public-domain 1786 Montgolfier balloon illustration; Open Preservation Foundation format corpus OpenJPEG encoding.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; archival illustration scan",
+            "os": "unknown",
+            "settings": "OpenJPEG 1.5 upstream encoding; unchanged bytes"
+          },
+          "encoded": {
+            "codec": "jp2",
+            "container": "jp2",
+            "width": 2717,
+            "height": 3701,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/balloon-openjpeg.png",
+            "sha256": "7ac3b93027485b71cd52e7c572fa699abff53cbf4e3650f16a03e191117b67ae",
+            "method": "pillow-srgb-v1",
+            "renderer": "Pillow 12.1.1",
+            "maxChannelError": 16
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "jxl-still",
+      "fixtures": [
+        {
+          "id": "jxl-flower-jxl",
+          "path": "originals/jxl-flower.jxl",
+          "sha256": "41046f0de4dd36177aefa9b53fe6c3cd35a8e2c215a8d41ca89a6a9bc7f27541",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/libjxl/conformance/b1d0f990b03e57bf6d137c365cd5dc8b470b9191/testcases/lz77_flower/input.jxl",
+            "license": "BSD-3-Clause",
+            "licenseFile": "licenses/libjxl-conformance.txt",
+            "attribution": "JPEG XL Project Authors, conformance photograph encoding.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "jxl",
+            "container": "jxl",
+            "width": 834,
+            "height": 244,
+            "frames": 1,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/jxl-flower-jxl.png",
+            "sha256": "08db8af25efd857b5e3e44fdbef50ff1c6385a8ccaa4711b862f98d4e6b79845",
+            "method": "djxl-0.11.1-pillow-srgb-v1",
+            "renderer": "Ubuntu djxl 0.11.1 and Pillow 12.1.1",
+            "maxChannelError": 8
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        },
+        {
+          "id": "jxl-bench-orient5-jxl",
+          "path": "originals/jxl-bench-orient5.jxl",
+          "sha256": "e223fed907c6238622b2b6ec1c80609050c9d2db4d759cf3ca6f0db304cbb82a",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/libjxl/conformance/b1d0f990b03e57bf6d137c365cd5dc8b470b9191/testcases/bench_oriented_brg/input.jxl",
+            "license": "BSD-3-Clause",
+            "licenseFile": "licenses/libjxl-conformance.txt",
+            "attribution": "JPEG XL Project Authors, conformance photograph encoding.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream photograph fixture",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "jxl",
+            "container": "jxl-container",
+            "width": 500,
+            "height": 606,
+            "frames": 1,
+            "orientation": 5
+          },
+          "reference": {
+            "path": "references/jxl-bench-orient5-jxl.png",
+            "sha256": "1e07d11f92963e495c46933d7bfb7257be480bbbadd633180b3cd37876ff1241",
+            "method": "djxl-0.11.1-pillow-srgb-v1",
+            "renderer": "Ubuntu djxl 0.11.1 and Pillow 12.1.1",
+            "maxChannelError": 8
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "jxl-animated",
+      "fixtures": [
+        {
+          "id": "jxl-newtons-cradle-jxl",
+          "path": "originals/jxl-newtons-cradle.jxl",
+          "sha256": "35a13d365f5eb88c3249afe073b7d8b0174d74e38f7edaa8805ca8ab46a59ab4",
+          "synthetic": false,
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/libjxl/conformance/b1d0f990b03e57bf6d137c365cd5dc8b470b9191/testcases/animation_newtons_cradle/input.jxl",
+            "license": "CC-BY-SA-3.0",
+            "licenseFile": "licenses/jxl-newtons-cradle.txt",
+            "attribution": "Dominique Toussaint, Newtons cradle animation; JPEG XL conformance encoding.",
+            "redistributable": true,
+            "consent": true
+          },
+          "capture": {
+            "device": "unknown; upstream animation artwork",
+            "os": "unknown",
+            "settings": "upstream encoding; unchanged downloaded bytes"
+          },
+          "encoded": {
+            "codec": "jxl",
+            "container": "jxl",
+            "width": 480,
+            "height": 360,
+            "frames": 36,
+            "orientation": 1
+          },
+          "reference": {
+            "path": "references/jxl-newtons-cradle-jxl.png",
+            "sha256": "e1888c485922b0896b5d3a392a08d071996632e0a1fb26c7e7746f0cd218425e",
+            "method": "djxl-0.11.1-pillow-srgb-v1",
+            "renderer": "Ubuntu djxl 0.11.1 and Pillow 12.1.1",
+            "maxChannelError": 8
+          },
+          "evidence": {
+            "local": {
+              "path": "evidence/9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe.json",
+              "sha256": "9083069a702632a78ba8a663d9b0d7d36266a20ab4363b6561f3f9b17548d4fe"
+            },
+            "live": null,
+            "android": null,
+            "ios": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "live-photo-camera",
+      "fixtures": []
+    },
+    {
+      "id": "live-photo-library",
+      "fixtures": []
+    }
+  ]
+}

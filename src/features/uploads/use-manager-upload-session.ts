@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { uploadCapabilitySummary } from '../../../shared/mobile-image-contract';
 
 import { ClientApiError } from '../../app/api';
 import { describeLoadFailure, type LoadFailure } from '../../components/States';
@@ -14,7 +15,9 @@ import {
   type ReservationDisposition,
 } from './manager-upload-cleanup';
 import { managerUploadTerminalReason } from './manager-upload-terminal-codes';
-import { createUploadSelection } from './upload-selection';
+import { createUploadSelection, imageAccept } from './upload-selection';
+import { useUploadCapabilities } from './use-upload-capabilities';
+import { rememberUploads,forgetUploads,restoreUploadHints,hasUploadHints,resumeImageAccept } from './upload-resume-hints';
 import {
   getReceiptCount,
   removeQueueItem,
@@ -110,6 +113,9 @@ export function useManagerUploadSession({
   onRefreshAfterTerminal,
   onSafeClose,
 }: UseManagerUploadSessionOptions): ManagerUploadSession {
+  const root = `/api/manage/events/${encodeURIComponent(eventId)}/uploads`;
+  const capabilities = useUploadCapabilities(root,!transport && uploadsAvailable);
+  const accept = [imageAccept(capabilities),resumeImageAccept(root)].filter(Boolean).join(',');
   const activeTransport = useMemo(
     () => transport ?? createBrowserTransport({ kind: 'manager', eventId }),
     [eventId, transport],
@@ -151,9 +157,10 @@ export function useManagerUploadSession({
   };
 
   const publish = useCallback((next: UploadQueueItem[]) => {
+    rememberUploads(root,next);
     itemsRef.current = next;
     if (mountedRef.current) setItems(next);
-  }, []);
+  }, [root]);
 
   const publishPhase = useCallback((next: ManagerUploadPhase) => {
     phaseRef.current = next;
@@ -307,6 +314,7 @@ export function useManagerUploadSession({
       }
 
       revokePreviews();
+      forgetUploads(root,[...cleanupItemsRef.current.keys()]);
       cleanupItemsRef.current.clear();
       finalizedItemsRef.current.clear();
       terminalItemRef.current = null;
@@ -322,24 +330,25 @@ export function useManagerUploadSession({
     } finally {
       if (cleanupPromiseRef.current === task) cleanupPromiseRef.current = null;
     }
-  }, [activeTransport, emitExitGate, publish, publishPhase, revokePreviews]);
+  }, [activeTransport, emitExitGate, publish, publishPhase, revokePreviews,root]);
 
   const adoptFiles = useCallback((files: FileList | null, isNewCapture: boolean) => {
     if (!files?.length || !availableRef.current || ownsBlock) return;
-    const selected = createUploadSelection(files, isNewCapture);
+    const selected = restoreUploadHints(root,createUploadSelection(files,isNewCapture,capabilities),itemsRef.current.map(item => item.id));
     for (const queueItem of selected) {
       if (queueItem.previewUrl) objectUrlsRef.current.add(queueItem.previewUrl);
       cleanupItemsRef.current.set(queueItem.id, {
         itemId: queueItem.id,
         idempotencyKey: queueItem.id,
         queueItem,
-        reservation: null,
-        disposition: queueItem.validationError ? 'known-absent' : 'unattempted',
+        reservation: queueItem.reservation ?? null,
+        disposition: queueItem.validationError ? 'known-absent' : queueItem.reservation ? 'reserved' : queueItem.resumed ? 'ambiguous' : 'unattempted',
       });
     }
     setCleanupOutcome(null);
     publish([...itemsRef.current, ...selected]);
-  }, [ownsBlock, publish]);
+    if (selected.some(item => item.resumed)) publishPhase('needs-attention');
+  }, [ownsBlock, publish,publishPhase,root,capabilities]);
 
   const canRemoveItem = useCallback((itemId: string) => {
     const cleanupItem = cleanupItemsRef.current.get(itemId);
@@ -352,6 +361,7 @@ export function useManagerUploadSession({
 
   const removeItem = useCallback((itemId: string) => {
     if (!canRemoveItem(itemId)) return;
+    forgetUploads(root,[itemId]);
     const target = itemsRef.current.find((item) => item.id === itemId);
     if (target?.previewUrl) {
       URL.revokeObjectURL(target.previewUrl);
@@ -361,7 +371,7 @@ export function useManagerUploadSession({
     const next = removeQueueItem(itemsRef.current, itemId);
     publish(next);
     if ((getReceiptCount(next) ?? 0) > 0) publishPhase('receipt');
-  }, [canRemoveItem, publish, publishPhase]);
+  }, [canRemoveItem, publish, publishPhase,root]);
 
   const send = useCallback(async () => {
     if (!availableRef.current || queuePromiseRef.current || cleanupPromiseRef.current) return;
@@ -396,8 +406,8 @@ export function useManagerUploadSession({
         }
         return results;
       },
-      upload: (item, reservation, progress, signal) => (
-        activeTransport.upload(item, reservation, progress, signal)
+      upload: (item, reservation, progress, signal, onProcessing) => (
+        activeTransport.upload(item, reservation, progress, signal,onProcessing)
       ),
       finalize: (item, reservation, signal) => (
         activeTransport.finalize(item, reservation, signal)
@@ -464,13 +474,14 @@ export function useManagerUploadSession({
   const discardSelection = useCallback(() => {
     if (ownsBlock) return;
     revokePreviews();
+    forgetUploads(root,itemsRef.current.map(item => item.id));
     cleanupItemsRef.current.clear();
     finalizedItemsRef.current.clear();
     terminalItemRef.current = null;
     setCleanupOutcome(null);
     publish([]);
     publishPhase('selecting');
-  }, [ownsBlock, publish, publishPhase, revokePreviews]);
+  }, [ownsBlock, publish, publishPhase, revokePreviews,root]);
 
   const cancelUploads = useCallback(async (): Promise<CleanupOutcome> => {
     if (unresolvedCount(cleanupItemsRef.current.values()) === 0) {
@@ -489,6 +500,9 @@ export function useManagerUploadSession({
   const retryCleanup = useCallback(async (): Promise<CleanupOutcome> => settleCleanup(), [settleCleanup]);
   const receiptCount = getReceiptCount(items) ?? 0;
   const flow = useMemo<UploadFlowSession>(() => ({
+    imageAccept: accept,
+    selectionHint: uploadCapabilitySummary(capabilities),
+    hasResumeHints: hasUploadHints(root),
     items,
     sending,
     receiptCount,
@@ -497,7 +511,7 @@ export function useManagerUploadSession({
     removeItem,
     send,
     cancel: cancelFlow,
-  }), [adoptFiles, canRemoveItem, cancelFlow, items, receiptCount, removeItem, send, sending]);
+  }), [accept,root,capabilities,adoptFiles, canRemoveItem, cancelFlow, items, receiptCount, removeItem, send, sending]);
 
   return useMemo(() => ({
     flow,

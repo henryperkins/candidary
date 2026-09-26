@@ -1,6 +1,12 @@
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
+import { prepareBaselineApp } from './scripts/build-mobile-image-migration.mjs';
+import { prepareMobileReleaseTest } from './scripts/prepare-mobile-release-test.mjs';
+import { nativeBridge, nativeBridgeEnabled } from './scripts/mobile-image-native-bridge.mjs';
+
+await prepareBaselineApp();
+await prepareMobileReleaseTest();
 
 const migrations = await readD1Migrations(
   fileURLToPath(new URL('./migrations', import.meta.url)),
@@ -14,6 +20,7 @@ export default defineConfig({
     __CANDIDARY_BUILD_SHA__: JSON.stringify(testBuildSha),
     __CANDIDARY_MIGRATION_MANIFEST_SHA256__: JSON.stringify(testMigrationManifestSha256),
     __CANDIDARY_TEST_MEDIA_UPLOAD_RELEASE__: 'true',
+    __CANDIDARY_TEST_MOBILE_IMAGE_RELEASE__: 'true',
   },
   plugins: [
     cloudflareTest({
@@ -45,9 +52,16 @@ export default defineConfig({
           ALBUM_SHARE_HMAC_KEY: 'test-album-share-hmac-key-with-at-least-32-bytes',
           ALBUM_SHARE_ENCRYPTION_KEY: 'YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU',
           EMAIL_FROM: 'hello@candidary.test',
+          // '1' only for an explicitly named disposable native container with both
+          // ignored real originals present; otherwise that local-integration suite skips.
+          MOBILE_IMAGE_NATIVE_BRIDGE_ENABLED: nativeBridgeEnabled() ? '1' : '',
         },
         d1Databases: ['DB'],
         r2Buckets: ['MEDIA_BUCKET', 'CANONICAL_MEDIA_BUCKET'],
+        // The main app never starts the private Container worker in its tests.
+        // The bridge is a Node test service; it returns 503 unless a disposable local
+        // native container is named, and never becomes the app's IMAGE_DECODER binding.
+        serviceBindings: { IMAGE_DECODER: async () => new Response(null, { status: 503 }), MOBILE_IMAGE_NATIVE_BRIDGE: nativeBridge },
       },
     }),
   ],

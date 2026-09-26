@@ -3,9 +3,6 @@ export interface JpegCaptureTime {
   offsetTimeOriginal: string | null;
 }
 
-/** No more than the first 1 MiB of an original is ever inspected. */
-export const JPEG_EXIF_SCAN_BYTES = 1_048_576;
-
 const EXIF_SIGNATURE = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];
 const DATE_TIME_ORIGINAL = 0x9003;
 const OFFSET_TIME_ORIGINAL = 0x9011;
@@ -109,41 +106,50 @@ function parseTiff(bytes: Uint8Array): JpegCaptureTime | null {
 /**
  * Best-effort `DateTimeOriginal` / `OffsetTimeOriginal` reader.
  *
- * Scans bounded APP1 segments before Start of Scan and never reads past
- * `maxBytes`. Malformed JPEG structure, unsupported EXIF, and every
+ * Skips payloads by their segment lengths and reads bounded APP1 metadata
+ * before Start of Scan. An explicit maxBytes retains the caller's window.
+ * Malformed JPEG structure, unsupported EXIF, and every
  * bounds-violating TIFF offset return null rather than throwing; a delivery
  * must never fail because its metadata could not be read.
  */
 export function inspectJpegCaptureTime(
   bytes: Uint8Array,
-  maxBytes = JPEG_EXIF_SCAN_BYTES,
+  maxBytes?: number,
 ): JpegCaptureTime | null {
-  if (bytes.length < 2 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
-  const limit = Math.min(bytes.length, maxBytes);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  try {
+    const size = maxBytes === undefined ? bytes.length : Math.min(bytes.length, maxBytes);
+    return runBufferedParser(inspectCaptureTime(new ImageReadCursor(size)), bytes);
+  } catch {
+    return null;
+  }
+}
+
+export async function inspectJpegCaptureTimeSource(source:ImageRangeReader): Promise<JpegCaptureTime|null> {
+  try {return await runImageParser(inspectCaptureTime(new ImageReadCursor(source.size)),source);}
+  catch {return null;}
+}
+
+function* inspectCaptureTime(reader: ImageReadCursor): ImageParser<JpegCaptureTime | null> {
+  const header = yield* reader.read(0, 2);
+  if (header[0] !== 0xff || header[1] !== 0xd8) return null;
   let offset = 2;
-
-  while (offset < limit) {
-    if (bytes[offset] !== 0xff) return null;
-    let markerOffset = offset + 1;
-    while (markerOffset < limit && bytes[markerOffset] === 0xff) markerOffset += 1;
-    if (markerOffset >= limit) return null;
-    const marker = bytes[markerOffset];
-    if (marker === undefined) return null;
-    offset = markerOffset + 1;
-
+  while (offset < reader.size) {
+    reader.structure();
+    if ((yield* reader.read(offset++, 1))[0] !== 0xff) return null;
+    let marker: number;
+    do { reader.structure(); marker = (yield* reader.read(offset++, 1))[0]!; } while (marker === 0xff);
     if (marker === 0xd9 || marker === 0xda) return null;
     if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
-    if (offset + 2 > limit) return null;
-
-    const segmentLength = view.getUint16(offset);
-    if (segmentLength < 2 || offset + segmentLength > limit) return null;
-
+    if (marker === 0 || marker === 0xd8) return null;
+    const segmentLength = imageView(yield* reader.read(offset, 2)).getUint16(0);
+    if (segmentLength < 2 || segmentLength > reader.size - offset) return null;
     if (marker === 0xe1) {
-      const payload = bytes.subarray(offset + 2, offset + segmentLength);
-      if (payload.length >= 6 && EXIF_SIGNATURE.every((byte, index) => payload[index] === byte)) {
-        const parsed = parseTiff(payload.subarray(6));
-        if (parsed) return parsed;
+      if (segmentLength >= 8) {
+        const signature = yield* reader.read(offset + 2, 6);
+        if (EXIF_SIGNATURE.every((byte, index) => signature[index] === byte)) {
+          const parsed = parseTiff(yield* reader.read(offset + 8, segmentLength - 8));
+          if (parsed) return parsed;
+        }
       }
     }
     offset += segmentLength;
@@ -151,3 +157,4 @@ export function inspectJpegCaptureTime(
 
   return null;
 }
+import { ImageReadCursor, imageView, runBufferedParser, runImageParser, type ImageParser, type ImageRangeReader } from './image-reader-core';

@@ -133,7 +133,7 @@ const CREATE_MARKDOWN = [
   '## What one event holds',
   bullets([
     `Up to ${MAX_EVENT_MEDIA.toLocaleString('en-US')} photos or ${MAX_EVENT_BYTES / GIBIBYTE} GiB per event`,
-    `Up to ${MAX_IMAGE_BYTES / MEBIBYTE} MB per photo`,
+    `Up to ${MAX_IMAGE_BYTES / MEBIBYTE} MiB per photo with baseline upload; open your event link for its current photo choices and limits`,
     `Guests may send ${SUPPORTED_IMAGE_TYPES.join(', ')}`,
     `An optional cover photo up to ${Math.floor(MAX_COVER_UPLOAD_BYTES / 1_000_000)} MB, as ${COVER_UPLOAD_MIME_TYPES.join(', ')}`,
   ]),

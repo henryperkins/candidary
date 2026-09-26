@@ -1,13 +1,15 @@
 import { DEVICE_EXPORT_MAX_BYTES, DEVICE_EXPORT_MAX_FILES, DEVICE_EXPORT_CONCURRENCY, type PhotoExportEntryView } from '../../../shared/photo-exports';
 import { attachCredentials, ClientApiError } from '../../app/api';
+import { isReadableOriginal } from '../../../shared/image-formats';
 
 export interface DeviceBatch { files: File[]; preparedIds: string[]; failedIds: string[] }
 export interface DeviceLimits { maxFiles?: number; maxBytes?: number; concurrency?: number }
-const supported = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/avif', 'image/gif']);
 function assertActive(signal: AbortSignal) { if (signal.aborted) throw new DOMException('Preparation was interrupted.', 'AbortError'); }
 
 /** Reads only the private frozen-entry path and retains the server's original MIME and bytes. */
 export async function readPhotoExportFile(eventId: string, jobId: string, entry: PhotoExportEntryView, signal: AbortSignal): Promise<File> {
+  assertActive(signal);
+  if (!isReadableOriginal(entry.mimeType,entry.byteSize) || entry.byteSize > DEVICE_EXPORT_MAX_BYTES) throw new Error('Use ZIP for this original. It exceeds this device preparation limit.');
   const response = await fetch(`/api/manage/events/${encodeURIComponent(eventId)}/photo-exports/${encodeURIComponent(jobId)}/entries/${encodeURIComponent(entry.mediaId)}/file`, {
     credentials: 'same-origin', headers: attachCredentials(new Headers(), 'GET'), signal,
   });
@@ -16,7 +18,7 @@ export async function readPhotoExportFile(eventId: string, jobId: string, entry:
     throw new ClientApiError(body.code ?? 'INTERNAL_ERROR', body.message ?? 'This original could not be read. Try again or use ZIP.', undefined, undefined, response.status);
   }
   const type = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
-  if (type !== entry.mimeType.toLowerCase() || !supported.has(type)) { await response.body?.cancel(); throw new Error('The original format changed. Use ZIP or try again.'); }
+  if (type !== entry.mimeType.toLowerCase() || !isReadableOriginal(type,entry.byteSize)) { await response.body?.cancel(); throw new Error('The original format changed. Use ZIP or try again.'); }
   // Do not allocate an unbounded response if the server's inventory or stream changes.
   const reader = response.body?.getReader();
   if (!reader) throw new Error('The original response was empty.');
@@ -44,7 +46,7 @@ export async function prepareDeviceBatch(entries: readonly PhotoExportEntryView[
   const chosen: PhotoExportEntryView[] = []; const failedIds: string[] = []; let bytes = 0;
   for (const entry of entries) {
     if (entry.state === 'acknowledged') continue;
-    if (!supported.has(entry.mimeType.toLowerCase()) || entry.byteSize <= 0 || entry.byteSize > maxBytes) { failedIds.push(entry.mediaId); continue; }
+    if (!isReadableOriginal(entry.mimeType.toLowerCase(),entry.byteSize) || entry.byteSize > maxBytes) { failedIds.push(entry.mediaId); continue; }
     if (chosen.length >= maxFiles || bytes + entry.byteSize > maxBytes) break;
     chosen.push(entry); bytes += entry.byteSize;
   }

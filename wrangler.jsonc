@@ -4,6 +4,7 @@
   "main": "worker/index.ts",
   "compatibility_date": "2026-07-21",
   "compatibility_flags": ["nodejs_compat"],
+  "define": { "__CANDIDARY_TEST_MOBILE_IMAGE_RELEASE__": "false" },
   "workers_dev": false,
   "preview_urls": false,
   "assets": {
@@ -41,6 +42,7 @@
   "images": {
     "binding": "IMAGES"
   },
+  "services": [{ "binding": "IMAGE_DECODER", "service": "candidary-image-decoder" }],
   "send_email": [
     {
       "name": "EMAIL"
@@ -73,6 +75,12 @@
     }
   ],
   "workflows": [
+    { "name": "candidary-image-preview", "binding": "IMAGE_PREVIEW_WORKFLOW", "class_name": "ImagePreviewWorkflow" },
+    {
+      "name": "candidary-upload-completion",
+      "binding": "UPLOAD_COMPLETION_WORKFLOW",
+      "class_name": "UploadCompletionWorkflow"
+    },
     {
       "name": "candidary-export",
       "binding": "EXPORT_WORKFLOW",
@@ -95,7 +103,8 @@
   "vars": {
     "APP_ORIGIN": "https://candidary.app",
     "ALTERNATE_ORIGINS": "https://candidary.online",
-    "EMAIL_FROM": "hello@candidary.app"
+    "EMAIL_FROM": "hello@candidary.app",
+    "IMAGE_DECODER_ENVIRONMENT": "production"
   },
   "secrets": {
     "required": [
@@ -120,6 +129,7 @@
   "env": {
     "preview": {
       "name": "candidary-preview",
+      "define": { "__CANDIDARY_TEST_MOBILE_IMAGE_RELEASE__": "false" },
       "workers_dev": true,
       "preview_urls": true,
       "version_metadata": {
@@ -146,6 +156,8 @@
       "images": {
         "binding": "IMAGES"
       },
+      "services": [{ "binding": "IMAGE_DECODER", "service": "candidary-image-decoder-preview" }],
+      "analytics_engine_datasets": [{ "binding": "IMAGE_METRICS", "dataset": "candidary_image_metrics_preview" }],
       "send_email": [],
       "ratelimits": [
         {
@@ -174,6 +186,12 @@
         }
       ],
       "workflows": [
+        { "name": "candidary-image-preview-preview", "binding": "IMAGE_PREVIEW_WORKFLOW", "class_name": "ImagePreviewWorkflow" },
+        {
+          "name": "candidary-upload-completion-preview",
+          "binding": "UPLOAD_COMPLETION_WORKFLOW",
+          "class_name": "UploadCompletionWorkflow"
+        },
         {
           "name": "candidary-preview-export",
           "binding": "EXPORT_WORKFLOW",
@@ -196,7 +214,8 @@
       "vars": {
         "APP_ORIGIN": "https://candidary-preview.lfd.workers.dev",
         "ALTERNATE_ORIGINS": "",
-        "EMAIL_FROM": "hello@candidary.app"
+        "EMAIL_FROM": "hello@candidary.app",
+        "IMAGE_DECODER_ENVIRONMENT": "preview"
       },
       "secrets": {
         "required": [

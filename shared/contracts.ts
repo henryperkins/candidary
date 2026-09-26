@@ -404,6 +404,8 @@ export type UploadBatchItemView =
       media: UploadMediaView;
       uploadUrl?: string;
       uploadUrlExpiresAt?: string;
+      transport?: 'parts-v1';
+      transfer?: import('./mobile-image-contract').UploadTransferView;
     }
   | {
       idempotencyKey: string;

@@ -13,7 +13,7 @@ The daily `17 3 * * *` handler performs these idempotent phases in order:
 1. Sweep expired and consumed pending registrations, expired login challenges, and rate-limit buckets older than the enforcement window, in repeated bounded passes until each table is drained.
 2. Sweep expired or revoked RSVP sessions and lookup rate windows older than one 15-minute bucket, in the same bounded 100-row passes capped at 50 per run. Both statements report counts only; neither can name a household, a guest, or a scope.
 3. Delete expired album-share sessions in 100-row statements, stopping after a short batch or 50 batches (5,000 rows) in one invocation. A stopped share removes its sessions immediately through the share row's foreign-key cascade; this bounded sweep is for ordinary seven-day session expiry.
-4. Delete objects for upload reservations older than fifteen minutes and release event counters.
+4. Expire legacy reservations after fifteen minutes. For resumable transfers, use their progress-renewed lifetime and hard cap; retain inventories until every writer is settled and objects are proved absent.
 5. Run the same bounded durable media promotion pass used by the hourly trigger.
 6. Delete every manifest and numbered archive for exports past their 24-hour window, then mark those jobs expired.
 7. Resolve globally bounded backfill jobs whose exact legacy source is no longer current, rotating still-current blockers fairly rather than letting the oldest 100 starve newer work.
@@ -48,13 +48,71 @@ deleted.
 
 A finalized `stored` media row is a private host delivery. Its `publication_status` is independently `unpublished`, `published`, or `hidden`; changing publication never changes private retention or export eligibility. Originals are never guest-readable. Cached previews use separate R2 keys and can be regenerated without changing the original.
 
-One event permits 10,000 photos, 100 GiB of originals, and 20 MB per photo. Guests reserve metadata in ordered batches of 20 with one aggregate event-counter write, then transfer at most two files concurrently per device. Capacity failures are per-file; accepted siblings remain valid. In canonical-live mode each reservation returns an authenticated same-origin content URL, never an R2 presigned URL.
+One event permits 10,000 photos and 100 GiB of originals. Baseline JPEG, PNG, WebP, HEIC and HEIF uploads use the existing direct path up to 20 MiB (20,971,520 bytes). Qualified extended uploads use authenticated resumable transfers up to the effective per-case ceiling, never above 512 MiB. Both committed release configurations currently contain no qualified cases, so extended intake remains disabled. Guests reserve metadata in ordered batches of 20 and transfer at most two originals concurrently. Capacity failures are per-file. Accepted siblings remain valid; no reservation grants a public R2 URL.
 
-An expired same-origin content URL is refreshed against the same reservation. The Worker reauthorizes
+Selection is provisional: the shared format registry recognizes more families than the upload path
+admits. Admission remains JPEG, PNG, WebP, HEIC and HEIF (including the existing HEIC/HEIF sequence
+declarations), with a ceiling of 20 × 1024 × 1024 bytes. A recognized explicit MIME takes precedence
+over the filename; only empty or generic binary MIME falls back to the extension. Actual bytes must
+match that declaration. HEIF metadata follows the primary image and its properties; a collection of
+stills is not sequence evidence, and AVIF is never accepted as generic HEIF.
+
+Metadata inspection skips large payloads through bounded, ETag-pinned R2 ranges. Its limits are
+4 MiB of reads, 256 read requests, 16,384 structures and 32 container levels; exhaustion returns
+`IMAGE_RESOURCE_LIMIT` (413). These are parser checks, not a claim of complete native decoding or
+universal device compatibility. Local thumbnails are optional: URL creation and browser decode
+failure retain the neutral photo presentation and send the same original File without conversion.
+
+An expired direct same-origin content URL is refreshed against the same reservation. The Worker reauthorizes
 the session and CSRF token immediately before accepting bytes, validates exact declared size, MIME,
 header signature, and dimensions, creates the deterministic canonical object only if absent, re-reads
 the complete object, and commits the canonical D1 generation. A transient confirmation failure can
 observe the already Stored row without sending the bytes again.
+
+### Extended mobile originals (0026)
+
+Recognition is not admission. `config/image-decoder-release.json` pins external evidence to an immutable
+registry digest and a build fingerprint; `config/mobile-image-release.json` pins qualified cases and
+limits. Neither native self-reports nor request parameters can enable them. Authenticated guest and
+manager `uploads/capabilities` endpoints return the effective intersection of committed qualification,
+the protected `mobile_image_schema` row (`singleton=1, version=26, protocol=1`), D1 narrowing controls and live private-service identity.
+D1 can close intake or lower an admitted ceiling; it cannot qualify a codec. To close a case without a
+deployment, update only that case's `enabled = 0, revision = revision + 1` in the intended database.
+All implicated cases must pass before a new reservation is accepted. Existing accepted transfers
+retain their pinned qualification; fresh credentials, event lifecycle, deletion and expiry still apply.
+
+`parts-v1` writes fixed 8 MiB parts (last part shorter) to one unique assembly multipart upload.
+Accepted part length, SHA-256 and ETag are immutable. Initial lifetime is
+`clamp(900, ceil(bytes / 125000) + 600, 7200)` seconds, renewed by accepted progress and bounded by a
+six-hour hard expiry and live authority/event limits. The completion Workflow assembles the unique
+key, hashes the full source as a stream, obtains native inspection plus a private preview, then uses
+the existing create-only promotion/receipt protocol. A 202, complete part set or processing state is
+not a stored receipt. No browser conversion replaces the original. A reload retains only expiring,
+tab-scoped metadata; the guest must reselect Files and prove accepted-part hashes to resume, including
+when a delayed server receipt already exists. Request cancellation stops polling; explicit server
+abort is a distinct authenticated action.
+
+The decoder runs in `services/image-decoder/worker`, with separate production and preview Workers,
+no public routes, bounded independent upload/preview pools and an external fingerprint check. Main
+owns `UPLOAD_COMPLETION_WORKFLOW` and `IMAGE_PREVIEW_WORKFLOW` plus the private service binding, not
+Containers or Durable Objects. Baseline direct files remain deliverable during decoder outages.
+Warm canonical preview reads use immutable recorded derivatives, without original reads/native
+decodes. Missing/corrupt previews coalesce into bounded regeneration in the preview pool. Legacy
+Images transformations only receive supported sources within its 20,000,000-byte input ceiling.
+All preview routes retain private/no-store authorization and never fall back to originals.
+
+Preview/source write claims and tombstones precede R2 writes. Trash retains originals and derivatives
+under the existing recovery/export holds. Permanent deletion/purge waits for writer settlement and
+object absence. Expired leases and terminal Workflow status alone do not settle an already issued,
+ambiguous preview PUT. Preserve that inventory for reconciliation; never delete rows to force a purge.
+An unknown multipart create also remains owned inventory until authoritative reconciliation.
+
+Stored-original readability uses the versioned known-format/5 GiB contract independently of intake
+switches; size and ownership checks still apply. Selection ZIP and frozen-original streams compare
+the exact stored length. Browser device preparation retains its separate 40 MiB bound and tests
+`navigator.canShare` on the actual Files. Unsupported sharing offers the complete original ZIP and
+does not count as a completed handoff. Real-device sharing and chooser conversion remain separate
+evidence from byte-preserving download/export tests.
 
 ### Manager upload authority and management-link rotation (0021)
 
@@ -399,7 +457,17 @@ addresses and its own authorized rehearsal.
 Ask for the response request ID and inspect Worker logs. Common expected codes:
 
 - `TOKEN_REVOKED`, `SESSION_EXPIRED`, `EVENT_EXPIRED`, `EVENT_DELETED` — use a current link or confirm lifecycle state.
-- `FILE_TYPE_UNSUPPORTED`, `FILE_TOO_LARGE` — a selected or stored object failed type/signature/20 MB validation.
+- `FILE_TYPE_UNSUPPORTED`, `FILE_TOO_LARGE` — a selected object failed type/signature or its current admission size limit. The baseline direct ceiling is 20 MiB.
+- `IMAGE_PROCESSING_UNAVAILABLE` — 503, retryable private processing outage/busy response. Preserve the original selection and transfer.
+- `IMAGE_RESOURCE_LIMIT` — 413, the current bounded parser/native policy cannot process this original. Repeating unchanged work under that policy cannot fix it.
+- `IMAGE_PREVIEW_UNAVAILABLE` — 503, derivative unavailable or regenerating. A stored-original receipt remains valid.
+- `UPLOAD_PART_CONFLICT` — 409, accepted bytes do not match the part/reselection proof. Choose the same original to resume; never overwrite an accepted part.
+- `UPLOAD_TRANSFER_EXPIRED` — 409, resumable transfer lifetime/hard cap expired. Reselect to begin a new upload. Legacy reservations retain `UPLOAD_RESERVATION_EXPIRED`.
+
+These errors use the existing allowlisted API body. Native stderr, internal keys, source hashes,
+paths and private proof headers are never public error details. Private decoder failure classes are
+closed to unsupported, malformed, resource_limit, busy and unavailable; unknown failures map to
+unavailable. UI status remains Confirming delivery or Needs attention until a stored receipt exists.
 - `EVENT_MEDIA_LIMIT`, `EVENT_STORAGE_LIMIT` — the 10,000-photo or 100-GiB event quota is full.
 - `MESSAGE_SUBMISSION_CONFLICT` — a successful guest-note key was reused with different words. The client replaces the key and offers the preserved note for another send.
 - `MESSAGE_PURGED` — a permanently deleted note was retried with its original key; it cannot be restored or recreated.
@@ -704,7 +772,7 @@ operator resume/restart calls.
 
 ## Recovery boundaries
 
-The application does not promise recovery for a lost management link, explicit deletion, or retention purge. There is also no recovery for a disabled printed entry or an archived household: both are irreversible in v1 and both are confirmed by typing the exact name before they run. Do not restore an object without its matching D1 lifecycle state. Preview generation can be retried safely; an unavailable preview does not mean the original failed delivery. Never copy an original into the preview key as a fallback: every served derivative must pass through the Images binding so original metadata is not exposed.
+The application does not promise recovery for a lost management link, explicit deletion, or retention purge. There is also no recovery for a disabled printed entry or an archived household: both are irreversible in v1 and both are confirmed by typing the exact name before they run. Do not restore an object without its matching D1 lifecycle state. Preview generation can be retried safely; an unavailable preview does not mean the original failed delivery. Never copy an original into the preview key as a fallback. Eligible legacy derivatives pass through the Images binding; admitted native derivatives use the qualified private decoder and canonical preview inventory. Both paths strip original metadata and enforce current read authority.
 
 ## Host notifications
 

@@ -1,0 +1,44 @@
+{
+  "protocolVersion": 1,
+  "previewProfile": "mobile-preview-v1",
+  "releases": [
+    {
+      "imageRef": "registry.cloudflare.com/a77e479f6736120eadd99973dbeb705e/candidary-image-decoder@sha256:d014ac551e24b9ce74737a4aebdd9c2f7d0ba0d4e50a2a87bd5fa4c5d3b82f80",
+      "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+      "protocolVersion": 1,
+      "verifiedCaseIds": [
+        "apng",
+        "avif-sequence",
+        "avif-still",
+        "bmp",
+        "dng-bayer",
+        "dng-jpeg",
+        "dng-linear",
+        "dng-proraw",
+        "dng-proraw-jxl",
+        "gif-animated",
+        "gif-still",
+        "heic-auxiliary",
+        "heic-grid",
+        "heic-primary",
+        "heif-generic",
+        "jp2",
+        "jpeg-baseline",
+        "jpeg-exif-orientation",
+        "jpeg-hdr",
+        "jpeg-motion-photo-still",
+        "jpeg-progressive",
+        "jpeg-ultra-hdr-gainmap",
+        "jxl-animated",
+        "jxl-still",
+        "png",
+        "tiff",
+        "webp-animated",
+        "webp-lossless",
+        "webp-lossy"
+      ],
+      "previewProfile": "mobile-preview-v1",
+      "evidenceSha256": "38530b5b38fe2fab1c31bc0a8b54a5888c04268e84b73559640decfd91bc2a55"
+    }
+  ]
+}

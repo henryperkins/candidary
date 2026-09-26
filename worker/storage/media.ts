@@ -1,5 +1,6 @@
 import { MAX_IMAGE_BYTES } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
+import { imageDeclarationMatches, isLegacyUploadMimeType, resolveImageDeclaration, type ImageEvidence } from '../../shared/image-formats';
 import type { MediaRecord } from '../db/types';
 import type {
   ClaimedMediaPromotion,
@@ -12,7 +13,9 @@ import {
   assertWorkerIngressEnabled,
 } from '../media-upload-release';
 import { resolveMediaTimeline, type MediaTimelineContext } from '../media-timeline';
-import { inspectImageHeader } from '../security/image-metadata';
+import { inspectImageSource, memoryImageReader } from '../security/image-range-reader';
+import { ImageInspectionError } from '../security/image-reader-core';
+import { r2ImageReader } from './image-source';
 import type { UploadAuthority } from '../services/upload-authority';
 import { finalizedMediaObjectKey } from './media-keys';
 
@@ -39,10 +42,16 @@ async function sha256Bytes(bytes: ArrayBuffer): Promise<ArrayBuffer> {
   return crypto.subtle.digest('SHA-256', bytes);
 }
 
-function imageSignatureMatches(declared: string, inspected: string): boolean {
-  return inspected === declared
-    || (declared === 'image/heic-sequence' && inspected === 'image/heic')
-    || (declared === 'image/heif-sequence' && inspected === 'image/heif');
+function imageSignatureMatches(declared: string, inspected: ImageEvidence): boolean {
+  const declaration = resolveImageDeclaration('', declared);
+  return declaration !== null && imageDeclarationMatches(declaration, inspected);
+}
+
+function inspectionFailure(error: ImageInspectionError): ApiError {
+  if (error.code === 'IMAGE_METADATA_LIMIT') {
+    return new ApiError('IMAGE_RESOURCE_LIMIT', 'This photo exceeds the supported metadata inspection limit.', 413);
+  }
+  return new ApiError('FILE_TYPE_UNSUPPORTED', 'The uploaded file is not a supported image.', 415);
 }
 
 function digestHex(digest: ArrayBuffer): string {
@@ -114,25 +123,19 @@ export async function finalizeStoredMedia(
     );
   }
 
-  const headBytes = await bucket.get(media.objectKey, {
-    onlyIf: { etagMatches: object.etag },
-    range: { offset: 0, length: Math.min(object.size, 65_536) },
-  });
-  if (!hasBody(headBytes)) throw versionChanged();
   let metadata;
   try {
-    metadata = inspectImageHeader(new Uint8Array(await new Response(headBytes.body).arrayBuffer()));
-  } catch {
+    metadata = await inspectImageSource(r2ImageReader(bucket, media.objectKey, object.etag, object.size));
+  } catch (error) {
+    if (!(error instanceof ImageInspectionError)) throw error;
     return rejectReservation(
       bucket,
       repository,
       media,
-      new ApiError('FILE_TYPE_UNSUPPORTED', 'The uploaded file is not a supported image.', 415),
+      inspectionFailure(error),
     );
   }
-  const signatureMatches = metadata.mimeType === media.mimeType
-    || (media.mimeType === 'image/heic-sequence' && metadata.mimeType === 'image/heic')
-    || (media.mimeType === 'image/heif-sequence' && metadata.mimeType === 'image/heif');
+  const signatureMatches = imageSignatureMatches(media.mimeType, metadata);
   if (!signatureMatches) {
     return rejectReservation(
       bucket,
@@ -223,6 +226,8 @@ export async function receiveMediaUpload(
 ): Promise<MediaRecord> {
   assertWorkerIngressEnabled();
   if (media.uploadState === 'stored') return media;
+  if (!isLegacyUploadMimeType(media.mimeType)) throw new ApiError('FILE_TYPE_UNSUPPORTED','This photo requires resumable upload.',415);
+  if (await repository.isTransferOwned(media.id)) throw new ApiError('UPLOAD_FINALIZE_CONFLICT','Continue this photo through its resumable upload.',409);
   if (media.uploadState !== 'reserved' || media.deletedAt !== null) {
     throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer receive bytes.', 409);
   }
@@ -238,11 +243,12 @@ export async function receiveMediaUpload(
 
   let metadata;
   try {
-    metadata = inspectImageHeader(new Uint8Array(bytes, 0, Math.min(bytes.byteLength, 65_536)));
-  } catch {
-    throw new ApiError('FILE_TYPE_UNSUPPORTED', 'The uploaded file is not a supported image.', 415);
+    metadata = await inspectImageSource(memoryImageReader(new Uint8Array(bytes)));
+  } catch (error) {
+    if (!(error instanceof ImageInspectionError)) throw error;
+    throw inspectionFailure(error);
   }
-  if (!imageSignatureMatches(media.mimeType, metadata.mimeType)) {
+  if (!imageSignatureMatches(media.mimeType, metadata)) {
     throw new ApiError('FILE_TYPE_UNSUPPORTED', 'The uploaded image signature does not match its type.', 415);
   }
 
@@ -413,15 +419,11 @@ export async function promoteLegacyStoredMediaObject(
         || !equalBytes(await sha256Bytes(sourceBytes), expectedDigest)) return 'pending';
       let metadata;
       try {
-        metadata = inspectImageHeader(new Uint8Array(
-          sourceBytes,
-          0,
-          Math.min(sourceBytes.byteLength, 65_536),
-        ));
+        metadata = await inspectImageSource(memoryImageReader(new Uint8Array(sourceBytes)));
       } catch {
         return 'pending';
       }
-      if (!imageSignatureMatches(promotion.sourceMimeType, metadata.mimeType)
+      if (!imageSignatureMatches(promotion.sourceMimeType, metadata)
         || metadata.width !== promotion.sourceWidth
         || metadata.height !== promotion.sourceHeight) return 'pending';
       await repository.ensureFinalObjectWriteTombstone(
@@ -484,16 +486,12 @@ export async function promoteLegacyStoredMediaObject(
   }
   let sourceMetadata;
   try {
-    sourceMetadata = inspectImageHeader(new Uint8Array(
-      sourceBytes,
-      0,
-      Math.min(sourceBytes.byteLength, 65_536),
-    ));
+    sourceMetadata = await inspectImageSource(memoryImageReader(new Uint8Array(sourceBytes)));
   } catch {
     await repository.releasePromotionClaim(media.id, claimToken, clock().toISOString());
     return 'pending';
   }
-  if (!imageSignatureMatches(media.mimeType, sourceMetadata.mimeType)
+  if (!imageSignatureMatches(media.mimeType, sourceMetadata)
     || sourceMetadata.width !== media.width
     || sourceMetadata.height !== media.height) {
     await repository.releasePromotionClaim(media.id, claimToken, clock().toISOString());

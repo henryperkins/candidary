@@ -31,6 +31,9 @@ build and deployment.
 
 The local equivalent is:
 
+Migration 0026 mobile-image admission has an additional qualification gate, described below. It does
+not replace the normal exact-commit build/release checks or introduce a main-app build manifest.
+
 ```powershell
 npm run deploy
 ```
@@ -525,3 +528,65 @@ Do not manufacture local evidence to justify a rollback or a deployment. The aut
 the merged Git commit, recorded six-lane local results for that exact head, Cloudflare build result,
 deployed version/tag, remote
 migration ledger when relevant, and the observed live response.
+
+## Mobile-image admission and migration 0026
+
+Extended admission is closed in the committed configuration. Local parser fixtures, decoder doubles,
+emulated transport/ZIP tests and browser API stubs do not qualify a codec or mobile device. Consult
+`docs/verification/mobile-image-compatibility.md` and the A/B/C plans before requesting a release. The
+concrete preview sequence is `docs/verification/mobile-image-preview-release.md`; the load rehearsal
+and physical-device runs are `docs/verification/mobile-image-load-rehearsal.md` and
+`docs/verification/mobile-image-device-protocol.md`.
+The universal claim is a separate gate; a passed still-image case does not establish delivery of Live
+Photo/Motion Photo paired resources through a web picker.
+
+The owner-approved animated-preview cap is 20 MiB (20,971,520 bytes); the still cap remains 8 MiB.
+The unpublished migration 0026 includes the matching preview byte-size constraint. This local
+amendment does not authorize a remote migration or open admission.
+
+The release sequence is migration first, private decoder second, main Worker third, intake last:
+
+1. On the isolated preview database, and then on production when separately authorized, compare the
+   current schema/trigger SQL to the reviewed 0025 snapshot. Confirm a populated 0025-to-0026 upgrade
+   and execution by the unchanged baseline Worker. Preserve all 29 media columns and reviewed trigger
+   guards. Apply 0026 with every mobile-image case disabled; do not deploy code that assumes its marker
+   before the migration succeeds. Confirm remote migration-ledger and trigger parity explicitly.
+   `wrangler d1 migrations apply --remote` fails on 0026 with `incomplete input` and applies nothing
+   (observed on preview, 2026-09-26). Apply the byte-identical file, plus Wrangler's exact ledger
+   insert, with `wrangler d1 execute --remote --file` as described in step 1 of
+   `docs/verification/mobile-image-preview-release.md`. Compare the remote schema after removing
+   comments: remote D1 stores migration SQL without them.
+2. Build and independently qualify the Linux AMD64 decoder image with licensed real files. Commit
+   external evidence, immutable image digest, build fingerprint, protocol, preview profile and qualified
+   case IDs. An image cannot certify its own digest or its own tests. Publish/deploy the private preview
+   service separately from `services/image-decoder/worker/wrangler.jsonc`, using a pinned registry image.
+   Production and preview twins use separate private bindings and pools; neither has a public route.
+3. Complete B6 real-service failure/load tests, repeated-gallery warm-read measurements, physical iOS
+   Safari and Android Chrome camera/library evidence and deletion/late-writer checks. Match the actual
+   service fingerprint and environment to committed evidence, including during rolling replacement.
+   Stop admission on a mismatch. Old instances may remain during a rollout; a successful deploy command
+   alone is not a measured capacity or service-readiness result.
+4. Release the main Worker and its two additional Workflows through the normal build path. Main has
+   no Container class, Durable Object migration or Container image. Production binds
+   `candidary-image-decoder`; preview binds `candidary-image-decoder-preview`. Verify both new Workflow
+   names/bindings, existing Workflows and environment resources in the generated config. Branch preview
+   and production upload-only preflight keep their existing `versions upload` behavior. Those commands
+   do not publish or roll out decoder containers. A `versions upload` also never registers or updates
+   Workflows, so a branch alias cannot run resumable completion, preview regeneration or the candidate
+   export. Preview qualification therefore deploys the exact, clean candidate commit to
+   `candidary-preview` with `npm run deploy:preview-cutover:built`
+   (`docs/verification/mobile-image-preview-release.md`, step 6).
+5. Enable only independently qualified cases and limits in the committed release config, then open
+   the matching D1 cases after verifying the active main/service versions. D1 may only narrow that
+   committed set. Check the authenticated effective capabilities, an unchanged original download and
+   ZIP, persisted private preview, and real mobile camera/library round trips before advertising support.
+
+Rollback first closes affected D1 admission. Retain readable original/ZIP support and pinned decoder
+releases needed by accepted transfers and preview recovery. Once an extended original has been stored,
+do not roll back to a Worker that rejects its format or length on reads/exports. Do not drop 0026,
+restore a pre-migration database, remove retained write inventories or treat lease expiry as proof of
+object absence. Intake rollback, database migration, image publication, main deployment and live proof
+are separate operations requiring the release owner's authorization.
+
+Platform references checked 2026-09-23: [Container deployment and rollout](https://developers.cloudflare.com/containers/guides/deploy/)
+and [Version URLs](https://developers.cloudflare.com/workers/versions-and-deployments/version-urls/).

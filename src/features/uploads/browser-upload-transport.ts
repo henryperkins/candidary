@@ -1,6 +1,8 @@
 import type { UploadBatchItemView } from '../../../shared/contracts';
 import type { ApiErrorBody } from '../../../shared/errors';
 import { api, attachCredentials, ClientApiError } from '../../app/api';
+import type { UploadTransferOutcome } from '../../../shared/mobile-image-contract';
+import { sendResumableFile } from './resumable-upload-transport';
 import type {
   ReservationResult,
   UploadQueueItem,
@@ -13,6 +15,7 @@ const FINALIZE_REUPLOAD_CODES = new Set([
   'UPLOAD_FINALIZE_CONFLICT',
   'FILE_TOO_LARGE',
   'FILE_TYPE_UNSUPPORTED',
+  'IMAGE_RESOURCE_LIMIT',
 ]);
 
 /* The reservation answer, exactly as the contract writes it. The queue only ever needed three things
@@ -26,7 +29,7 @@ const RESERVATION_FAILED = 'This photo could not be reserved.';
 function managerReservationFailureStatus(code: ApiErrorBody['code']): number {
   if (code === 'RESOURCE_FORBIDDEN') return 403;
   if (code === 'FILE_TYPE_UNSUPPORTED') return 415;
-  if (code === 'FILE_TOO_LARGE') return 413;
+  if (code === 'FILE_TOO_LARGE' || code === 'IMAGE_RESOURCE_LIMIT') return 413;
   if (code === 'VALIDATION_FAILED') return 422;
   if (code === 'INTERNAL_ERROR') return 500;
   return 409;
@@ -133,17 +136,30 @@ export function createBrowserTransport(
   options: BrowserUploadTransportOptions,
 ): BrowserUploadTransport {
   const root = options.kind === 'guest'
-    ? `/api/event/${options.slug}/uploads`
+    ? `/api/event/${encodeURIComponent(options.slug)}/uploads`
     : `/api/manage/events/${encodeURIComponent(options.eventId)}/uploads`;
+  const delivered = new WeakMap<File, Set<string>>();
+  const transferPath = (reservation: UploadReservation) => `${root}/${encodeURIComponent(reservation.mediaId)}/transfers/${encodeURIComponent(reservation.transfer!.id)}`;
   const transport: BrowserUploadTransport = {
     async reserve(items, signal) {
-      const files = items.map(({ id, file }) => ({
+      const resumed: ReservationResult[] = [];
+      for (const item of items.filter(item => item.reservation?.transfer)) {
+        const reservation = item.reservation!;
+        const status = await api<UploadTransferOutcome>(transferPath(reservation), {signal});
+        if (status.transfer?.id !== reservation.transfer!.id || status.transfer.mediaId !== reservation.mediaId) {
+          throw new Error(RESERVATION_FAILED);
+        }
+        resumed.push({id:item.id,status:'accepted',reservation:{...reservation,transfer:status.transfer}});
+      }
+      const files = items.filter(item => !item.reservation?.transfer).map(({ id, file }) => ({
         filename: file.name,
         mimeType: file.type,
         byteSize: file.size,
         idempotencyKey: id,
         caption: null,
+        transport: 'parts-v1',
       }));
+      if (files.length === 0) return resumed;
       const response = await api<{ items: UploadBatchItemView[] }>(`${root}/batch`, {
         method: 'POST',
         signal,
@@ -151,7 +167,7 @@ export function createBrowserTransport(
           ? { guestName: options.guestName, files }
           : { files }),
       });
-      return response.items.map((item): ReservationResult => {
+      return [...resumed, ...response.items.map((item): ReservationResult => {
         if (item.status === 'rejected') {
           if (options.kind === 'manager'
             && item.error?.code === 'UPLOAD_RESERVATION_CANCELED') {
@@ -172,6 +188,10 @@ export function createBrowserTransport(
               : {}),
           };
         }
+        if (item.transport === 'parts-v1' && item.transfer && item.media?.id === item.transfer.mediaId) {
+          return { id:item.idempotencyKey, status:'accepted', reservation:{mediaId:item.media.id,
+            uploadUrl:'', mimeType:item.media.mimeType, transfer:item.transfer} };
+        }
         if (item.alreadyDelivered && item.media?.uploadState === 'stored') {
           return { id: item.idempotencyKey, status: 'delivered', mediaId: item.media.id };
         }
@@ -190,9 +210,15 @@ export function createBrowserTransport(
           };
         }
         return { id: item.idempotencyKey, status: 'rejected', error: RESERVATION_FAILED };
-      });
+      })];
     },
-    async upload(item, reservation, progress, signal) {
+    async upload(item, reservation, progress, signal, onProcessing) {
+      if (reservation.transfer) {
+        await sendResumableFile(item.file,reservation.transfer,{root,signal,onProgress:progress,onProcessing});
+        const receipts = delivered.get(item.file) ?? new Set<string>();
+        receipts.add(reservation.transfer.id); delivered.set(item.file,receipts);
+        return;
+      }
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
@@ -206,7 +232,13 @@ export function createBrowserTransport(
       }
       throw lastError;
     },
-    async finalize(_item, reservation, signal) {
+    async finalize(item, reservation, signal) {
+      if (reservation.transfer) {
+        if (!delivered.get(item.file)?.has(reservation.transfer.id)) {
+          await sendResumableFile(item.file,reservation.transfer,{root,signal,onProgress:() => undefined});
+        }
+        return;
+      }
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {

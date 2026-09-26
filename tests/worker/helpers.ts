@@ -8,6 +8,7 @@ import { ExportsRepository } from '../../worker/db/exports';
 import type { AppEnv } from '../../worker/env';
 import { processExport as processExportAttempt } from '../../worker/workflows/export';
 import { EVENT_COVER_PROFILES } from '../../shared/event-cover';
+import { structuralPng } from '../fixtures/raster-builders';
 
 const cloudflareTestEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const permissiveGuestMessageRateLimit = {
@@ -473,12 +474,7 @@ export function writeHeaders(access: { cookie: string; csrf: string }) {
 }
 
 export function png(width = 800, height = 600, size = 64) {
-  const bytes = new Uint8Array(size);
-  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(16, width);
-  view.setUint32(20, height);
-  return bytes;
+  return structuralPng(width, height, size);
 }
 
 export async function resetDatabaseWithExportProtocolLegacyOpen() {

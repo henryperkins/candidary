@@ -129,7 +129,7 @@ export const LANDING_QUESTIONS: readonly SiteFaqEntry[] = [
   },
   {
     question: 'What can guests send?',
-    answer: 'JPEG, PNG, WebP, HEIC and HEIF, up to 20 MB per image. One event holds up to 10,000 photos or 100 GiB.',
+    answer: 'JPEG, PNG, WebP, HEIC and HEIF, up to 20 MiB per image. Open your event link for current photo choices and limits. One event holds up to 10,000 photos or 100 GiB.',
   },
   {
     question: 'How do I get the photos out?',
@@ -171,7 +171,7 @@ export const TERMS_PAGE: SiteLegalPage = {
   title: 'Terms',
   lede: 'What Candidary undertakes to do, and what an event may hold.',
   facts: [
-    'One event holds up to 10,000 photos or 100 GiB, with a 20 MB ceiling on any single image.',
+    'One event holds up to 10,000 photos or 100 GiB, with a baseline limit of 20 MiB per image. Your event shows its current photo choices and limits.',
     'Accepted formats are JPEG, PNG, WebP, HEIC and HEIF. Originals are stored at full resolution and are not re-encoded.',
     'A prepared download is built as a ZIP in 2 GiB parts, with a manifest of everything received.',
     'A management link cannot be recovered once lost unless the event has been saved to an account.',

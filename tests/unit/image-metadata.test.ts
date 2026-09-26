@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { inspectImageHeader } from '../../worker/security/image-metadata';
+import { structuralPng, structuralWebp } from '../fixtures/raster-builders';
+import { primaryHeif } from '../fixtures/image-container-builders';
 
 function png(width: number, height: number) {
   const bytes = new Uint8Array(24);
@@ -62,11 +64,11 @@ function isoBmff(brand: 'heic' | 'mif1', width: number, height: number) {
 
 describe('image header inspection', () => {
   it.each([
-    [png(1600, 900), 'image/png', 1600, 900],
+    [structuralPng(1600, 900), 'image/png', 1600, 900],
     [jpeg(1200, 800), 'image/jpeg', 1200, 800],
-    [webp(1080, 1350), 'image/webp', 1080, 1350],
-    [isoBmff('heic', 4032, 3024), 'image/heic', 4032, 3024],
-    [isoBmff('mif1', 3024, 4032), 'image/heif', 3024, 4032],
+    [structuralWebp(1080, 1350), 'image/webp', 1080, 1350],
+    [primaryHeif({ primaryId: 1, items: [{ id: 1, width: 4032, height: 3024 }] }), 'image/heic', 4032, 3024],
+    [primaryHeif({ primaryId: 1, items: [{ id: 1, width: 3024, height: 4032 }], genericBrand: true }), 'image/heic', 3024, 4032],
   ] as const)('recognizes supported signatures and dimensions', (bytes, mimeType, width, height) => {
     expect(inspectImageHeader(bytes)).toEqual({ mimeType, width, height });
   });
@@ -74,6 +76,23 @@ describe('image header inspection', () => {
   it('rejects unsupported and truncated data', () => {
     expect(() => inspectImageHeader(new TextEncoder().encode('GIF89a'))).toThrow('unsupported');
     expect(() => inspectImageHeader(new Uint8Array([0x89, 0x50, 0x4e]))).toThrow('truncated');
-    expect(() => inspectImageHeader(isoBmff('heic', 0, 0))).toThrow('dimensions');
+    expect(() => inspectImageHeader(primaryHeif({ primaryId: 1, items: [{ id: 1, width: 0, height: 0 }] }))).toThrow('dimensions');
+  });
+
+  it('rejects PNG dimensions carried in a wrong or truncated IHDR chunk', () => {
+    const bad = png(10, 8);
+    expect(() => inspectImageHeader(bad)).toThrow();
+    const wrong = new Uint8Array(33);
+    wrong.set(bad);
+    new DataView(wrong.buffer).setUint32(8, 13);
+    wrong.set(new TextEncoder().encode('tEXt'), 12);
+    expect(() => inspectImageHeader(wrong)).toThrow();
+  });
+
+  it('rejects WebP chunks that claim bytes outside the file', () => {
+    const bad = webp(10, 8);
+    new DataView(bad.buffer).setUint32(4, 22, true);
+    new DataView(bad.buffer).setUint32(16, 999, true);
+    expect(() => inspectImageHeader(bad)).toThrow();
   });
 });

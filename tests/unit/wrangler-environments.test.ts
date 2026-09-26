@@ -17,6 +17,7 @@ interface WranglerEnvironment {
   version_metadata?: { binding?: string };
   triggers?: { crons?: string[] };
   vars?: Record<string, string>;
+  analytics_engine_datasets?: { binding?: string; dataset?: string }[];
 }
 
 const config = JSON.parse(
@@ -26,10 +27,18 @@ const config = JSON.parse(
   secrets?: WranglerEnvironment['secrets'];
   d1_databases?: WranglerEnvironment['d1_databases'];
   r2_buckets?: WranglerEnvironment['r2_buckets'];
+  analytics_engine_datasets?: WranglerEnvironment['analytics_engine_datasets'];
   env?: { preview?: WranglerEnvironment };
 };
 
 describe('Wrangler deployment environments', () => {
+  it('binds private image rehearsal metrics in preview only', () => {
+    expect(config.analytics_engine_datasets).toBeUndefined();
+    expect(config.env?.preview?.analytics_engine_datasets).toEqual([
+      { binding: 'IMAGE_METRICS', dataset: 'candidary_image_metrics_preview' },
+    ]);
+  });
+
   it('keeps email and all ten required secrets environment-safe', () => {
     expect(config.send_email).toEqual([{ name: 'EMAIL' }]);
     expect(config.env?.preview?.send_email).toEqual([]);
@@ -73,6 +82,8 @@ describe('Wrangler deployment environments', () => {
       'candidary-preview-media-canonical',
     ]);
     expect(preview?.workflows?.map((workflow) => workflow.name)).toEqual([
+      'candidary-image-preview-preview',
+      'candidary-upload-completion-preview',
       'candidary-preview-export',
       'candidary-preview-cover-render',
       'candidary-preview-cover-backfill',

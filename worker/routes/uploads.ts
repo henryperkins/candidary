@@ -3,6 +3,7 @@ import type { z } from 'zod';
 
 import { MAX_IMAGE_BYTES } from '../../shared/constants';
 import { ApiError } from '../../shared/errors';
+import { isLegacyUploadMimeType } from '../../shared/image-formats';
 import { AuthService } from '../auth/service';
 import { MediaRepository, uploadMediaView } from '../db/media';
 import type { AppBindings } from '../env';
@@ -13,6 +14,9 @@ import { guestUploadBatchSchema, guestUploadSchema } from '../http/upload-schema
 import { UploadService } from '../services/uploads';
 import type { UploadAuthority } from '../services/upload-authority';
 import { receiveMediaUpload, retireMediaObjects } from '../storage/media';
+import { getUploadCapabilities } from '../mobile-image-release';
+import { UploadTransferService } from '../services/upload-transfers';
+import { cleanupUploadTransfers } from '../workflows/upload-transfer-cleanup';
 
 function validationError(parsed: { error: z.ZodError }) {
   const guestNameIssue = parsed.error.issues.some((issue) => issue.path[0] === 'guestName');
@@ -24,12 +28,12 @@ function validationError(parsed: { error: z.ZodError }) {
   );
 }
 
-async function guestForSlug(context: Parameters<typeof assertCsrf>[0]) {
+async function guestForSlug(context: Parameters<typeof assertCsrf>[0], write = true) {
   const auth = await new AuthService(context.env).resolveEventSession(getSessionCookie(context));
   if (auth.session.role !== 'guest' || auth.event.slug !== context.req.param('slug')) {
     throw new ApiError('ROLE_FORBIDDEN', 'This session belongs to a different event.', 403);
   }
-  await assertCsrf(context, 'event', auth.session.csrfDigest);
+  if (write) await assertCsrf(context, 'event', auth.session.csrfDigest);
   return auth;
 }
 
@@ -41,9 +45,50 @@ export const uploadRoutes = new Hono<AppBindings>();
 
 uploadRoutes.use('/event/:slug/uploads', privateJson);
 uploadRoutes.use('/event/:slug/uploads/batch', privateJson);
+uploadRoutes.use('/event/:slug/uploads/capabilities', privateJson);
 uploadRoutes.use('/event/:slug/uploads/:mediaId', privateJson);
 uploadRoutes.use('/event/:slug/uploads/:mediaId/content', privateJson);
 uploadRoutes.use('/event/:slug/uploads/:mediaId/finalize', privateJson);
+uploadRoutes.use('/event/:slug/uploads/:mediaId/transfers', privateJson);
+uploadRoutes.use('/event/:slug/uploads/:mediaId/transfers/*', privateJson);
+
+uploadRoutes.post('/event/:slug/uploads/:mediaId/transfers', async (context) => {
+  const auth = await guestForSlug(context);
+  const data = await new UploadTransferService(context.env).start({mediaId:context.req.param('mediaId'),eventId:auth.event.id,authority:guestAuthority(auth.session.id)});
+  return context.json({data,requestId:context.get('requestId')});
+});
+uploadRoutes.get('/event/:slug/uploads/:mediaId/transfers/:transferId', async (context) => {
+  const auth = await guestForSlug(context,false);
+  const data = await new UploadTransferService(context.env).status({transferId:context.req.param('transferId'),mediaId:context.req.param('mediaId'),eventId:auth.event.id,authority:guestAuthority(auth.session.id)});
+  return context.json({data,requestId:context.get('requestId')});
+});
+uploadRoutes.put('/event/:slug/uploads/:mediaId/transfers/:transferId/parts/:index', async (context) => {
+  const auth = await guestForSlug(context);
+  const data = await new UploadTransferService(context.env).putPart({transferId:context.req.param('transferId'),mediaId:context.req.param('mediaId'),eventId:auth.event.id,authority:guestAuthority(auth.session.id)},context.req.param('index'),context.req.raw);
+  return context.json({data,requestId:context.get('requestId')});
+});
+uploadRoutes.delete('/event/:slug/uploads/:mediaId/transfers/:transferId', async (context) => {
+  const auth = await guestForSlug(context);
+  const data = await new UploadTransferService(context.env).abort({transferId:context.req.param('transferId'),mediaId:context.req.param('mediaId'),eventId:auth.event.id,authority:guestAuthority(auth.session.id)});
+  return context.json({data,requestId:context.get('requestId')});
+});
+uploadRoutes.post('/event/:slug/uploads/:mediaId/transfers/:transferId/complete', async (context) => {
+  const auth = await guestForSlug(context);
+  const result = await new UploadTransferService(context.env).complete({transferId:context.req.param('transferId'),mediaId:context.req.param('mediaId'),eventId:auth.event.id,authority:guestAuthority(auth.session.id)});
+  return context.json({data:result.data,requestId:context.get('requestId')},result.status);
+});
+
+uploadRoutes.post('/event/:slug/uploads/:mediaId/transfers/:transferId/verify', async (context) => {
+  const auth=await guestForSlug(context);
+  const data=await new UploadTransferService(context.env).verifyReselection({transferId:context.req.param('transferId'),mediaId:context.req.param('mediaId'),eventId:auth.event.id,authority:guestAuthority(auth.session.id)},context.req.raw);
+  return context.json({data,requestId:context.get('requestId')});
+});
+
+uploadRoutes.get('/event/:slug/uploads/capabilities', async (context) => {
+  const auth = await guestForSlug(context,false);
+  const data = await getUploadCapabilities(context.env,auth.event,guestAuthority(auth.session.id));
+  return context.json({data,requestId:context.get('requestId')});
+});
 
 uploadRoutes.post('/event/:slug/uploads', async (context) => {
   const auth = await guestForSlug(context);
@@ -101,6 +146,7 @@ uploadRoutes.delete('/event/:slug/uploads/:mediaId', async (context) => {
   // guest asked to take back.
   const deletedAt = new Date().toISOString();
   const deleted = await repository.delete(media.id, deletedAt);
+  await cleanupUploadTransfers(context.env,new Date(deletedAt),media.eventId);
   await retireMediaObjects(
     context.env.MEDIA_BUCKET,
     context.env.CANONICAL_MEDIA_BUCKET,
@@ -131,6 +177,8 @@ uploadRoutes.put('/event/:slug/uploads/:mediaId/content', async (context) => {
   if (media.uploadState !== 'reserved' || media.deletedAt !== null) {
     throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer receive bytes.', 409);
   }
+  if (!isLegacyUploadMimeType(media.mimeType)) throw new ApiError('FILE_TYPE_UNSUPPORTED','This photo requires resumable upload.',415);
+  if (await repository.isTransferOwned(media.id)) throw new ApiError('UPLOAD_FINALIZE_CONFLICT','Continue this photo through its resumable upload.',409);
   const promotion = await repository.getPromotion(media.id);
   const canBufferExactRetry = promotion?.state === 'copying'
     && promotion.sourceEtag?.startsWith('buffer:') === true;

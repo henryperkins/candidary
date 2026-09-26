@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "licenses": [
+    {
+      "id": "pillow",
+      "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/LICENSE",
+      "path": "licenses/pillow.txt",
+      "sha256": "15181e7363dca9aed78b79bebebc7fde7f1814b8bd311ea3b87ae8ccadfc185b"
+    },
+    {
+      "id": "libjxl-testdata",
+      "url": "https://raw.githubusercontent.com/libjxl/testdata/73695d303670c90e4d506ea89d9901b081385089/LICENSE",
+      "path": "licenses/libjxl-testdata.txt",
+      "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411"
+    },
+    {
+      "id": "libheif-examples",
+      "path": "licenses/libheif-examples.txt",
+      "url": "https://raw.githubusercontent.com/strukturag/libheif/413e2a87e6a70b3eccc3a3adc5801179dd2d9e00/examples/COPYING",
+      "sha256": "278ee9bbb13ecb080a131c68927bd589a6a56fd5449ce25e8e594c858864830d"
+    },
+    {
+      "path": "licenses/libjxl-conformance.txt",
+      "url": "https://raw.githubusercontent.com/libjxl/conformance/b1d0f990b03e57bf6d137c365cd5dc8b470b9191/LICENSE",
+      "sha256": "8405932022a556380c2d8c272eff154a923feb197233f348ce5f7334fb0a5ede"
+    },
+    {
+      "path": "licenses/jxl-newtons-cradle.txt",
+      "url": "https://raw.githubusercontent.com/libjxl/conformance/b1d0f990b03e57bf6d137c365cd5dc8b470b9191/testcases/animation_newtons_cradle/source",
+      "sha256": "c94fba1eae839264d1832f8b7a0fc891c1aa19deb75a4360ea55af1e97a8f29e"
+    },
+    {
+      "path": "licenses/openpreserve-jp2.txt",
+      "sha256": "8d0c7f08ea70c84cddf995adefb67898488e3088fe1bdce2a88f38aeff2f3264",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/366f068cec399d0cdfd61fa473de3ab6dc858098/jp2k-test/readme.md"
+    },
+    {
+      "path": "licenses/apng-icos4d.txt",
+      "url": "https://raw.githubusercontent.com/libjxl/conformance/b1d0f990b03e57bf6d137c365cd5dc8b470b9191/testcases/animation_icos4d/source",
+      "sha256": "a15076f79c406297a1a31a94d672815473b667a451b473d1d14754dee9a27e1d"
+    },
+    {
+      "path": "licenses/libultrahdr-test-data.txt",
+      "url": "https://raw.githubusercontent.com/google/libultrahdr/f3e36226914289cfefcf0d81a6471cf6266c79fb/tests/data/LICENSE",
+      "sha256": "c4b2cd68902b8c4a82c9b5ddebe15538acbce7f70a88fcc751e1e921bde89f7f"
+    },
+    {
+      "id": "linku-avif-sample-images-license",
+      "url": "https://raw.githubusercontent.com/link-u/avif-sample-images/c666a368b73006246694919b5dbcc078317af6cc/LICENSE.txt",
+      "path": "licenses/linku-avif-sample-images-LICENSE.txt",
+      "sha256": "da89f9867822be4b8adb1e601d9e9226c195016c6508015eb7593e68ead0c98a"
+    },
+    {
+      "id": "linku-avif-sample-images-readme",
+      "url": "https://raw.githubusercontent.com/link-u/avif-sample-images/c666a368b73006246694919b5dbcc078317af6cc/README.md",
+      "path": "licenses/linku-avif-sample-images-README.md",
+      "sha256": "2a23e9a3149a297e0988a97bbf40ca5486ce57bc452a6f5b3abc8ffc171b4389"
+    },
+    {
+      "id": "lots-of-sample-files-avif-license",
+      "url": "https://raw.githubusercontent.com/AsherJingkongChen/lots-of-sample-files/5e009b9fc7f0d8be46472828d47e1cd466a05595/resources/samples/image/avif/docs/LICENSE.2.txt",
+      "path": "licenses/lots-of-sample-files-avif-LICENSE.2.txt",
+      "sha256": "9c977e65c256b2e2542a75784e818d9c3206feb0481287267e075b2fae54f3d6"
+    },
+    {
+      "id": "lots-of-sample-files-avif-readme",
+      "url": "https://raw.githubusercontent.com/AsherJingkongChen/lots-of-sample-files/5e009b9fc7f0d8be46472828d47e1cd466a05595/resources/samples/image/avif/docs/README.md",
+      "path": "licenses/lots-of-sample-files-avif-README.md",
+      "sha256": "bdb0ff1adc10efdbc90f6af7c8386078cdb16489b48a7f535fc55c75225028a2"
+    },
+    {
+      "path": "licenses/raw-pixls-phone-records.json",
+      "sha256": "8e3fc85253af1120cf399b97a20b0b4c6aa5f98080db082490c5f17ded5b29de"
+    }
+  ]
+}

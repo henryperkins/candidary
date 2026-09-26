@@ -18,6 +18,8 @@ function omitLocalDevVarsPlugin(): Plugin {
 }
 
 export default defineConfig({
+    // Wrangler defines are ignored by the Vite plugin. Apply to both twins.
+    define: { __CANDIDARY_TEST_MOBILE_IMAGE_RELEASE__: 'false' },
     plugins: [react(), cloudflare(), omitLocalDevVarsPlugin()],
     // The first Web Worker in this application. The composition model runs off
     // the main thread on the authorized natural preview, so choosing a cover

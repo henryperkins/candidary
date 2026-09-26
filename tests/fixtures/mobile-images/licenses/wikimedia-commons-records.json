@@ -1,0 +1,317 @@
+{
+  "source": "https://commons.wikimedia.org/w/api.php (action=query, prop=imageinfo|revisions, iiprop=url|sha1|size|timestamp|user|extmetadata)",
+  "accessed": "2026-09-25",
+  "note": "The first fileVersions entry is the current file revision. Each pinned original was downloaded from that revision; its SHA-1 equals the API sha1 and its SHA-256 is pinned in manifest.json. CC BY-SA 4.0 originals and every reference rendering derived from them (resized, colour-converted PNG/APNG adaptations kept in ignored storage) remain under CC BY-SA 4.0 with the attribution recorded in the manifest.",
+  "records": [
+    {
+      "title": "File:Montseny_from_Puigmal_massif.jpg",
+      "use": "jpeg-ultra-hdr-gainmap fixture commons-montseny-pixel-8a-ultrahdr",
+      "pageId": 153292948,
+      "pageRevision": 1169648650,
+      "pageUrl": "https://commons.wikimedia.org/w/index.php?curid=153292948&oldid=1169648650",
+      "licenseShortName": "CC0",
+      "licenseId": "cc0",
+      "legalcode": "https://creativecommons.org/publicdomain/zero/1.0/legalcode",
+      "artist": "Alan Mattingly",
+      "credit": "Own work",
+      "attributionRequired": false,
+      "wikitextRights": [
+        "|date=2024-09-28 12:21:05",
+        "|source={{own}}",
+        "|author=[[User:Alan Mattingly|Alan Mattingly]]",
+        "|permission=",
+        "{{self|cc-zero}}"
+      ],
+      "fileVersions": [
+        {
+          "timestamp": "2024-09-28T20:08:07Z",
+          "uploader": "Alan Mattingly",
+          "size": 1560734,
+          "sha1": "f11c596584225fcbbbc21636206d83bdda1a8ef5",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/9/97/Montseny_from_Puigmal_massif.jpg"
+        }
+      ]
+    },
+    {
+      "title": "File:MtMurone.jpg",
+      "use": "jpeg-ultra-hdr-gainmap fixture commons-mtmurone-pixel-9-ultrahdr",
+      "pageId": 196833149,
+      "pageRevision": 1275340798,
+      "pageUrl": "https://commons.wikimedia.org/w/index.php?curid=196833149&oldid=1275340798",
+      "licenseShortName": "CC BY-SA 4.0",
+      "licenseId": "cc-by-sa-4.0",
+      "legalcode": "https://creativecommons.org/licenses/by-sa/4.0/legalcode",
+      "artist": "Heavytank",
+      "credit": "Own work",
+      "attributionRequired": true,
+      "wikitextRights": [
+        "|date=2026-08-05 12:55:48",
+        "|source={{own}}",
+        "|author=[[User:Heavytank|Heavytank]]",
+        "|permission=",
+        "{{self|cc-by-sa-4.0}}"
+      ],
+      "fileVersions": [
+        {
+          "timestamp": "2026-08-05T06:38:42Z",
+          "uploader": "Heavytank",
+          "size": 1847813,
+          "sha1": "bf2914aa8400759fd79c558b458ea80a51952953",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/c/c9/MtMurone.jpg"
+        }
+      ]
+    },
+    {
+      "title": "File:PXL_20240103_071549544.MP.jpg",
+      "use": "jpeg-motion-photo-still fixture commons-pxl-pixel-6a-motion-photo",
+      "pageId": 143460747,
+      "pageRevision": 850236542,
+      "pageUrl": "https://commons.wikimedia.org/w/index.php?curid=143460747&oldid=850236542",
+      "licenseShortName": "CC0",
+      "licenseId": "cc0",
+      "legalcode": "https://creativecommons.org/publicdomain/zero/1.0/legalcode",
+      "artist": "Lk1122",
+      "credit": "Own work",
+      "attributionRequired": false,
+      "wikitextRights": [
+        "|date=2024-01-03 08:15:49",
+        "|source={{own}}",
+        "|author=Lk1122",
+        "|permission=",
+        "{{self|cc-zero}}"
+      ],
+      "fileVersions": [
+        {
+          "timestamp": "2024-01-03T07:48:05Z",
+          "uploader": "Lk1122",
+          "size": 6317260,
+          "sha1": "72e6aba7286580a885110659ffc0bee5da300182",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/0/08/PXL_20240103_071549544.MP.jpg"
+        }
+      ]
+    },
+    {
+      "title": "File:MVIMG_20171022_140431.jpg",
+      "use": "jpeg-motion-photo-still fixture commons-mvimg-pixel-2-microvideo",
+      "pageId": 63525772,
+      "pageRevision": 1015407039,
+      "pageUrl": "https://commons.wikimedia.org/w/index.php?curid=63525772&oldid=1015407039",
+      "licenseShortName": "CC BY-SA 4.0",
+      "licenseId": "cc-by-sa-4.0",
+      "legalcode": "https://creativecommons.org/licenses/by-sa/4.0/legalcode",
+      "artist": "GambaKufu",
+      "credit": "Own work",
+      "attributionRequired": true,
+      "wikitextRights": [
+        "|date=2017-10-22 14:04:32",
+        "|source={{own}}",
+        "|author=[[User:GambaKufu|GambaKufu]]",
+        "|permission=",
+        "{{self|cc-by-sa-4.0}}"
+      ],
+      "fileVersions": [
+        {
+          "timestamp": "2017-10-22T15:01:17Z",
+          "uploader": "GambaKufu",
+          "size": 6109198,
+          "sha1": "82970e2db6a07d726ca44f8d330a4b23fb60bcb3",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/5/55/MVIMG_20171022_140431.jpg"
+        }
+      ]
+    },
+    {
+      "title": "File:Poznańskie_Słowiki_neon_św._Marcin_Poznań.webp",
+      "use": "webp-animated fixture commons-poznan-neon-webp-animated",
+      "pageId": 62059568,
+      "pageRevision": 1215613607,
+      "pageUrl": "https://commons.wikimedia.org/w/index.php?curid=62059568&oldid=1215613607",
+      "licenseShortName": "CC BY-SA 4.0",
+      "licenseId": "cc-by-sa-4.0",
+      "legalcode": "https://creativecommons.org/licenses/by-sa/4.0/legalcode",
+      "artist": "Klapi",
+      "credit": "Own work",
+      "attributionRequired": true,
+      "wikitextRights": [
+        "{{Superseded|File:Poznańskie Słowiki neon św. Marcin Poznań.png|reason=Animated WebP only has a thumbnail if you click on it.}}",
+        "|date=2015-06-12",
+        "|source={{own}}",
+        "|author=[[User:Klapi|Klapi]]",
+        "|permission=",
+        "{{self|cc-by-sa-4.0}}"
+      ],
+      "fileVersions": [
+        {
+          "timestamp": "2017-08-31T20:22:02Z",
+          "uploader": "Klapi",
+          "size": 371854,
+          "sha1": "b2564a7eaa42a00475e12ee2f5c902e9ea893cd9",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/a/a2/Pozna%C5%84skie_S%C5%82owiki_neon_%C5%9Bw._Marcin_Pozna%C5%84.webp"
+        }
+      ]
+    },
+    {
+      "title": "File:Socorro_Von_Kármán_Vortices.webp",
+      "use": "webp-animated fixture commons-socorro-vortices-webp-animated (current file version only)",
+      "pageId": 199264583,
+      "pageRevision": 1274983236,
+      "pageUrl": "https://commons.wikimedia.org/w/index.php?curid=199264583&oldid=1274983236",
+      "licenseShortName": "Public domain",
+      "licenseId": "pd",
+      "legalcode": null,
+      "artist": "NASA",
+      "credit": "Derived from File:Socorro_Von_Kármán_Vortices.gif - Removed white border at the bottom and converted to animated WEBP Original from https://weather.ndc.nasa.gov/GOES/",
+      "attributionRequired": false,
+      "wikitextRights": [
+        "|date=2025-05-03",
+        "|source=Derived from [[:File:Socorro_Von_Kármán_Vortices.gif]] -",
+        "|author=NASA",
+        "|permission=",
+        "{{PD-USGov}}{{PD-USGov-NASA}}"
+      ],
+      "fileVersions": [
+        {
+          "timestamp": "2026-09-10T16:55:25Z",
+          "uploader": "Carrylex",
+          "size": 3367212,
+          "sha1": "d5d094b3991491404488381e854e9f9008d933b2",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/e/ec/Socorro_Von_K%C3%A1rm%C3%A1n_Vortices.webp"
+        },
+        {
+          "timestamp": "2026-09-10T16:53:26Z",
+          "uploader": "Carrylex",
+          "size": 6148734,
+          "sha1": "05b426c47d1d749fdf3b91a119167c3d8e93e8ab",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/e/ec/20260910165524%21Socorro_Von_K%C3%A1rm%C3%A1n_Vortices.webp"
+        }
+      ]
+    },
+    {
+      "title": "File:Socorro_Von_Kármán_Vortices.gif",
+      "use": "rights source of the Socorro WebP derivative",
+      "pageId": 164645265,
+      "pageRevision": 1274808596,
+      "pageUrl": "https://commons.wikimedia.org/w/index.php?curid=164645265&oldid=1274808596",
+      "licenseShortName": "Public domain",
+      "licenseId": "pd",
+      "legalcode": null,
+      "artist": "NASA (National Aeronautics and Space Administration",
+      "credit": "https://weather.ndc.nasa.gov/GOES/",
+      "attributionRequired": false,
+      "wikitextRights": [
+        "|date=2025-05-03",
+        "|source=https://weather.ndc.nasa.gov/GOES/",
+        "|author=NASA (National Aeronautics and Space Administration",
+        "|permission=",
+        "{{PD-USGov}}{{PD-USGov-NASA}}"
+      ],
+      "fileVersions": [
+        {
+          "timestamp": "2025-05-03T23:48:58Z",
+          "uploader": "ViridLeWiki",
+          "size": 25385538,
+          "sha1": "fbc9cfcc302bf11c0deefe7c94e462a7558407de",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/b/bf/Socorro_Von_K%C3%A1rm%C3%A1n_Vortices.gif"
+        }
+      ]
+    },
+    {
+      "title": "File:Animated PNG example bouncing beach ball.png",
+      "use": "public-domain source of the lots-of-sample-files CC0.2.beach-ball.avifs derivative; its 2008 version (sha1 9e94406d162403791a138c37fc61b16097f3dcc3) is byte-identical to that repository's CC0.1.beach-ball.apng",
+      "pageId": 3558213,
+      "pageRevision": 1254447215,
+      "pageUrl": "https://commons.wikimedia.org/w/index.php?curid=3558213&oldid=1254447215",
+      "licenseShortName": "Public domain",
+      "licenseId": "pd",
+      "legalcode": null,
+      "artist": "Holger Will",
+      "credit": "[1]",
+      "attributionRequired": false,
+      "wikitextRights": [
+        "|Source= [http://www.treebuilder.de/default.asp?file=89031.xml]",
+        "|Date= 2008",
+        "|Author=Holger Will",
+        "|Permission=\"all these images are public domain, so you can use them for what ever you like.\"",
+        "{{PD-author|Holger Will}}"
+      ],
+      "fileVersions": [
+        {
+          "timestamp": "2023-10-08T22:11:13Z",
+          "uploader": "NeRdTheNed",
+          "size": 61968,
+          "sha1": "d33b70ad3274e1a4cf68cf7fd5b976e77a7d03bd",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/1/14/Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2023-07-10T17:52:37Z",
+          "uploader": "Aaron Liu",
+          "size": 63435,
+          "sha1": "4024517347a89acc6646e9266c946b4a61cbe531",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20231008221112%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2023-06-30T15:24:20Z",
+          "uploader": "Jurta",
+          "size": 72209,
+          "sha1": "9e94406d162403791a138c37fc61b16097f3dcc3",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20230710175236%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2023-06-29T13:00:32Z",
+          "uploader": "SteinsplitterBot",
+          "size": 5185,
+          "sha1": "d0d873b363e2680a051e445109ef89051f624930",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20230630152418%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2023-03-23T21:02:44Z",
+          "uploader": "Enueie82io",
+          "size": 72209,
+          "sha1": "9e94406d162403791a138c37fc61b16097f3dcc3",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20230629130031%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2017-02-25T20:45:33Z",
+          "uploader": "Gnash",
+          "size": 63435,
+          "sha1": "4024517347a89acc6646e9266c946b4a61cbe531",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20230323210242%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2017-02-25T19:56:41Z",
+          "uploader": "Gnash",
+          "size": 63435,
+          "sha1": "4024517347a89acc6646e9266c946b4a61cbe531",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20170225204531%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2015-09-14T07:28:24Z",
+          "uploader": "ArkusPerson",
+          "size": 65559,
+          "sha1": "6055317cbdf9809558d6bd19537a1ad6d3ef069e",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20170225195639%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2013-08-26T22:01:39Z",
+          "uploader": "Felgest",
+          "size": 65557,
+          "sha1": "ef7c40c40535547ad08b6fa0c9da04e01562f337",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20150914072824%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2013-06-24T22:03:24Z",
+          "uploader": "Yourmomblah",
+          "size": 65559,
+          "sha1": "6055317cbdf9809558d6bd19537a1ad6d3ef069e",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20130826220137%21Animated_PNG_example_bouncing_beach_ball.png"
+        },
+        {
+          "timestamp": "2008-02-15T07:57:59Z",
+          "uploader": "JDS~commonswiki",
+          "size": 72209,
+          "sha1": "9e94406d162403791a138c37fc61b16097f3dcc3",
+          "url": "https://upload.wikimedia.org/wikipedia/commons/archive/1/14/20130624220322%21Animated_PNG_example_bouncing_beach_ball.png"
+        }
+      ]
+    }
+  ]
+}

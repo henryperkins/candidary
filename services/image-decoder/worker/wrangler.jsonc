@@ -1,0 +1,42 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "candidary-image-decoder",
+  "main": "index.ts",
+  "compatibility_date": "2026-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "observability": { "enabled": false },
+  "vars": { "DECODER_ENVIRONMENT": "production", "UPLOAD_POOL_SIZE": "2", "PREVIEW_POOL_SIZE": "2" },
+  // Local qualification source only. A separately authorized release must replace both images
+  // with the same verified registry digest and populate the external release record first.
+  "containers": [
+    { "class_name": "UploadImageDecoder", "image": "../native/Dockerfile", "image_build_context": "../../..", "instance_type": "standard-2", "max_instances": 2, "ssh": { "enabled": false } },
+    { "class_name": "PreviewImageDecoder", "image": "../native/Dockerfile", "image_build_context": "../../..", "instance_type": "standard-2", "max_instances": 2, "ssh": { "enabled": false } }
+  ],
+  "durable_objects": { "bindings": [
+    { "name": "UPLOAD_DECODERS", "class_name": "UploadImageDecoder" },
+    { "name": "PREVIEW_DECODERS", "class_name": "PreviewImageDecoder" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["UploadImageDecoder", "PreviewImageDecoder"] }],
+  "env": {
+    "preview": {
+      "name": "candidary-image-decoder-preview",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [],
+      "vars": { "DECODER_ENVIRONMENT": "preview", "UPLOAD_POOL_SIZE": "2", "PREVIEW_POOL_SIZE": "2" },
+      // Rehearsal-only private job measurements: environment, pool/lane, path, closed outcome and family.
+      "analytics_engine_datasets": [{ "binding": "DECODER_METRICS", "dataset": "candidary_image_decoder_preview" }],
+      "containers": [
+        { "class_name": "UploadImageDecoder", "image": "registry.cloudflare.com/a77e479f6736120eadd99973dbeb705e/candidary-image-decoder@sha256:d014ac551e24b9ce74737a4aebdd9c2f7d0ba0d4e50a2a87bd5fa4c5d3b82f80", "instance_type": "standard-2", "max_instances": 2, "ssh": { "enabled": false } },
+        { "class_name": "PreviewImageDecoder", "image": "registry.cloudflare.com/a77e479f6736120eadd99973dbeb705e/candidary-image-decoder@sha256:d014ac551e24b9ce74737a4aebdd9c2f7d0ba0d4e50a2a87bd5fa4c5d3b82f80", "instance_type": "standard-2", "max_instances": 2, "ssh": { "enabled": false } }
+      ],
+      "durable_objects": { "bindings": [
+        { "name": "UPLOAD_DECODERS", "class_name": "UploadImageDecoder" },
+        { "name": "PREVIEW_DECODERS", "class_name": "PreviewImageDecoder" }
+      ] }
+    }
+  }
+}

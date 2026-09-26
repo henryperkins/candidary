@@ -5,6 +5,8 @@ import { createApp } from './app';
 import type { AppEnv } from './env';
 import { NotificationService } from './services/notifications';
 import { processExport } from './workflows/export';
+import { processUploadCompletion, type UploadCompletionPayload } from './workflows/upload-completion';
+import { processImagePreview, type ImagePreviewPayload } from './workflows/image-preview';
 import {
   cleanupMediaObjectWriteTombstones,
   maintainLegacyMediaObjects,
@@ -30,6 +32,20 @@ import {
 } from './workflows/cover-render';
 
 const app = createApp();
+
+export class ImagePreviewWorkflow extends WorkflowEntrypoint<AppEnv, ImagePreviewPayload> {
+  async run(event:WorkflowEvent<ImagePreviewPayload>, step:WorkflowStep) {
+    await step.do('regenerate private image preview',{retries:{limit:2,delay:'30 seconds',backoff:'exponential'},timeout:'8 minutes'},
+      async () => processImagePreview(this.env,event.payload));
+  }
+}
+
+export class UploadCompletionWorkflow extends WorkflowEntrypoint<AppEnv, UploadCompletionPayload> {
+  async run(event:WorkflowEvent<UploadCompletionPayload>, step:WorkflowStep) {
+    await step.do('verify and deliver the unchanged original',{retries:{limit:2,delay:'30 seconds',backoff:'exponential'},timeout:'15 minutes'},
+      async () => processUploadCompletion(this.env,event.payload));
+  }
+}
 
 export interface ExportWorkflowPayload {
   jobId: string;

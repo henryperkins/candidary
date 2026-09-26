@@ -63,6 +63,10 @@ import { privateJson } from '../http/private-json';
 import { managerUploadBatchSchema } from '../http/upload-schemas';
 import { ManagerUploadActorService } from '../services/manager-upload-actor';
 import { UploadService } from '../services/uploads';
+import { UploadTransferService } from '../services/upload-transfers';
+import { cleanupUploadTransfers } from '../workflows/upload-transfer-cleanup';
+import { getUploadCapabilities } from '../mobile-image-release';
+import { isLegacyUploadMimeType } from '../../shared/image-formats';
 import {
   deleteMediaObjectAliases,
   receiveMediaUpload,
@@ -269,8 +273,11 @@ manageRoutes.use('/manage/events/:eventId/media/:mediaId/cancel-reservation', pr
 manageRoutes.use('/manage/events/:eventId/gallery/summary', privateJson);
 manageRoutes.use('/manage/events/:eventId/gallery/arrivals', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/batch', privateJson);
+manageRoutes.use('/manage/events/:eventId/uploads/capabilities', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/content', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/finalize', privateJson);
+manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/transfers', privateJson);
+manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/transfers/*', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/:mediaId', privateJson);
 manageRoutes.use('/manage/events/:eventId/links/manager/rotate', privateJson);
 
@@ -490,6 +497,44 @@ function managerUploadConflict(): ApiError {
   );
 }
 
+async function managerTransferIdentity(context: Context<AppBindings>, write: boolean) {
+  const auth = await managerForEvent(context,write);
+  const authority = await new ManagerUploadActorService(context.env).lookupForExistingUpload(auth);
+  if (!authority) throw managerUploadForbidden();
+  return {transferId:context.req.param('transferId') ?? '',mediaId:context.req.param('mediaId')!,eventId:auth.event.id,authority};
+}
+manageRoutes.post('/manage/events/:eventId/uploads/:mediaId/transfers', async (context) => {
+  const data = await new UploadTransferService(context.env).start(await managerTransferIdentity(context,true));
+  return context.json({data,requestId:context.get('requestId')});
+});
+manageRoutes.get('/manage/events/:eventId/uploads/:mediaId/transfers/:transferId', async (context) => {
+  const data = await new UploadTransferService(context.env).status(await managerTransferIdentity(context,false));
+  return context.json({data,requestId:context.get('requestId')});
+});
+manageRoutes.put('/manage/events/:eventId/uploads/:mediaId/transfers/:transferId/parts/:index', async (context) => {
+  const data = await new UploadTransferService(context.env).putPart(await managerTransferIdentity(context,true),context.req.param('index'),context.req.raw);
+  return context.json({data,requestId:context.get('requestId')});
+});
+manageRoutes.delete('/manage/events/:eventId/uploads/:mediaId/transfers/:transferId', async (context) => {
+  const data = await new UploadTransferService(context.env).abort(await managerTransferIdentity(context,true));
+  return context.json({data,requestId:context.get('requestId')});
+});
+manageRoutes.post('/manage/events/:eventId/uploads/:mediaId/transfers/:transferId/complete', async (context) => {
+  const result = await new UploadTransferService(context.env).complete(await managerTransferIdentity(context,true));
+  return context.json({data:result.data,requestId:context.get('requestId')},result.status);
+});
+
+manageRoutes.post('/manage/events/:eventId/uploads/:mediaId/transfers/:transferId/verify', async (context) => {
+  const data=await new UploadTransferService(context.env).verifyReselection(await managerTransferIdentity(context,true),context.req.raw);
+  return context.json({data,requestId:context.get('requestId')});
+});
+
+manageRoutes.get('/manage/events/:eventId/uploads/capabilities', async (context) => {
+  const auth = await managerForEvent(context);
+  const data = await getUploadCapabilities(context.env,auth.event,{kind:auth.via === 'link' ? 'manager-link' : 'manager-account'});
+  return context.json({data,requestId:context.get('requestId')});
+});
+
 manageRoutes.post('/manage/events/:eventId/uploads/batch', async (context) => {
   // Manager authentication, origin, and credential-scoped CSRF all complete
   // before the bounded JSON body is read.
@@ -552,6 +597,7 @@ manageRoutes.delete('/manage/events/:eventId/uploads/:mediaId', async (context) 
   const outcome = await repository.cancelReservation(mediaId, authority, canceledAt);
   if (outcome.kind === 'forbidden') throw managerUploadForbidden();
   if (outcome.kind === 'conflict') throw managerUploadConflict();
+  await cleanupUploadTransfers(context.env,new Date(canceledAt),media.eventId);
   if (outcome.kind === 'canceled') {
     await deleteMediaObjectAliases(
       context.env.MEDIA_BUCKET,
@@ -591,6 +637,8 @@ manageRoutes.put('/manage/events/:eventId/uploads/:mediaId/content', async (cont
   if (media.uploadState !== 'reserved' || media.deletedAt !== null) {
     throw new ApiError('UPLOAD_FINALIZE_CONFLICT', 'This upload can no longer receive bytes.', 409);
   }
+  if (!isLegacyUploadMimeType(media.mimeType)) throw new ApiError('FILE_TYPE_UNSUPPORTED','This photo requires resumable upload.',415);
+  if (await repository.isTransferOwned(media.id)) throw new ApiError('UPLOAD_FINALIZE_CONFLICT','Continue this photo through its resumable upload.',409);
   const promotion = await repository.getPromotion(media.id);
   const canBufferExactRetry = promotion?.state === 'copying'
     && promotion.sourceEtag?.startsWith('buffer:') === true;

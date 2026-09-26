@@ -8,6 +8,7 @@ export const uploadFileSchema = z.object({
   byteSize: z.number(),
   idempotencyKey: z.string().min(1).max(128),
   caption: z.string().max(300).nullish(),
+  transport: z.literal('parts-v1').optional(),
 }).strict();
 
 export const guestUploadSchema = uploadFileSchema.extend({

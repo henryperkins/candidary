@@ -1,5 +1,6 @@
 import { UPLOAD_BATCH_SIZE } from '../../../shared/constants';
 import type { ApiErrorCode } from '../../../shared/errors';
+import type { UploadTransferView } from '../../../shared/mobile-image-contract';
 import { ClientApiError } from '../../app/api';
 
 export type UploadQueueState =
@@ -15,6 +16,7 @@ export interface UploadReservation {
   mediaId: string;
   uploadUrl: string;
   mimeType: string;
+  transfer?: UploadTransferView;
 }
 
 export interface UploadQueueItem {
@@ -29,6 +31,7 @@ export interface UploadQueueItem {
   retryStage?: 'finalize';
   reservation?: UploadReservation;
   previewUrl?: string;
+  resumed?: true;
 }
 
 export type ReservationResult =
@@ -50,6 +53,7 @@ export interface UploadTransport {
     reservation: UploadReservation,
     progress: (percent: number) => void,
     signal?: AbortSignal,
+    onProcessing?: () => void,
   ): Promise<void>;
   finalize(item: UploadQueueItem, reservation: UploadReservation, signal?: AbortSignal): Promise<void>;
   retryUploadAfterFinalizeError?(error: unknown): boolean;
@@ -197,7 +201,11 @@ export async function runUploadQueue(
           await transport.upload(queued, queued.reservation, (progress) => {
             if (signal?.aborted) return;
             update(task.id, { progress: Math.max(0, Math.min(100, Math.round(progress))) });
-          }, signal);
+          }, signal, () => {
+            if (signal?.aborted) return;
+            stage = 'finalize';
+            update(task.id, { state:'finalizing', progress:100, retryStage:'finalize' });
+          });
           if (signal?.aborted) return;
           stage = 'finalize';
         }

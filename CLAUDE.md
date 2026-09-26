@@ -128,13 +128,19 @@ infers phase — `resolveGuestEventPhase()` runs on the Worker and returns `rsvp
 
 ### Upload path (the core journey)
 
+`shared/image-formats.ts` distinguishes recognized formats from admitted uploads. The legacy seven
+MIME types and 20 MiB limit remain the decoder-independent direct path. Extended intake stays closed unless the per-case qualification intersection admits it. Selection may use a filename only for empty/generic
+MIME; storage checks the byte family, primary dimensions and explicit sequence evidence. Bounded
+metadata readers share read/work limits and pin R2 ETags. Header inspection does not certify native
+codec support. Browser thumbnails are optional and must never alter or replace the original File.
+
 Three phases; canonical-live originals now pass through the authenticated Worker and never receive a
 presigned R2 URL:
 
 1. **Reserve** — `POST /api/event/:slug/uploads/batch` validates type/size, atomically increments event
    counters, inserts `reserved` media rows, and returns authenticated same-origin content URLs.
 2. **Transfer** — the browser sends at most two CSRF-protected PUTs concurrently. The Worker rechecks
-   event/session ownership, buffers no more than the accepted 20 MB, validates exact size, MIME, image
+   event/session ownership, buffers no more than the accepted 20 MiB, validates exact size, MIME, image
    signature, and dimensions, then writes the deterministic canonical key create-only and re-reads its
    complete bytes before committing D1 `stored` + `canonical`.
 3. **Confirm** — `POST .../uploads/:mediaId/finalize` is an idempotent confirmation for the browser
@@ -165,7 +171,7 @@ Gallery-only shell rather than duplicating the main page's secondary panels.
 `stored` means privately delivered to the host. `publicationStatus` (`unpublished`/`published`/`hidden`)
 is orthogonal and never affects retention, host intake, or export eligibility. Originals are
 manager-only (`GET /api/media/:id/original`); guests may read a preview only for their own upload or for
-a published photo in a visible gallery. Previews are always produced through the `IMAGES` binding into a
+a published photo in a visible gallery. Legacy previews use Images within its input ceiling; extended previews are persisted private native derivatives under a
 separate R2 key so original metadata is not exposed — never fall back to serving the original bytes from
 the preview route.
 
@@ -319,7 +325,7 @@ objects nothing can find again.
   `db.batch([...])` where the first statement has the guard in its `WHERE` and later statements append
   `AND changes() = 1`; then check `results[0].meta.changes === 1` and derive the error from current state.
   See `MediaRepository.reserve`/`finalize`/`delete`. Do not read-then-write counters.
-- **Limits** live in `shared/constants.ts` (20 MB/photo, 10,000 photos, 100 GiB/event, batch of 20)
+- **Limits** live in `shared/constants.ts` (20 MiB/direct photo, 10,000 photos, 100 GiB/event, batch of 20)
   and `shared/rsvp.ts` (500 event capacity, 500 households, 20 named and 10 plus-one slots per
   household, 30 people per household). Treat those files as the source of truth.
 - **D1 parameter bound**: no statement may bind more than 100 values. A 500-person import commits as
@@ -327,8 +333,7 @@ objects nothing can find again.
   JSON binding and uses `json_each()`.
 - **CSV output**: every exported cell goes through `csvCell()` in `shared/csv.ts`, which prefixes an
   apostrophe to any cell starting with `=`, `+`, `-`, or `@`. Both the media and RSVP exports use it.
-- **New image format**: update `SUPPORTED_IMAGE_TYPES`, the client `accept`/validation sets in
-  `GuestUploadFlow.tsx`, the signature sniffer, *and* add a migration — `mime_type` has a table CHECK
+- **New image format**: recognition belongs to `shared/image-formats.ts`; admission requires external native/device evidence and the committed B/C release configs. Preserve baseline `SUPPORTED_IMAGE_TYPES`. Check the schema — `mime_type` has a table CHECK
   constraint. Event covers are a separate intake with its own list: `COVER_UPLOAD_MIME_TYPES` is an
   independent literal tuple, never a filter over `SUPPORTED_IMAGE_TYPES`, so a new guest-media format
   cannot silently widen what a cover accepts. Widening it also means a new migration for the CHECK
@@ -370,3 +375,25 @@ and `design/fidelity-ledger.md` record verified responsive states. Approved spec
 plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`; `docs/deployment.md` holds the
 wedding and physical-device rehearsal gates, and `docs/rsvp-csv.md` is the guest-list import and
 export contract.
+
+### Mobile image implementation and evidence
+
+Migration 0026 adds `media_upload_transfers`, part/assembly/processing/preview ownership and a protected
+schema marker. Apply it before new code with intake disabled. Keep legacy direct <=20 MiB uploads
+independent of native processing. New formats/larger originals negotiate `parts-v1`, fixed 8 MiB
+parts and a progress-renewed lifetime capped by six hours and current authority. Original bytes are
+never re-encoded. Browser reload recovery stores metadata only and requires File reselection and
+accepted-part hash proof. A 202 or processing state is not a delivery receipt.
+
+The private decoder and preview twin own Containers/DOs in `services/image-decoder/worker`; root owns
+only a service binding plus UploadCompletionWorkflow and ImagePreviewWorkflow. Keep both private
+pools bounded and distinct. Warm reads use recorded derivatives; regeneration coalesces. Failed
+previews cannot undo a stored-original receipt. Deletion requires settled writers and absent objects,
+not expired leases or assumed terminal platform state. Device preparation stays bounded at 40 MiB
+and uses actual Files for canShare; original/ZIP readability is independent of closed admission.
+
+Do not expand public static copy from the known-format registry. Event pickers use authenticated
+capabilities. Committed release configs remain empty until independent real-file, native, load and
+physical-device evidence passes; local emulator/header/browser tests cannot open a case. Use the
+focused A/B/C checks and their `output/verification/mobile-image-tasks` deltas; universal compatibility
+requires the separate complete-corpus gate. Read `docs/deployment.md` before any release operation.

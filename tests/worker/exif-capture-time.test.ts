@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { inspectJpegCaptureTime } from '../../worker/security/exif-capture-time';
+import { withLeadingJpegApps } from '../fixtures/raster-builders';
 import {
   buildExifTiff,
   buildExifTiffSubIfd,
@@ -12,6 +13,14 @@ const DATE_TIME_ORIGINAL = 0x9003;
 const OFFSET_TIME_ORIGINAL = 0x9011;
 
 describe('inspectJpegCaptureTime', () => {
+  it('skips large APP payloads to find capture metadata beyond the old byte window', () => {
+    const jpeg = withLeadingJpegApps(jpegWithExif(buildExifTiffSubIfd([
+      { tag: DATE_TIME_ORIGINAL, value: '2026:09:19 17:42:30' },
+      { tag: OFFSET_TIME_ORIGINAL, value: '-05:00' },
+    ])));
+    expect(inspectJpegCaptureTime(jpeg)).toEqual({ dateTimeOriginal: '2026:09:19 17:42:30', offsetTimeOriginal: '-05:00' });
+  });
+
   it('reads DateTimeOriginal from a little-endian APP1 before Start of Scan', () => {
     const jpeg = jpegWithExif(buildExifTiff([
       { tag: DATE_TIME_ORIGINAL, value: '2026:09:19 17:42:30' },

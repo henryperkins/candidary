@@ -8,6 +8,9 @@ import type { AppEnv } from '../../worker/env';
 import { finalizedMediaObjectKey, mediaReservationObjectKey } from '../../worker/storage/media-keys';
 import { getOrCreatePreview } from '../../worker/storage/previews';
 import { exchangeEventEntry, futureCalendarDate, withRecordingImages } from './helpers';
+import { structuralPng, withLeadingJpegApps } from '../fixtures/raster-builders';
+import { jpegWithoutExif } from './jpeg-exif';
+import { primaryHeif } from '../fixtures/image-container-builders';
 
 const testEnv = env as AppEnv & { TEST_MIGRATION_QUERIES: string };
 const origin = env.APP_ORIGIN;
@@ -124,12 +127,7 @@ function expectPrivateToOneReader(response: Response) {
 }
 
 function png(width: number, height: number, size = 64) {
-  const bytes = new Uint8Array(size);
-  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const view = new DataView(bytes.buffer);
-  view.setUint32(16, width);
-  view.setUint32(20, height);
-  return bytes;
+  return structuralPng(width, height, size);
 }
 
 // The one Images fake, shared with the cover suites. The previous inline pair
@@ -151,6 +149,99 @@ beforeEach(async () => {
 });
 
 describe('upload initiation', () => {
+  it.each([
+    ['HEIF primary', 'image/heif', 'heic', false, 200],
+    ['HEIF rejects AVIF', 'image/heif', 'avif', false, 415],
+    ['HEIC sequence', 'image/heic-sequence', 'heic', true, 200],
+    ['HEIC ordinary declaration accepts sequence', 'image/heic', 'heic', true, 200],
+    ['HEIC sequence declaration rejects still', 'image/heic-sequence', 'heic', false, 415],
+  ] as const)('%s follows byte-family and sequence evidence', async (_label, mimeType, family, sequence, expectedStatus) => {
+    const access = await guestAccess();
+    const bytes = primaryHeif({ primaryId: 2, items: [{ id: 1, width: 640, height: 480 }, { id: 2, width: 4032, height: 3024 }], family, sequence });
+    const response = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({ filename: 'phone.heif', mimeType, byteSize: bytes.length, idempotencyKey: 'container', guestName: 'Avery' }),
+    }, testEnv);
+    expect(response.status).toBe(201);
+    const data = (await response.json<any>()).data;
+    const delivered = await createApp().request(data.uploadUrl, {
+      method: 'PUT', headers: { ...writeHeaders(access), 'content-type': mimeType, 'content-length': String(bytes.length) },
+      body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    }, testEnv);
+    expect(delivered.status).toBe(expectedStatus);
+    if (expectedStatus === 200) {
+      const row = await mediaRow(data.media.id);
+      expect([row.width, row.height]).toEqual([4032, 3024]);
+      const original = await testEnv.CANONICAL_MEDIA_BUCKET.get(row.object_key);
+      expect(new Uint8Array(await original!.arrayBuffer())).toEqual(bytes);
+    } else {
+      expect((await delivered.json<any>()).code).toBe('FILE_TYPE_UNSUPPORTED');
+      expect((await mediaRow(data.media.id)).upload_state).toBe('reserved');
+    }
+  });
+
+  it('delivers unchanged JPEG bytes with dimensions after 64 KiB', async () => {
+    const access = await guestAccess();
+    const bytes = withLeadingJpegApps(jpegWithoutExif(), 2);
+    const response = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({ filename: 'late.jpg', mimeType: 'image/jpeg', byteSize: bytes.length, idempotencyKey: 'late-dimensions', guestName: 'Avery' }),
+    }, testEnv);
+    expect(response.status).toBe(201);
+    const data = (await response.json<any>()).data;
+    const delivered = await createApp().request(data.uploadUrl, {
+      method: 'PUT', headers: { ...writeHeaders(access), 'content-type': 'image/jpeg', 'content-length': String(bytes.length) },
+      body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    }, testEnv);
+    expect(delivered.status).toBe(200);
+    expect((await delivered.json<any>()).data.media.uploadState).toBe('stored');
+    const row = await mediaRow(data.media.id);
+    expect([row.width, row.height]).toEqual([6, 4]);
+    const original = await testEnv.CANONICAL_MEDIA_BUCKET.get(row.object_key);
+    expect(new Uint8Array(await original!.arrayBuffer())).toEqual(bytes);
+  });
+
+  it.each([
+    ['IMG.JPG', '', 'image/jpeg'],
+    ['IMG.PNG', 'application/octet-stream', 'image/png'],
+    ['IMG.WEBP', 'binary/octet-stream', 'image/webp'],
+    ['old-name.heic', 'image/jpeg', 'image/jpeg'],
+    ['IMG.PNG', 'image/x-png', 'image/png'],
+  ])('resolves provisional declaration %s (%s) before reserving', async (filename, mimeType, expected) => {
+    const access = await guestAccess();
+    const response = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({ filename, mimeType, byteSize: 1024, idempotencyKey: 'declaration', guestName: 'Avery' }),
+    }, testEnv);
+    expect(response.status).toBe(201);
+    const data = (await response.json<any>()).data;
+    expect(data.media.mimeType).toBe(expected);
+    expect(keysOf(data.media)).toEqual(UPLOAD_MEDIA_KEYS);
+  });
+
+  it.each(['image/jpeg', 'image/heic'])('keeps a 12 MiB %s on existing ingress without a decoder', async (mimeType) => {
+    const access = await guestAccess();
+    const response = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({ filename: 'phone.photo', mimeType, byteSize: 12 * 1024 * 1024, idempotencyKey: 'large-legacy', guestName: 'Avery' }),
+    }, testEnv);
+    expect(response.status).toBe(201);
+    const data = (await response.json<any>()).data;
+    expect(data.uploadUrl).toBe(`/api/event/${access.event.slug}/uploads/${data.media.id}/content`);
+    expect((await mediaRow(data.media.id)).declared_byte_size).toBe(12 * 1024 * 1024);
+  });
+
+  it.each(['image/dng', 'image/x-adobe-dng', ''])('does not admit DNG with declaration %s or reserve quota', async (mimeType) => {
+    const access = await guestAccess();
+    const response = await createApp().request(`/api/event/${access.event.slug}/uploads`, {
+      method: 'POST', headers: writeHeaders(access),
+      body: JSON.stringify({ filename: 'phone.DNG', mimeType, byteSize: 1024, idempotencyKey: 'new-family', guestName: 'Avery' }),
+    }, testEnv);
+    expect(response.status).toBe(415);
+    expect((await response.json<any>()).code).toBe('FILE_TYPE_UNSUPPORTED');
+    expect((await env.DB.prepare('SELECT COUNT(*) AS count FROM media').first<{ count: number }>())?.count).toBe(0);
+  });
+
   it('reserves quota and returns an authenticated same-origin upload ingress', async () => {
     const access = await guestAccess();
     const payload = {
@@ -932,8 +1023,9 @@ describe('upload finalization and private delivery', () => {
       IMAGES: undefined,
     } as unknown as AppEnv;
 
+    // An Images outage is retryable unavailability, never a reason to serve or cache the original.
     await expect(getOrCreatePreview(noImagesEnv, finalized))
-      .rejects.toMatchObject({ code: 'FILE_TYPE_UNSUPPORTED', status: 503 });
+      .rejects.toMatchObject({ code: 'IMAGE_PREVIEW_UNAVAILABLE', status: 503 });
     expect(await env.MEDIA_BUCKET.head(`events/${access.event.id}/previews/${reserved.id}.webp`)).toBeNull();
   });
 });

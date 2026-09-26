@@ -3,6 +3,14 @@ import type { PhotoExportEntryView } from '../../shared/photo-exports';
 import { prepareDeviceBatch } from '../../src/features/gallery/photo-export-device';
 const entry = (id: string, byteSize = 2): PhotoExportEntryView => ({ mediaId: id, position: 1, filename: `${id}.jpg`, mimeType: 'image/jpeg', byteSize, state: 'pending' });
 describe('photo export device batches', () => {
+  it('offers known RAW originals as Files while skipping originals above the 40 MiB device bound before reading',async () => {
+    const read=vi.fn(async (item:PhotoExportEntryView) => new File(['ab'],item.filename,{type:item.mimeType}));
+    const batch=await prepareDeviceBatch([{...entry('too-big',40*1024**2+1),mimeType:'image/dng'},
+      {...entry('raw'),filename:'raw.dng',mimeType:'image/dng'}],read,new AbortController().signal);
+    expect(read).toHaveBeenCalledTimes(1); expect(batch.preparedIds).toEqual(['raw']);
+    expect(batch.files[0]).toBeInstanceOf(File); expect(batch.files[0]!.type).toBe('image/dng');
+    expect(batch.failedIds).toEqual(['too-big']);
+  });
   it('returns actual originals and bounds count, bytes and concurrency', async () => {
     let active = 0; let peak = 0;
     const read = vi.fn(async (item: PhotoExportEntryView) => {

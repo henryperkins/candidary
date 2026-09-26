@@ -113,6 +113,14 @@ afterEach(() => {
 });
 
 describe('browser upload transport cancellation', () => {
+  it('accepts a negotiated resumable reservation without a direct upload URL', async () => {
+    const transfer={id:'transfer-a',mediaId:'media-a',state:'receiving',partBytes:8*1024**2,partCount:1,acceptedParts:[],expiresAt:'2026-08-20T13:00:00.000Z',hardExpiresAt:'2026-08-20T18:00:00.000Z',previewState:'pending'};
+    const fetch=vi.fn((_path:string,_init?:RequestInit) => response({items:[{idempotencyKey:'item-a',status:'accepted',alreadyDelivered:false,transport:'parts-v1',media:{id:'media-a',mimeType:'image/dng',uploadState:'reserved'},transfer}]}));
+    vi.stubGlobal('fetch',fetch);
+    const results=await createBrowserTransport({kind:'guest',slug:'example',guestName:'Avery'}).reserve([item()]);
+    expect(results[0]).toMatchObject({status:'accepted',reservation:{transfer,mediaId:'media-a'}});
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string).files[0].transport).toBe('parts-v1');
+  });
   it('sends same-origin ingress with both event and host credential pairs', async () => {
     Object.defineProperty(document, 'cookie', {
       configurable: true,
@@ -465,6 +473,7 @@ describe('browser upload transport cancellation', () => {
             byteSize: 5,
             idempotencyKey: 'item-a',
             caption: null,
+            transport: 'parts-v1',
           }],
         }),
       }),
@@ -549,6 +558,7 @@ describe('browser upload transport cancellation', () => {
             byteSize: 5,
             idempotencyKey: 'item-a',
             caption: null,
+            transport: 'parts-v1',
           }],
         }),
       }),
