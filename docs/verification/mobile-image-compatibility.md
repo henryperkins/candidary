@@ -4,11 +4,19 @@ Date: 2026-09-26. Baseline: `eceb4053b572562ed00247a7c6469a2599416723`.
 Working branch: `codex/mobile-image-compatibility` (`origin/main` observed on 2026-09-25: `fa4aae3`,
 which was UI-only and did not overlap this branch; refresh before integration).
 
-**Universal compatibility is not verified. Extended admission remains closed.**
-Both committed release lists are empty. No image publication, registry push, remote D1 migration,
-branch push, deployment, live load or physical-device run has happened. Local native qualification
-now covers 29 of the 32 required cases. Every case is still unqualified end to end because the
-deployed, load, iOS and Android lanes have no evidence yet.
+**Universal compatibility is not verified. Production admission remains closed.**
+On 2026-09-26 the owner approved the checkpoint-then-squash preview sequence and authorized preview
+steps 1–8. The following are done:
+
+- Preview D1 was migrated to 0026.
+- The decoder was published by digest and deployed as the private preview twin.
+- `candidary-preview` runs local checkpoint C1.
+- The 29 locally qualified cases are open on **preview D1 only**.
+
+The committed release records at C1 are preview candidates. The release verifier refuses them as not
+releasable, and they must never merge. No branch push, production change, load run or physical-device
+run has happened. Local native qualification covers 29 of the 32 required cases. Every case is still
+unqualified end to end until its deployed, load, iOS and Android lanes have evidence.
 
 ## Current state
 

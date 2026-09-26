@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const TASK_FILES = {
+  C24: ['tests/fixtures/mobile-images/manifest.json'],
   C20b: ['tests/worker/upload-api.test.ts'],
   C20a: ['tests/worker/mobile-image-admission.test.ts'],
   C20: ['config/image-decoder-release.json', 'config/mobile-image-release.json',

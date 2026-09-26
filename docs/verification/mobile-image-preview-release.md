@@ -2,9 +2,22 @@
 
 Status: prepared locally on 2026-09-25 and corrected on 2026-09-26 (task C16) after a read-only
 preflight of the preview account. On 2026-09-26 the owner approved the checkpoint-then-squash sequence
-(29 candidate cases at 128 MiB) and authorized steps 1–8. **Step 1 is done:** preview D1 is at 0026,
-applied through the import path described there, and the deployed root passed the old-code check.
-Later steps are recorded in the task ledger as they complete. Each step marked **[authorization]** is
+(29 candidate cases at 128 MiB) and authorized steps 1–8. **Steps 1–7 are done:**
+
+- Preview D1 is at 0026 (import path, step 1), and the old root passed the old-code check.
+- The decoder is published as `…/candidary-image-decoder@sha256:d014ac551e24…` (platform-manifest
+  push, step 2) and qualifies 39/39 on the pulled reference.
+- Local checkpoint C1 is `86775849589b` (tag `mobile-image-preview-candidate-1`); fresh clones
+  reproduce `a4c23860…`.
+- The private decoder twin runs as version `ca4d8ff4…`.
+- `candidary-preview` runs C1 as version `088a12f3…`, with all five Workflows.
+- The 29 candidate cases are open on preview D1 only.
+
+The recorder's independent review found no Critical or Important issues, and step 8 (the live lane)
+has started on a dedicated preview event. At the owner's request the branch, including checkpoint C1,
+was pushed to `origin/codex/mobile-image-compatibility`. The candidate records on it must not merge.
+The single final commit therefore comes from a GitHub squash-merge after the records-only change, or
+from a separately approved rewrite of the branch. Details are in the task ledger. Each step marked **[authorization]** is
 an external action that needs the release owner's explicit, separate approval. Earlier approvals (the
 local implementation, the 20 MiB animated-preview cap, "Resume") do not cover any of them.
 
@@ -257,7 +270,7 @@ the worktree:
 ```powershell
 git add -A
 git diff --cached --name-only        # review against the allowlist; no originals/, references/, evidence/, output/, .dev.vars
-git diff --cached --check            # only the ~424 preserved CR lines in CMakeLists.txt, decode_raw.cpp, dependencies.lock.json
+git diff --cached --check            # ~2,366 expected lines: preserved CR bytes in -text files (manifest, native sources, licence copies), generated decoder types, one plan EOF blank line
 git commit -m "feat: preview candidate for mobile image compatibility (checkpoint C1)"
 git tag mobile-image-preview-candidate-1
 git status --porcelain --untracked-files=all   # must print nothing
