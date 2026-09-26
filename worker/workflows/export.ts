@@ -67,10 +67,10 @@ async function immutableAlbumMediaEntries(
   return rawEntries === null ? entries : resolveFrozenAlbumOrder(rawEntries, entries);
 }
 
-// Album originals are private until the final owned Ready transition. Group small
-// transport fragments into 1 MiB reads so each fragment does not cost two D1 trips.
-// Other export protocols retain their per-fragment checks.
-const ALBUM_SOURCE_READ_BYTES = 1024 * 1024;
+// Complete and Album originals are private until the final owned Ready transition.
+// Group small transport fragments into 1 MiB reads so each fragment does not
+// cost two D1 trips. Selection retains its per-fragment expiry checks.
+const LEGACY_SOURCE_READ_BYTES = 1024 * 1024;
 
 /** Fence both sides of each bounded read, including EOF, and retain backpressure. */
 function ownedSourceStream(body: ReadableStream<Uint8Array>, assertActive: () => Promise<void>, expectedBytes?: number, readBatchBytes = 0) {
@@ -218,7 +218,7 @@ export async function processExport(
           recordOriginalRead(env, job.eventId, 'export', object.size);
           const source = ownedSourceStream(object.body, assertActive,
             job.kind === 'selection' ? media.byteSize ?? media.declaredByteSize : undefined,
-            job.kind === 'album' ? ALBUM_SOURCE_READ_BYTES : 0);
+            job.kind === 'album' || job.kind === 'complete' ? LEGACY_SOURCE_READ_BYTES : 0);
           sources.push(source);
           await assertActive();
           if (job.kind === 'selection' && (object.size !== (media.byteSize ?? media.declaredByteSize)

@@ -21,6 +21,30 @@ from a separately approved rewrite of the branch. Details are in the task ledger
 an external action that needs the release owner's explicit, separate approval. Earlier approvals (the
 local implementation, the 20 MiB animated-preview cap, "Resume") do not cover any of them.
 
+**Ubuntu resumption, 2026-09-26:** read-only Cloudflare checks confirmed C1 still serves 100% of
+preview traffic, the private decoder version is unchanged, all five Workflows exist, and preview D1
+has schema 26/protocol 1 with 29 of 32 admission rows enabled. The earlier step-8 complete export
+failed with `Too many API requests by single Worker invocation.` Its 39-original, 176,437,716-byte
+job remains `running` in D1 while its Workflow is `errored`; the existing event and job were preserved.
+The local fix extends Album's existing 1 MiB bounded source reads to complete exports, retaining
+ownership/deletion checks before and after each read and leaving selection expiry checks unchanged.
+The regression first failed with 591 ownership checks; the focused export union then passed 20/20.
+Independent review found zero Critical/Important findings and one deferred Minor note about exact
+ZIP filename assertions. The recorder's separate focused suite passed 49/49. No repository-wide
+gates ran. The owner subsequently approved a local checkpoint containing this fix, its deployment
+to `candidary-preview`, and continuation of step 8 on a fresh dedicated event. This checkpoint is
+the replacement candidate for that run; C1 does not contain the fix. Deployment and live results
+will be retained under the ignored recovery evidence directory.
+
+The new checkout recovered and SHA-verified 38/39 fixture records (36/37 distinct originals).
+`commons-poznan-neon-webp-animated` remains unavailable because its pinned source returns HTTP 429.
+The request-free recorder plan reports 38 planned transfers and zero requests. The previous
+machine's ignored native reports, independent references, task ledger and live-event credentials
+are absent here. Local recovery/test/review records are under
+`output/verification/mobile-image-resume/`. No live evidence pointers, candidate records or decoder
+pins were changed during recovery. The approval covers preview continuation only, with no production
+deployment, merge or branch push.
+
 This plan applies the migration-first order in `docs/deployment.md` (**Mobile-image admission and
 migration 0026**) to the **preview** environment only: migration first, private decoder second, main
 Worker third, intake last. Production follows later under its own authorization.
