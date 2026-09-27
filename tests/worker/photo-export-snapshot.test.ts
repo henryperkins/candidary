@@ -285,7 +285,7 @@ describe('photo export device ownership', () => {
     const archive=await repository.prepareArchiveFallback(eventId,job.id,principal,crypto.randomUUID(),now);
     expect(archive).toMatchObject({ destination: 'archive',state: 'queued',mediaCount: 1,totalBytes: 12 });
     expect((await repository.listEntries(eventId,archive.id,principal,0,10,now)).entries.map(e => e.mediaId)).toEqual([id(1)]);
-    await expect(db.prepare(`UPDATE media_object_write_tombstones SET suppression_started_at=? WHERE media_id=?`).bind(now,id(1)).run()).rejects.toThrow(/holds this source/);
+    await expect(db.prepare(`UPDATE media_object_write_tombstones SET suppression_started_at=? WHERE media_id=?`).bind(now,id(1)).run()).rejects.toThrow(/recoverable photo owns this object/);
   });
   it('returns a controlled conflict when another fallback wins immediately before the clone batch', async () => {
     await photos(1); const job = await create();

@@ -373,9 +373,19 @@ UNION ALL
 SELECT 'photo_export_admission_row' AS name, json_object(
   'singleton', singleton, 'enabled', enabled, 'worker_version_id', worker_version_id, 'admitted_at', admitted_at
 ) AS sql FROM photo_export_admission
-ORDER BY name;`;
+ORDER BY name;
+SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (
+  'media_image_previews', 'media_processing', 'media_upload_assemblies',
+  'media_upload_parts', 'media_upload_transfers', 'mobile_image_admission',
+  'mobile_image_schema'
+) ORDER BY name;`;
 
-const INVARIANT_STATEMENT_COUNT = 31;
+const INVARIANT_STATEMENT_COUNT = 32;
+const EXPECTED_MOBILE_IMAGE_TABLES = [
+  'media_image_previews', 'media_processing', 'media_upload_assemblies',
+  'media_upload_parts', 'media_upload_transfers', 'mobile_image_admission',
+  'mobile_image_schema',
+];
 
 /**
  * Pinned, not derived.
@@ -401,9 +411,11 @@ const INVARIANT_STATEMENT_COUNT = 31;
  * Twenty-four with `0024_guest_gallery_pagination.sql`, which adds stable guest
  * gallery publication ordering. Twenty-five with
  * `0025_library_delivery_sequence.sql`, which adds the Library arrival ledger.
+ * Twenty-six with `0026_mobile_image_compatibility.sql`, which expands media
+ * formats and adds durable upload transfer and processing inventory.
  * Count and terminal schema assertions move together here.
  */
-const EXPECTED_MIGRATION_COUNT = 25;
+const EXPECTED_MIGRATION_COUNT = 26;
 
 /**
  * Exact normalized sqlite_master trigger SQL, pinned as SHA-256 so the twelve
@@ -460,13 +472,18 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   media_album_pick_version_on_legacy_unpick: '6828c1b9287e68d1571dafd500f3793dadb5d322b174d791d78d53b0b8dfd6e4',
   media_delivery_sequence_insert: 'd7353b6d82d68af98a0654eacf7255afb1a46cbbe8b87c877ff49d66f8a34534',
   media_delivery_sequence_stored: '07cc94063cc3534315ed7a538e526a0d9501cc1850cec9fd724ae709d3d04bc9',
+  media_image_preview_delete: '5bbe2aaf01d89ae3f9164408444fc8074abe6ed891e9f65358954c0e442884f9',
+  media_image_preview_generation_retained: '0e2e62dfe5da1f257ca29374c1584469edb586a68a60cb32bbf35fd73ba805c2',
+  media_image_preview_identity: '99dcdb7ecab032d5ad21c5184e64a86dd6be86231298787d59ae465dbf6ab18f',
+  media_image_preview_inventory: 'e9d720091890436a8f16d4aca25115e3d76911a75c9dec1da72fa2b1b2523833',
+  media_image_preview_owner: '4f9409c15af68b1015b881db609f79f8881ee34c7cb68c005e50ec4bd77c9156',
   media_object_promotion_inventory_insert: 'ec75363b45f7be245506e400dca3329e06abe7f388334a6c13b01d64d237579e',
   media_object_promotion_inventory_update: '3523593400afa87a2ba6ac0432deee1686d944cfd4b2aa6a35fba2e5cbb69ea6',
-  media_object_promotion_reservation_capability_guard: 'f7473c9ffeee90d78349f46bf91bc20e70da52bc7bb49f41f176ba0ce1f3848a',
+  media_object_promotion_reservation_capability_guard: 'd0f14af60a8c1d1e996d28c4bf72b07925e3454f7cc0ca9fd8eeaa90c879b42b',
   media_object_promotion_verified_delete_guard: 'a79214e3498655ddfb022849cea069eea5f2921caab045e7fab2151d10d60246',
   media_object_promotion_verified_proof_immutable: '9f5ca9c55883615e9456ba100488a7ad412f611ed3fad6bac14c8c987936f026',
-  media_object_write_tombstone_guard_insert: '04b87d3211dbe8be03775cc8d7d9a41c64729191b01bfbc9846e5fc1c74f1072',
-  media_object_write_tombstone_guard_update: '7bf72b57df964e037fc2b71ed0dc2390d802d978484bd5497e6fb891b7a7171d',
+  media_object_write_tombstone_guard_insert: '5c9383d5c63bb695cf2277aaf1f801cd450f55a3f64734f94390706d8e063461',
+  media_object_write_tombstone_guard_update: '716ad87c863ad9a845451a0ab95f039e7ecf9c6737596dd776828901ef7177a9',
   media_object_write_tombstone_immutable: '7d193fa0096335ef5fd436ddfbeface89161b1495adfc3ac2a9207d711570c2d',
   media_object_write_tombstone_inventory_insert: '2abaf6e5fde190f5a4d229494f06c3fcde4fbf4b5e9d8098e5df3e56f056fc7c',
   media_object_write_tombstone_inventory_update: 'a48894d8a612135cd7669ed54fb2b064b88244e2dc0daec29c8d1ec782612187',
@@ -478,6 +495,24 @@ const EXPECTED_TRIGGER_SQL_SHA256: Record<string, string> = {
   media_stored_legacy_guard_update: '1894aac1a305d5c42f633d676cccb75bf6aaec48dc433fb34c1b800240fb5c16',
   media_trash_pair_insert: 'c8fa277cd7f21221d9e9b7e0e090957173cf2280c2f6fc2ebf1e61bc0754a2b3',
   media_trash_pair_update: '934c187edbcb7df13af7c4a0b1e9c6249f65ad056dccb080da9fe9ad4f703bd2',
+  media_upload_assembly_delete: 'ce971f83bec00e8ca371859068bc119db897075e45c8d70e1d839d878188e1b7',
+  media_upload_assembly_identity: 'e65f0ffe79013e4f9e1ed332e1058485bbda05b1efa623eafc995908f62f89d9',
+  media_upload_part_delete: '60ab094a337c19acd29c81d5e7f4f5a2811070e463f4c09553800306c775875b',
+  media_upload_part_identity: '355633b0ec410972f84ccc7761b6b695c1e0441d62d17e4e64e2d29f95711e95',
+  media_upload_transfer_delete: '097104faa72beb47f12674cbe8fad5c75db495402af42f8f484c009be95b9ec9',
+  media_upload_transfer_fence: '80b502cb989ca1ee4aad10592740e93a60b91df29db188e7824db30ed69b8261',
+  media_upload_transfer_identity: '7add94ceda84239f6cac03e8ef8fcbe90603c5b47666469de99abe8fd782a7e2',
+  media_upload_transfer_owner: 'c4e1e40f509ddf756bfec27270857ab21a0d05b87c59ca21e842df2d4290f347',
+  mobile_image_admission_no_delete: '19cf1108e8a4de8d0feb22857849ca6f60bae4cc2fe5198b0e9deb8c8e02f3ca',
+  mobile_image_admission_no_insert: '69c188a8f3582362944b4cecfd2bb72f7dd7f8637000ac223907d4174eff058f',
+  mobile_image_admission_update: '77b1f784ed35494d1385f1e796ad45f3124142bb75d47f4e29ca565769dc6941',
+  mobile_image_event_fence: '745b772d4170d953f81c6248295cf8981baa94b8f7b2d4cf6e0ab1c2931d0f8b',
+  mobile_image_event_purge_guard: '3a5290a11f5e61d4f7b66732a2038cef5cf204503635b811511ebe4ff350f328',
+  mobile_image_media_fence: '38b24fdcd85ead60d4d48f4834caa756e15bfcdbd083b09f14fbd22f01e3c4aa',
+  mobile_image_schema_no_delete: '73e6fa350f67e75ade8223ca06d9ac4b06ffa86c11685cfd8fc5af9fc73555f9',
+  mobile_image_schema_no_insert: 'b6e6c773dcebf74e7bb0c7f6dc8d1d0bb6d501b48ae9dbb40797f521c2d679ae',
+  mobile_image_schema_no_update: 'ed048301c0ea49ca1cf4c7acbc222957a369080e60aa67a40cd329697616fafc',
+  mobile_preview_tombstone_suppress: 'e5b560bc5db1a391b77e74c81bcd404b5ac17e83bc9730ecd4835e32996cede2',
   photo_export_admission_no_delete: '12d8854c9c6b90b1685b8f86a7dbc5cb601a116b951378e183aea1dc72b4fa6c',
   photo_export_admission_no_insert: 'c2fb45db041025f6724aff78e6f1af8068f8a14ee6148ac7c435557087cc78e6',
   photo_export_admission_update: '85c17b68715b2ebfd085211dd71439253506806681a896f187b2366fea8995ec',
@@ -1835,6 +1870,11 @@ export function parseWranglerInvariantOutput(
   assertManagerUploadAlbumEraForeignKeys(results[28]!);
   assertManagerUploadAlbumEraIndexes(results[29]!);
   assertPhotoExportSchema(results[30]!);
+  assertExactList(
+    results[31]!.map((value, index) => exactRecord(value, ['name'], `Mobile image table ${index + 1}`).name as string),
+    EXPECTED_MOBILE_IMAGE_TABLES,
+    'Mobile image table set',
+  );
 
   // `terminalSchema` deliberately keeps its three keys. `exactRecord` rejects
   // unknown fields, the literal recurs in four test files, and

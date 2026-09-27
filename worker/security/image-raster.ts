@@ -1,5 +1,5 @@
 import type { ImageEvidence, ImageFamily } from '../../shared/image-formats';
-import { imageAscii, imageView, ImageInspectionError, ImageReadCursor, malformed, type ImageParser } from './image-reader-core';
+import { imageAscii, imageView, ImageInspectionError, malformed, type ImageParser, type ImageReadCursor } from './image-reader-core';
 
 export function imageEvidence(family: ImageFamily, width: number, height: number, frameCount = 1, isSequence = false, primaryIndex = 0): ImageEvidence {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) malformed('Image dimensions are invalid.');

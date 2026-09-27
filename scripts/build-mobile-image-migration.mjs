@@ -64,6 +64,12 @@ export async function generateMigration() {
   const tables = ['media', 'media_object_promotions'];
   const triggers = schema.filter((row) => row.type === 'trigger' && /\b(?:media|media_object_promotions)\b/u.test(row.sql));
   const indexes = schema.filter((row) => row.type === 'index' && tables.includes(row.tbl_name));
+  // Preserve 0016's creation order for the overlapping private-gallery indexes.
+  // Without statistics SQLite prefers the later index for an otherwise tied plan.
+  const favoriteIndex = indexes.findIndex((row) => row.name === 'media_private_gallery_favorites');
+  const timelineIndex = indexes.findIndex((row) => row.name === 'media_private_gallery_timeline');
+  if (favoriteIndex < 0 || timelineIndex < 0) throw new Error('Private-gallery indexes are missing.');
+  [indexes[favoriteIndex], indexes[timelineIndex]] = [indexes[timelineIndex], indexes[favoriteIndex]];
   const columns = Object.fromEntries(tables.map((table) => [table, db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)]));
   if (columns.media.length !== 29 || triggers.length !== 30) throw new Error('Baseline schema drift: review the rebuild before regenerating.');
   const statements = [

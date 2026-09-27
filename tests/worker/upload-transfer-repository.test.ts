@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { eventAccess, resetDatabase, testEnv, trashMedia, uploadPending } from './helpers';
+import { eventAccess, resetDatabase, trashMedia, uploadPending } from './helpers';
 import { UploadTransferRepository, transferWindowSeconds, type TransferOutcome, type WriteClaim } from '../../worker/db/upload-transfers';
 import { ImagePreviewRepository } from '../../worker/db/image-previews';
 import { MediaProcessingRepository } from '../../worker/db/media-processing';

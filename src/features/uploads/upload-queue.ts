@@ -35,7 +35,7 @@ export interface UploadQueueItem {
 }
 
 export type ReservationResult =
-  | { id: string; status: 'accepted'; reservation: UploadReservation }
+  | { id: string; status: 'accepted'; reservation: UploadReservation; serverDelivered?: true }
   | { id: string; status: 'delivered'; mediaId: string }
   | { id: string; status: 'canceled' }
   | { id: string; status: 'rejected'; error: string; failure?: UploadFailure };

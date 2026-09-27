@@ -149,7 +149,10 @@ export function createBrowserTransport(
         if (status.transfer?.id !== reservation.transfer!.id || status.transfer.mediaId !== reservation.mediaId) {
           throw new Error(RESERVATION_FAILED);
         }
-        resumed.push({id:item.id,status:'accepted',reservation:{...reservation,transfer:status.transfer}});
+        if (status.media && status.media.id !== reservation.mediaId) throw new Error(RESERVATION_FAILED);
+        resumed.push({id:item.id,status:'accepted',reservation:{...reservation,transfer:status.transfer},
+          ...(status.transfer.state === 'delivered' && status.media?.uploadState === 'stored'
+            ? {serverDelivered:true as const} : {})});
       }
       const files = items.filter(item => !item.reservation?.transfer).map(({ id, file }) => ({
         filename: file.name,
@@ -188,9 +191,14 @@ export function createBrowserTransport(
               : {}),
           };
         }
-        if (item.transport === 'parts-v1' && item.transfer && item.media?.id === item.transfer.mediaId) {
+        if (item.transport === 'parts-v1') {
+          if (!item.transfer || !item.media || item.media.id !== item.transfer.mediaId) {
+            return { id: item.idempotencyKey, status: 'rejected', error: RESERVATION_FAILED };
+          }
           return { id:item.idempotencyKey, status:'accepted', reservation:{mediaId:item.media.id,
-            uploadUrl:'', mimeType:item.media.mimeType, transfer:item.transfer} };
+            uploadUrl:'', mimeType:item.media.mimeType, transfer:item.transfer},
+            ...(item.alreadyDelivered && item.media.uploadState === 'stored' && item.transfer.state === 'delivered'
+              ? {serverDelivered:true as const} : {}) };
         }
         if (item.alreadyDelivered && item.media?.uploadState === 'stored') {
           return { id: item.idempotencyKey, status: 'delivered', mediaId: item.media.id };

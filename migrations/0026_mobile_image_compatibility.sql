@@ -225,15 +225,15 @@ ON media_object_promotions(event_id, state, updated_at);
 CREATE INDEX media_object_promotions_schedule
 ON media_object_promotions(state, updated_at, media_id);
 
+CREATE INDEX media_private_gallery_timeline
+ON media(event_id, timeline_at, id)
+WHERE upload_state = 'stored' AND deleted_at IS NULL;
+
 CREATE INDEX media_private_gallery_favorites
 ON media(event_id, timeline_at, id)
 WHERE upload_state = 'stored'
   AND deleted_at IS NULL
   AND favorited_at IS NOT NULL;
-
-CREATE INDEX media_private_gallery_timeline
-ON media(event_id, timeline_at, id)
-WHERE upload_state = 'stored' AND deleted_at IS NULL;
 
 CREATE INDEX media_recently_deleted_page
 ON media(event_id, trashed_at DESC, id DESC)

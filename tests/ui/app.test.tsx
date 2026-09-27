@@ -292,7 +292,7 @@ describe('public Candidary experience', () => {
 
     await userEvent.setup().click(within(faq).getByText('What can guests send?'));
     expect(questions[0]).not.toHaveAttribute('open');
-    expect(within(faq).getByText(/up to 20 MB per image/)).toBeVisible();
+    expect(within(faq).getByText(/up to 20 MiB per image/)).toBeVisible();
   });
 
   it('carries a footer with both account doors and the retention fact', () => {
@@ -548,6 +548,11 @@ const GUEST_EVENT = {
   eventTimezone: 'America/Chicago', eventStartAt: '2026-09-19T22:00:00.000Z',
   lifecycleRecheckAfterMs: null, guestReadSurfaces: { available: true, reason: null },
 };
+const GUEST_UPLOAD_CAPABILITIES = {
+  mimeTypes: ['image/jpeg'], extensions: ['.jpg'],
+  directMaxBytes: 20 * 1024 ** 2, maxOriginalBytes: 20 * 1024 ** 2,
+  partBytes: 8 * 1024 ** 2,
+};
 const EMPTY_GUESTBOOK = {
   items: [], nextCursor: null, ownUnshared: [], ownUnsharedCount: 0, ownUnsharedNextCursor: null,
 };
@@ -736,6 +741,7 @@ describe('guest event experience', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: { ...GUEST_EVENT, galleryVisible: true }, role: 'guest' });
+      if (url.endsWith('/uploads/capabilities')) return json(GUEST_UPLOAD_CAPABILITIES);
       // Exactly `GuestGalleryMediaView`. The guest gallery answer carries no original filename,
       // publication status, or storage metadata at all, so the fixture must not either.
       if (url.endsWith('/gallery')) return json({ media: [
@@ -753,7 +759,8 @@ describe('guest event experience', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<RouterProvider router={createAppRouter(['/event/maya-theo'])} />);
     expect(await screen.findByRole('heading', { name: 'We would love to see the day through your eyes.' })).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(fetchMock.mock.calls.map(([input]) => String(input)))
+      .toEqual(['/api/event/maya-theo', '/api/event/maya-theo/uploads/capabilities']));
     expect(screen.getByText(/Maya & Theo/, { selector: '.photo-drop__event' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Take a photo' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Choose recent photos' })).toBeVisible();
@@ -765,10 +772,10 @@ describe('guest event experience', () => {
        and that filename no longer crosses the boundary at all. */
     expect(screen.getByAltText('Shared photo')).toBeVisible();
     expect(screen.getByText('Shared photo', { selector: 'figcaption span' })).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     await user.click(screen.getByText(/Guestbook/, { selector: 'span' }));
     expect(screen.getByText('To many happy years.')).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   /* The other half of the boundary. A filename is the uploader's device talking, so it does not
@@ -779,6 +786,7 @@ describe('guest event experience', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/api/event/maya-theo')) return json({ event: GUEST_EVENT, role: 'guest' });
+      if (url.endsWith('/uploads/capabilities')) return json(GUEST_UPLOAD_CAPABILITIES);
       if (url.endsWith('/contributions')) return json({ media: [
         {
           id: 'mine-a', originalFilename: 'first-dance.jpg', caption: 'First dance',
@@ -804,7 +812,7 @@ describe('guest event experience', () => {
     // The count is the received ones, not everything this device ever started.
     expect(screen.getByText('1 received')).toBeVisible();
     expect(fetchMock.mock.calls.map(([input]) => String(input)))
-      .toEqual(['/api/event/maya-theo', '/api/event/maya-theo/contributions']);
+      .toEqual(['/api/event/maya-theo', '/api/event/maya-theo/uploads/capabilities', '/api/event/maya-theo/contributions']);
   });
 
   it('gives the note field a persistent label rather than leaving it to a placeholder', async () => {

@@ -17,7 +17,7 @@ function metered(base: AppEnv = testEnv) {
 async function snapshot(response: Response) {
   const bytes = new Uint8Array(await response.arrayBuffer());
   const json = (response.headers.get('content-type') ?? '').includes('application/json');
-  const body = json ? (({ requestId: _requestId, ...rest }) => rest)(JSON.parse(new TextDecoder().decode(bytes))) : bytes;
+  const body = json ? Object.fromEntries(Object.entries(JSON.parse(new TextDecoder().decode(bytes))).filter(([key]) => key !== 'requestId')) : bytes;
   return { status: response.status, headers: [...response.headers.entries()], body };
 }
 

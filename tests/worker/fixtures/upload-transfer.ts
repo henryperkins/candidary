@@ -27,7 +27,8 @@ export async function createTransferHarness(options: {manager?:boolean;realStora
   const credentials = options.manager ? access.manager : access.guest;
   const base = options.manager ? `/api/manage/events/${access.event.id}/uploads` : `/api/event/${access.event.slug}/uploads`;
   const app = createApp();
-  const hooks = {create:async () => {},part:async () => {},partAfter:async () => {},abort:async () => {},complete:async () => {},completeAfter:async () => {},dispatch:async () => {},put:async (_key:string) => {}};
+  const noopPut: (key: string) => Promise<void> = async () => {};
+  const hooks = {create:async () => {},part:async () => {},partAfter:async () => {},abort:async () => {},complete:async () => {},completeAfter:async () => {},dispatch:async () => {},put:noopPut};
   const storageErrors: unknown[] = [];
   const handles = new Map<string,R2MultipartUpload>();
   const create = vi.fn(async (key:string) => {

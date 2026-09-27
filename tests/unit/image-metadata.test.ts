@@ -43,25 +43,6 @@ function webp(width: number, height: number) {
   return bytes;
 }
 
-function isoBmff(brand: 'heic' | 'mif1', width: number, height: number) {
-  const bytes = new Uint8Array(40);
-  const view = new DataView(bytes.buffer);
-  const encoder = new TextEncoder();
-
-  view.setUint32(0, 20);
-  bytes.set(encoder.encode('ftyp'), 4);
-  bytes.set(encoder.encode(brand), 8);
-  view.setUint32(12, 0);
-  bytes.set(encoder.encode(brand), 16);
-
-  view.setUint32(20, 20);
-  bytes.set(encoder.encode('ispe'), 24);
-  view.setUint32(28, 0);
-  view.setUint32(32, width);
-  view.setUint32(36, height);
-  return bytes;
-}
-
 describe('image header inspection', () => {
   it.each([
     [structuralPng(1600, 900), 'image/png', 1600, 900],

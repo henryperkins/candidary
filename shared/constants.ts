@@ -1,9 +1,10 @@
 import { LEGACY_UPLOAD_MIME_TYPES } from './image-formats';
+import type { KnownImageMimeType } from './image-formats';
 
 export const SUPPORTED_IMAGE_TYPES: readonly SupportedImageType[] = LEGACY_UPLOAD_MIME_TYPES;
 
 // Storage/read vocabulary is independent of today's conservative intake list.
-export type SupportedImageType = import('./image-formats').KnownImageMimeType;
+export type SupportedImageType = KnownImageMimeType;
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const MAX_EVENT_MEDIA = 10_000;
