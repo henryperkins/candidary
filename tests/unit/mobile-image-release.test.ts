@@ -9,6 +9,7 @@ import { evidenceReader, verifyRelease } from '../../scripts/verify-mobile-image
 import { buildLoadPlan, observationMetrics } from '../../scripts/mobile-image-load-harness.mjs';
 const fp='a'.repeat(64),imageRef=`registry.example/decoder@sha256:${'b'.repeat(64)}`,manifestSha256='c'.repeat(64);
 const profile='mobile-preview-v1';
+type MutableWorkloadProfile = 'capacity-v1'|'operational-v1';
 // Literal closed baselines: the committed release files may hold preview candidate or qualified records.
 const emptyDecoder={protocolVersion:1,previewProfile:profile,releases:[]};
 const emptyMobile={kind:'candidary.mobile-image-release',schemaVersion:26,protocolVersion:1,previewProfile:profile,maxOriginalBytes:512*1024**2,cases:[]};
@@ -161,14 +162,17 @@ describe('external mobile image release evidence',()=>{
     const valid=fixture('operational-v1');
     expect(await valid.run()).toMatchObject({valid:true,admittedCaseIds:['png'],capacityQualified:false,universal:false});
     for(const mutate of [
-      (f:ReturnType<typeof fixture>)=>{f.qualification.qualificationProfile='capacity-v1';},
-      (f:ReturnType<typeof fixture>)=>{f.load.workloadProfile='capacity-v1';},
+      (f:ReturnType<typeof fixture>)=>{const q: {qualificationProfile?:MutableWorkloadProfile}=f.qualification;
+        q.qualificationProfile='capacity-v1';},
+      (f:ReturnType<typeof fixture>)=>{const load: {workloadProfile?:MutableWorkloadProfile}=f.load;
+        load.workloadProfile='capacity-v1';},
       (f:ReturnType<typeof fixture>)=>{f.observations.scenarios[0]!.plan.guests=3;f.load.observationsSha256=f.store(f.observations);},
       (f:ReturnType<typeof fixture>)=>{f.instrumentation.scenarios[0]!.metrics.costPer10000Originals=1;
         f.load.instrumentationSha256=f.store(f.instrumentation);},
       (f:ReturnType<typeof fixture>)=>{f.instrumentation.scope!.workloadProfile='capacity-v1';
         f.load.instrumentationSha256=f.store(f.instrumentation);},
-      (f:ReturnType<typeof fixture>)=>{delete f.instrumentation.scope!.workloadProfile;
+      (f:ReturnType<typeof fixture>)=>{const scope: {workloadProfile?:string}=f.instrumentation.scope!;
+        delete scope.workloadProfile;
         f.load.instrumentationSha256=f.store(f.instrumentation);},
       (f:ReturnType<typeof fixture>)=>{f.corpus.cases[0]!.fixtures[0]!.evidence.ios!.status='missing';},
       (f:ReturnType<typeof fixture>)=>{f.qualification.manifestSha256='0'.repeat(64);},
