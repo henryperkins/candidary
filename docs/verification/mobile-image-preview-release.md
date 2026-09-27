@@ -10,9 +10,16 @@ checks; the practical acceptance record states the limited actual device observa
 Trial-limited device steps can be explicitly deferred. No paid upgrade or full device certification is required.
 Sampled analytics is diagnostic only. HEIC sequences, Live Photo movie companions,
 exhaustive device coverage, capacity/cost and exact telemetry engineering are deferred.
-`universal: false` and `capacityQualified: false` remain truthful. The strict verifier
-and release configuration remain unchanged; they do not block reduced project completion
-and still govern any later strict release. The failed operational run remains FAILED.
+`universal: false` and `capacityQualified: false` remain truthful. The current branch
+pins a `practical-v1` qualification for exactly 29 cases at 128 MiB. With recovered
+local fixtures, `node scripts/verify-mobile-image-release.mjs` reports `valid: true`
+and 29 admitted cases; `--require-universal` exits 1. This profile requires matching
+native/local and live proof for every fixture, while iOS/Android, HEIC sequences,
+Live Photo companions, capacity and exact telemetry remain deferred. The failed
+operational run remains FAILED. The earlier checkpoint is pushed, and this branch carries
+the practical qualification. Review and publication status are tracked with the branch.
+The dated steps below retain their
+historical strict release meaning.
 
 ## Historical preview release sequence and observations
 
@@ -502,7 +509,7 @@ upload/receipt, private preview, metadata, original download and save/share lane
 DEFERRED, with no end-to-end or device-qualified pass. Exhaustive device, full capacity
 and exact accounting qualification remain deferred.
 
-This work remains local and uncommitted and makes no production-release claim. Strict
-release records, admission changes, merge and production deployment remain separate work
+This branch carries the bounded practical qualification and makes no production-release
+claim. Capacity/device certification, admission changes, merge and production deployment remain separate work
 with their applicable checks and authorization. Reduced project completion does not certify
 those release gates.

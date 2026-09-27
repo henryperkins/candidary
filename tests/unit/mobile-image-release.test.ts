@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error Node release script's actual evidence interface is tested here.
-import { verifyRelease } from '../../scripts/verify-mobile-image-release.mjs';
+import { evidenceReader, verifyRelease } from '../../scripts/verify-mobile-image-release.mjs';
 // @ts-expect-error Node rehearsal script's derived-metric interface is tested here.
 import { buildLoadPlan, observationMetrics } from '../../scripts/mobile-image-load-harness.mjs';
 const fp='a'.repeat(64),imageRef=`registry.example/decoder@sha256:${'b'.repeat(64)}`,manifestSha256='c'.repeat(64);
@@ -59,7 +62,84 @@ function fixture(workloadProfile: 'capacity-v1'|'operational-v1' = 'capacity-v1'
     corpus,manifestSha256,readEvidence:async(sha:string)=>evidence.get(sha)});
   return {run,corpus,qualification,load,store,evidence,observations,instrumentation};
 }
+function practicalFixture() {
+  const evidence=new Map<string,Buffer>();
+  const store=(value:unknown)=>{const data=Buffer.from(JSON.stringify(value));const digest=createHash('sha256').update(data).digest('hex');evidence.set(digest,data);return digest;};
+  const caseIds=['png'];
+  const qualification={kind:'mobile-image-qualification',harnessVersion:1,qualificationProfile:'practical-v1',buildFingerprint:fp,
+    imageRef,previewProfile:profile,manifestSha256,maxOriginalBytes:134217728,caseIds,
+    practicalScope:{caseIds:[...caseIds],maxOriginalBytes:134217728,capacityQualified:false,universal:false,deviceCertified:false}};
+  const lane=()=>({status:'pass',buildFingerprint:fp,imageRefs:[imageRef],evidenceSha256:'a'.repeat(64)});
+  const corpus={structureValid:true,complete:false,qualifiedCaseIds:['png'],cases:[{id:'png',status:'missing',fixtures:[
+    {id:'control',sourceSha256:'f'.repeat(64),evidence:{local:lane(),live:lane(),ios:{status:'missing'},android:{status:'missing'}}},
+  ]}]};
+  const decoderRelease={...emptyDecoder,releases:[{imageRef,buildFingerprint:fp,protocolVersion:1,previewProfile:profile,verifiedCaseIds:caseIds,evidenceSha256:''}]};
+  const mobileRelease={...emptyMobile,cases:[{caseId:'png',buildFingerprint:fp,evidenceSha256:'',maxOriginalBytes:134217728}]};
+  const run=(pinned=true)=>{
+    if(pinned){const digest=store(qualification);decoderRelease.releases[0]!.evidenceSha256=digest;mobileRelease.cases[0]!.evidenceSha256=digest;}
+    return verifyRelease({decoderRelease,mobileRelease,corpus,manifestSha256,readEvidence:async(sha:string)=>evidence.get(sha)});
+  };
+  return {run,store,evidence,qualification,corpus,decoderRelease,mobileRelease};
+}
 describe('external mobile image release evidence',()=>{
+  it('admits bounded practical native/live proof with missing device lanes, without certification',async()=>{
+    expect(await practicalFixture().run()).toMatchObject({valid:true,admittedCaseIds:['png'],capacityQualified:false,universal:false});
+    const purportedComplete=practicalFixture();purportedComplete.corpus.complete=true;
+    expect(await purportedComplete.run()).toMatchObject({valid:true,capacityQualified:false,universal:false});
+  });
+  it('rejects missing or mismatched practical proof and identity',async()=>{
+    for(const mutate of [
+      (f:ReturnType<typeof practicalFixture>)=>{f.corpus.cases[0]!.fixtures[0]!.evidence.local.status='fail';},
+      (f:ReturnType<typeof practicalFixture>)=>{f.corpus.cases[0]!.fixtures[0]!.evidence.live.status='missing';},
+      (f:ReturnType<typeof practicalFixture>)=>{const second=structuredClone(f.corpus.cases[0]!.fixtures[0]!);second.id='second';
+        second.evidence.live.status='fail';f.corpus.cases[0]!.fixtures.push(second);},
+      (f:ReturnType<typeof practicalFixture>)=>{f.corpus.cases[0]!.fixtures[0]!.evidence.live.imageRefs=[];},
+      (f:ReturnType<typeof practicalFixture>)=>{f.corpus.cases[0]!.fixtures[0]!.evidence.local.buildFingerprint='0'.repeat(64);},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.manifestSha256='0'.repeat(64);},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.imageRef=`registry.example/decoder@sha256:${'0'.repeat(64)}`;},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.buildFingerprint='0'.repeat(64);},
+    ]){const f=practicalFixture();mutate(f);expect((await f.run()).valid).toBe(false);}
+    const badHash=practicalFixture();await badHash.run();badHash.evidence.set(badHash.decoderRelease.releases[0]!.evidenceSha256,Buffer.from('{}'));
+    expect((await badHash.run(false)).valid).toBe(false);
+  });
+  it('rejects excluded cases, expanded sizes and certification declarations',async()=>{
+    for(const mutate of [
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.caseIds=['heic-sequence'];},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.practicalScope.caseIds=['live-photo-camera'];},
+      (f:ReturnType<typeof practicalFixture>)=>{f.mobileRelease.cases[0]!.caseId='live-photo-library';},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.maxOriginalBytes=134217729;},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.practicalScope.maxOriginalBytes=134217729;},
+      (f:ReturnType<typeof practicalFixture>)=>{f.mobileRelease.cases[0]!.maxOriginalBytes=134217729;},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.practicalScope.universal=true;},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.practicalScope.capacityQualified=true;},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.practicalScope.deviceCertified=true;},
+      (f:ReturnType<typeof practicalFixture>)=>{Object.assign(f.qualification,{universal:true});},
+    ]){const f=practicalFixture();mutate(f);expect((await f.run()).valid).toBe(false);}
+  });
+  it('keeps omitted profile as capacity and rejects unknown or confused profiles',async()=>{
+    expect(await fixture().run()).toMatchObject({valid:true,capacityQualified:true});
+    for(const mutate of [
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.qualificationProfile='unknown';},
+      (f:ReturnType<typeof practicalFixture>)=>{f.qualification.qualificationProfile='operational-v1';},
+      (f:ReturnType<typeof practicalFixture>)=>{delete (f.qualification as {qualificationProfile?:string}).qualificationProfile;},
+    ]){const f=practicalFixture();mutate(f);expect((await f.run()).valid).toBe(false);}
+  });
+  it('reads hash-named evidence from corpus layout or explicit legacy root and confines real paths',async()=>{
+    const root=await mkdtemp(join(tmpdir(),'mobile-image-release-'));
+    try{
+      const bytes=Buffer.from('{"kind":"proof"}');const digest=createHash('sha256').update(bytes).digest('hex');
+      await mkdir(join(root,'evidence'));await writeFile(join(root,'evidence',`${digest}.json`),bytes);
+      expect(await evidenceReader(root,digest)).toEqual(bytes);
+      expect(await evidenceReader(join(root,'evidence'),digest)).toEqual(bytes);
+      const external=await mkdtemp(join(tmpdir(),'mobile-image-private-'));
+      try{
+        await writeFile(join(external,`${digest}.json`),bytes);
+        await rm(join(root,'evidence',`${digest}.json`));
+        await symlink(join(external,`${digest}.json`),join(root,'evidence',`${digest}.json`));
+        await expect(evidenceReader(root,digest)).rejects.toThrow();
+      }finally{await rm(external,{recursive:true,force:true});}
+    }finally{await rm(root,{recursive:true,force:true});}
+  });
   it('accepts empty closed configs without claiming mobile qualification',async()=>{
     const result=await verifyRelease({decoderRelease:emptyDecoder,mobileRelease:emptyMobile,corpus:{structureValid:true,complete:false,cases:[]},manifestSha256,
       readEvidence:()=>{throw Error('No report needed for closed intake');}});

@@ -7,12 +7,19 @@ instruction, “Relax the requirements of achieving the goal,” supersedes the 
 completion requirements. The project now targets broad iPhone and Android photo support
 across the 29 implemented cases, with the exceptions and evidence limits below.
 
-This is a documentation-only project-scope amendment. It does not change runtime code,
-admission/release configuration, fixture manifests, strict verifiers or historical reports.
-The strict universal verifier remains unchanged; its unmet requirements do not prevent
-completion of this reduced project scope. `universal: false` and `capacityQualified: false`
-remain truthful. Completing this scope does not make the candidate release records
-mergeable or authorize a production release.
+The current branch now carries a `practical-v1` release qualification for these 29 cases.
+Run `node scripts/verify-mobile-image-release.mjs` from the repository root with the
+recovered local fixtures. It reports `valid: true`, exactly 29 admitted cases,
+`capacityQualified: false` and `universal: false`. `--require-universal` still exits 1.
+The qualification record is [SHA-256 named](../../tests/fixtures/mobile-images/evidence/0345278f69ce477e3615ee50e38a580440ab45b29ac76277c54662c102c3944f.json)
+and binds the current unchanged manifest, existing external image and native fingerprint.
+Its explicit practical scope fixes the approved case IDs and 134217728-byte (128 MiB)
+limit and denies capacity, universal and device certification. Every fixture in an
+admitted case still needs matching passing local and live evidence. Missing iOS/Android
+lanes do not block this bounded profile; they remain deferred. The historical
+`capacity-v1` and `operational-v1` policies retain their stricter evidence requirements.
+The failed operational report remains failed. This bounded qualification does not authorize
+a production release, migration or admission write.
 
 ## Acceptance requirements and evidence
 
@@ -76,10 +83,10 @@ supported-format engineering/evidence handoff, including the focused preview-ret
 result and honest device limitations; full device certification or paid BrowserStack
 access is not required.
 
-Never turn this scope amendment into a universal-compatibility, full-capacity or exact-cost
-claim. This work remains local and uncommitted and makes no production-release claim.
-Existing candidate-state restrictions remain; any later merge, schema/admission change
-or deployment is separate work with its applicable authorization.
+Never turn this practical qualification into a universal-compatibility, full-capacity,
+device-certified or exact-cost claim. This branch carries the practical qualification;
+review and publication status are tracked with the branch. A production merge,
+schema/admission change or deployment remains separate work with its applicable authorization.
 The [design](../superpowers/specs/2026-09-23-mobile-image-compatibility-design.md),
 [implementation plan](../superpowers/plans/2026-09-23-mobile-image-compatibility.md),
 [evidence summary](mobile-image-compatibility.md) and

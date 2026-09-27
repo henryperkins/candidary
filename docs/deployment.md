@@ -531,8 +531,19 @@ migration ledger when relevant, and the observed live response.
 
 ## Mobile-image admission and migration 0026
 
-Extended admission is closed in the committed configuration. Local parser fixtures, decoder doubles,
-emulated transport/ZIP tests and browser API stubs do not qualify a codec or mobile device. Consult
+The current release configuration pins `practical-v1` qualification for 29 implemented
+cases at 128 MiB per case. From the repository root, run
+`node scripts/verify-mobile-image-release.mjs` with the recovered fixture bytes: it must
+report `valid: true`, 29 admitted cases, `capacityQualified: false` and `universal: false`.
+`node scripts/verify-mobile-image-release.mjs --require-universal` must exit 1. The
+practical record requires matching local and live proof for each fixture; iOS/Android
+device matrices, HEIC sequences, Live Photo companions, full capacity and exact
+telemetry remain deferred. The failed operational attempt is not passing load proof.
+The historical `capacity-v1` and `operational-v1` profiles retain their stricter
+requirements. This qualification does not replace exact-commit release checks,
+authorize migration or admission writes, or establish production device behavior.
+Local parser fixtures, decoder doubles, emulated transport/ZIP tests and browser API
+stubs do not qualify a codec or mobile device. Consult
 `docs/verification/mobile-image-compatibility.md` and the A/B/C plans before requesting a release. The
 concrete preview sequence is `docs/verification/mobile-image-preview-release.md`; the load rehearsal
 and physical-device runs are `docs/verification/mobile-image-load-rehearsal.md` and

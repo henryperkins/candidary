@@ -17,6 +17,31 @@ const bytes = value => Number.isSafeInteger(value) && value > 0 && value <= 512 
 const profile = 'mobile-preview-v1';
 // A 58,290-operation load observations bundle is about 30 MiB; keep headroom for real rows.
 const MAX_EVIDENCE_BYTES = 128 * 1024 ** 2;
+const PRACTICAL_MAX_BYTES = 134217728;
+// Versioned admission list. Future corpus additions require an explicit policy revision.
+const practicalCaseIds = new Set([
+  'apng', 'avif-sequence', 'avif-still', 'bmp', 'dng-bayer', 'dng-jpeg', 'dng-linear', 'dng-proraw',
+  'dng-proraw-jxl', 'gif-animated', 'gif-still', 'heic-auxiliary', 'heic-grid', 'heic-primary',
+  'heif-generic', 'jp2', 'jpeg-baseline', 'jpeg-exif-orientation', 'jpeg-hdr', 'jpeg-motion-photo-still',
+  'jpeg-progressive', 'jpeg-ultra-hdr-gainmap', 'jxl-animated', 'jxl-still', 'png', 'tiff',
+  'webp-animated', 'webp-lossless', 'webp-lossy',
+]);
+const practicalFields = new Set(['kind', 'harnessVersion', 'qualificationProfile', 'buildFingerprint',
+  'imageRef', 'previewProfile', 'manifestSha256', 'maxOriginalBytes', 'caseIds', 'practicalScope']);
+const practicalScopeFields = new Set(['caseIds', 'maxOriginalBytes', 'capacityQualified', 'universal', 'deviceCertified']);
+function practicalQualification(q) {
+  const scope = q.practicalScope;
+  return q.qualificationProfile === 'practical-v1' && Object.keys(q).every(key => practicalFields.has(key))
+    && scope && typeof scope === 'object' && !Array.isArray(scope)
+    && Object.keys(scope).length === practicalScopeFields.size
+    && Object.keys(scope).every(key => practicalScopeFields.has(key))
+    && scope.maxOriginalBytes === PRACTICAL_MAX_BYTES && q.maxOriginalBytes === PRACTICAL_MAX_BYTES
+    && scope.capacityQualified === false && scope.universal === false && scope.deviceCertified === false
+    && Array.isArray(scope.caseIds) && scope.caseIds.length === q.caseIds.length
+    && new Set(scope.caseIds).size === scope.caseIds.length
+    && scope.caseIds.every(id => q.caseIds.includes(id) && practicalCaseIds.has(id))
+    && q.caseIds.every(id => practicalCaseIds.has(id));
+}
 
 export async function verifyRelease({ decoderRelease, mobileRelease, corpus, manifestSha256, readEvidence }) {
   const issues = [], admitted = new Set();
@@ -40,9 +65,11 @@ export async function verifyRelease({ decoderRelease, mobileRelease, corpus, man
     const q = await evidence(entry.evidenceSha256);
     if (q.kind !== 'mobile-image-qualification' || q.harnessVersion !== 1 || q.buildFingerprint !== entry.buildFingerprint
       || !image(q.imageRef) || q.previewProfile !== profile || q.manifestSha256 !== manifestSha256
-      || !bytes(q.maxOriginalBytes) || !['capacity-v1','operational-v1'].includes(q.qualificationProfile ?? 'capacity-v1')
+      || !bytes(q.maxOriginalBytes) || !['capacity-v1','operational-v1','practical-v1'].includes(q.qualificationProfile ?? 'capacity-v1')
       || !list(q.caseIds) || !q.caseIds.length || q.caseIds.some(id => !requiredCaseIds.includes(id))
       || new Set(q.caseIds).size !== q.caseIds.length) throw new Error('Qualification identity/manifest mismatch.');
+    if (q.qualificationProfile === 'practical-v1' && !practicalQualification(q))
+      throw new Error('Invalid practical qualification scope.');
     return q;
   }
   function caseProof(caseId, q, lanes) {
@@ -74,9 +101,13 @@ export async function verifyRelease({ decoderRelease, mobileRelease, corpus, man
         || entry.maxOriginalBytes > mobileRelease.maxOriginalBytes) throw new Error('Invalid or duplicate intake case.');
       seen.add(key);
       const decoder = native.get(entry.buildFingerprint), q = await qualification(entry);
+      const practical = q.qualificationProfile === 'practical-v1';
       if (!decoder?.verifiedCaseIds.includes(entry.caseId) || q.imageRef !== decoder.imageRef || entry.maxOriginalBytes > q.maxOriginalBytes
-        || corpus.cases.find(item => item.id === entry.caseId)?.status !== 'pass'
-        || !caseProof(entry.caseId, q, ['local', 'live', 'ios', 'android'])) throw new Error('Intake case lacks complete matching evidence.');
+        || (practical && (entry.maxOriginalBytes > PRACTICAL_MAX_BYTES || !practicalCaseIds.has(entry.caseId)))
+        || (!practical && corpus.cases.find(item => item.id === entry.caseId)?.status !== 'pass')
+        || !caseProof(entry.caseId, q, practical ? ['local', 'live'] : ['local', 'live', 'ios', 'android']))
+        throw new Error('Intake case lacks complete matching evidence.');
+      if (practical) { admitted.add(entry.caseId); continue; }
       const load = await evidence(q.loadEvidenceSha256);
       const qualificationProfile = q.qualificationProfile ?? 'capacity-v1';
       if ((load.workloadProfile ?? 'capacity-v1') !== qualificationProfile
@@ -102,13 +133,20 @@ export async function verifyRelease({ decoderRelease, mobileRelease, corpus, man
 
 /** Digest filenames avoid ambiguous report discovery. Realpath containment also
  * keeps ignored/private evidence from accidentally becoming a filesystem reader. */
-async function evidenceReader(root, digest) {
+export async function evidenceReader(root, digest) {
   if (!sha(digest)) throw new Error('Invalid evidence digest.');
-  const path = await realpath(resolve(root, `${digest}.json`));
-  const part = relative(await realpath(root), path);
-  if (part === '..' || part.startsWith(`..${sep}`) || isAbsolute(part) || !(await stat(path)).isFile()
-    || (await stat(path)).size > MAX_EVIDENCE_BYTES) throw new Error('Invalid evidence file.');
-  return readFile(path);
+  const realRoot = await realpath(root);
+  for (const relativePath of [`${digest}.json`, `evidence/${digest}.json`]) {
+    let path;
+    try { path = await realpath(resolve(root, relativePath)); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    const part = relative(realRoot, path);
+    if (part === '..' || part.startsWith(`..${sep}`) || isAbsolute(part)) throw new Error('Invalid evidence file.');
+    const details = await stat(path);
+    if (!details.isFile() || details.size > MAX_EVIDENCE_BYTES) throw new Error('Invalid evidence file.');
+    return readFile(path);
+  }
+  throw new Error('Missing evidence file.');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

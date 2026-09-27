@@ -10,16 +10,23 @@ the practical acceptance record preserves the actual limited device observations
 be explicitly deferred without buying access or blocking the handoff. Sampled analytics is diagnostic
 only. HEIC sequences, Live Photo movie companions, exhaustive device coverage, full
 capacity/cost and exact telemetry engineering are deferred. `universal: false` and
-`capacityQualified: false` remain truthful; the strict verifier is unchanged and is not
-a blocker for completing this reduced project scope. Candidate release and production
-boundaries remain in force.
+`capacityQualified: false` remain truthful. The current branch adds bounded
+`practical-v1` qualification: `node scripts/verify-mobile-image-release.mjs` admits the
+29 cases with matching local/live proof and a 128 MiB per-case cap. It reports
+`valid: true`, `capacityQualified: false`, `universal: false`; `--require-universal`
+still exits 1. The older capacity/operational policies and exhaustive corpus
+`--require-complete` remain strict. The failed operational attempt stays failed.
+The evidence checkpoint `f54fdc2a604b01ecd5cf9a6367de3ac84ca2826c` is pushed;
+this branch carries the practical release-policy qualification. Review and publication
+status are tracked with the branch.
+Candidate release and production boundaries remain in force.
 
 ## Historical handoff and operational attempt
 
 Updated 2026-09-27 for the owner's instruction to commit and push local work so it can
 be resumed on another machine. This branch contains the runtime fix and the subsequent
 evidence checkpoint. Preview observations below were verified on 2026-09-26, not rechecked
-against Cloudflare during this Git handoff. Release qualification remains incomplete.
+against Cloudflare during that Git handoff. Release qualification was incomplete at that checkpoint.
 
 **Windows recovery, later on 2026-09-27:** all 37 distinct originals and 39 independent
 references were found and hash-verified, together with both named historical reports.
@@ -31,9 +38,9 @@ check results and remaining external inputs. No native, live, load or device run
 
 **Approved narrower scope:** The owner subsequently approved the
 [bounded operational check](mobile-image-operational-rehearsal.md) for individual case
-admission and deferred the full capacity/cost rehearsal. The tooling and release-policy
-amendment remain local. Matching native/live/iOS/Android evidence is still required;
-operational qualification keeps capacity and universal claims closed. No new live result
+admission and deferred the full capacity/cost rehearsal. At that stage the tooling and
+release-policy amendment were local. The operational profile still requires matching
+native/live/iOS/Android evidence and keeps capacity and universal claims closed. No new live result
 or release record has been manufactured by this change.
 
 **Latest live attempt, 2026-09-27:** The owner's existing Analytics Read key works for
@@ -153,8 +160,9 @@ device-qualified pass, and no paid upgrade is required for the reduced goal.
 
 HEIC sequences, Live Photo movie companions, exhaustive device coverage, full capacity/cost
 and exact telemetry engineering remain deferred. Keep sampled analytics diagnostic,
-`universal: false`, `capacityQualified: false`, historical qualification and candidate
-release records unchanged. Production admission/release, D1 changes, merge and deployment
+`universal: false` and `capacityQualified: false`. The historical qualification record
+is preserved; the current release references point to the bounded practical record.
+Production admission/release, D1 changes, merge and deployment
 remain separate work with their applicable authorization; practical acceptance does not
 satisfy those strict release gates.
 
@@ -186,8 +194,10 @@ docs/verification/mobile-image-handoff.md and the current preview-runbook header
 
 The branch contains deployed runtime checkpoint be6811c4beb9cb113ffb446deec9acebfe14759b
 and committed live evidence. Preview passed 39/39 fixtures. Windows native/reference
-recovery is complete and recorded in docs/verification/mobile-image-recovery-20260927.md;
-those recovery changes remain local until separately committed/published. The owner
+recovery is complete and recorded in docs/verification/mobile-image-recovery-20260927.md.
+The branch carries a practical-v1 release qualification for 29 cases with matching
+native/live evidence and a 128 MiB cap. Its focused release CLI reports valid:true,
+capacityQualified:false and universal:false; the universal gate still exits 1. The owner
 relaxed project completion to broad iPhone and Android photo support across 29 implemented
 cases. Reuse existing focused evidence unless a change requires new checks.
 
@@ -199,8 +209,8 @@ Paid access and full device certification are not prerequisites for the reduced-
 engineering/evidence handoff. The historical operational attempt remains FAILED.
 Sampled analytics is diagnostic only. HEIC sequences, Live Photo movie companions,
 exhaustive device coverage, full capacity/cost and exact telemetry engineering are deferred.
-Keep universal:false and capacityQualified:false. The strict verifier remains unchanged
-and is not a reduced-project-completion blocker. Preserve schema 0026 compatibility,
+Keep universal:false and capacityQualified:false. Capacity and operational profiles
+retain their strict requirements. Preserve schema 0026 compatibility,
 candidate-state restrictions and separate release/publication authorization boundaries.
 Do not replay historical reset instructions, fabricate evidence or expose credentials.
 
