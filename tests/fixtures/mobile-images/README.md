@@ -5,10 +5,19 @@ Android/iOS observations. An upstream photograph with unknown capture settings
 can prove a codec case locally; it cannot prove a phone's picker, camera, or share
 behavior. Empty cases and absent evidence remain unqualified.
 
-`originals/`, `references/`, and `evidence/` are ignored. Downloaded originals are
-unchanged and SHA-256 pinned. Only reviewed source URLs, hashes, attribution,
-licenses, and reproduction instructions belong in Git. Do not add private phone
-photographs or unlicensed sample files.
+`originals/`, `references/`, and unreviewed `evidence/` files are ignored.
+Downloaded originals are unchanged and SHA-256 pinned. Git retains reviewed source
+URLs, hashes, attribution, licenses, reproduction instructions, and explicitly
+allowlisted credentials-free evidence reports. Do not add private phone photographs,
+authorization files, credentials, or unlicensed sample files.
+
+The reviewed 2026-09-26 live report
+`evidence/f99ae2d2082638007282a2704132379291f348f78ca3bfe377551de59625900f.json`
+is tracked so all 39 current live pointers resolve in a fresh clone. Its raw bytes
+are protected by `.gitattributes`. Native history below describes previous runs;
+those ignored reports and independent references were not recovered in the Ubuntu
+checkout. See [the current handoff](../../../docs/verification/mobile-image-handoff.md)
+for evidence locations, recovery instructions, and remaining qualification work.
 
 From the repository root in Ubuntu 26.04, with `python3-pil` 12.1.1 and
 `libheif-examples` 1.21.2 (including HEVC/AV1 decoder plugins), and
@@ -176,7 +185,7 @@ preserve the original hash. An incidental earlier fetch reproduced all 38 prior
 originals/references; the new focused test separately reproduces the 39th. This is
 not a fresh full-fetch pass for all 39 together.
 
-## Current local evidence
+## Historical native evidence (B12h)
 
 B12h's final rendering union on local image `sha256:8d4ac6bec3609b0989b00c3cd9923ef9d696a5a199dee29f0c1c3e0e97d3c15c`
 (fingerprint `a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651`) passes all 39 available
@@ -190,5 +199,6 @@ The owner approved a 20 MiB animated-preview cap on 2026-09-26 while preserving
 existing fidelity. The previously failing 98-frame WebP now passes the unchanged
 pixel/timing comparison. Still previews remain limited to 8 MiB. All 38 previously
 passing previews keep their SHA-256, and original/reference hashes and tolerances
-are unchanged. A local pass qualifies only the native lane: live, Android and iOS
-lanes remain empty, so no case is complete end to end.
+are unchanged. At that native-only stage, live, Android and iOS lanes were empty.
+The later tracked live report passes all 39 fixtures, while physical-device and
+load qualification remain incomplete; no case is complete end to end.

@@ -1,3 +1,5 @@
 originals/
 references/
-evidence/
+evidence/*
+# Reviewed, credentials-free preview report required by the committed manifest.
+!evidence/f99ae2d2082638007282a2704132379291f348f78ca3bfe377551de59625900f.json

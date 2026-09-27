@@ -1,27 +1,39 @@
 # Mobile image preview release plan
 
-Status: prepared locally on 2026-09-25 and corrected on 2026-09-26 (task C16) after a read-only
-preflight of the preview account. On 2026-09-26 the owner approved the checkpoint-then-squash sequence
-(29 candidate cases at 128 MiB) and authorized steps 1–8. **Steps 1–7 are done:**
+Status: updated on 2026-09-27 for the authorized cross-machine handoff after the approved preview continuation. The owner approved the
+checkpoint-then-squash sequence (29 candidate cases at 128 MiB) and authorized steps 1–8.
+**Steps 1–8 are complete on preview; universal compatibility remains unverified:**
 
 - Preview D1 is at 0026 (import path, step 1), and the old root passed the old-code check.
 - The decoder is published as `…/candidary-image-decoder@sha256:d014ac551e24…` (platform-manifest
   push, step 2) and qualifies 39/39 on the pulled reference.
-- Local checkpoint C1 is `86775849589b` (tag `mobile-image-preview-candidate-1`); fresh clones
-  reproduce `a4c23860…`.
+- Original checkpoint C1 is `86775849589b` (tag `mobile-image-preview-candidate-1`); fresh clones
+  reproduce `a4c23860…`. The replacement local checkpoint is
+  `be6811c4beb9cb113ffb446deec9acebfe14759b`, which includes the complete-export fix below.
 - The private decoder twin runs as version `ca4d8ff4…`.
-- `candidary-preview` runs C1 as version `088a12f3…`, with all five Workflows.
+- `candidary-preview` runs the replacement checkpoint as version
+  `2c42b186-3b75-4d30-81ea-982fcb579079` at 100%, with all five Workflows.
 - The 29 candidate cases are open on preview D1 only.
 
-The recorder's independent review found no Critical or Important issues, and step 8 (the live lane)
-has started on a dedicated preview event. At the owner's request the branch, including checkpoint C1,
-was pushed to `origin/codex/mobile-image-compatibility`. The candidate records on it must not merge.
+Step 8 passed all 39 live fixture results across 29 cases on a fresh dedicated preview event, from
+`2026-09-26T21:08:21.940Z` to `2026-09-26T21:15:27.269Z`, with no runtime or cleanup failure. Its report
+is `tests/fixtures/mobile-images/evidence/f99ae2d2082638007282a2704132379291f348f78ca3bfe377551de59625900f.json`
+(SHA-256 equals the filename). A separate read-only D1 check confirmed all 39 media are deleted,
+no Trash entries remain, `uploads_enabled = 0`, and the ready complete export contains 39 originals
+totaling 176,437,716 bytes. The 39 matching manifest `evidence.live` pointers now reference this report.
+
+At the owner's earlier request the branch, including checkpoint C1, was pushed to
+`origin/codex/mobile-image-compatibility`. On 2026-09-27 the owner explicitly authorized committing
+and pushing all local continuation work for resumption on another machine. This handoff checkpoint
+includes the replacement checkpoint in its history, the evidence pointers, the reviewed live report,
+and a credentials-free evidence archive. See [the portable handoff](mobile-image-handoff.md).
+The candidate records must not merge.
 The single final commit therefore comes from a GitHub squash-merge after the records-only change, or
 from a separately approved rewrite of the branch. Details are in the task ledger. Each step marked **[authorization]** is
 an external action that needs the release owner's explicit, separate approval. Earlier approvals (the
 local implementation, the 20 MiB animated-preview cap, "Resume") do not cover any of them.
 
-**Ubuntu resumption, 2026-09-26:** read-only Cloudflare checks confirmed C1 still serves 100% of
+**Ubuntu resumption, 2026-09-26:** initial read-only Cloudflare checks confirmed C1 then served 100% of
 preview traffic, the private decoder version is unchanged, all five Workflows exist, and preview D1
 has schema 26/protocol 1 with 29 of 32 admission rows enabled. The earlier step-8 complete export
 failed with `Too many API requests by single Worker invocation.` Its 39-original, 176,437,716-byte
@@ -32,18 +44,25 @@ The regression first failed with 591 ownership checks; the focused export union 
 Independent review found zero Critical/Important findings and one deferred Minor note about exact
 ZIP filename assertions. The recorder's separate focused suite passed 49/49. No repository-wide
 gates ran. The owner subsequently approved a local checkpoint containing this fix, its deployment
-to `candidary-preview`, and continuation of step 8 on a fresh dedicated event. This checkpoint is
-the replacement candidate for that run; C1 does not contain the fix. Deployment and live results
-will be retained under the ignored recovery evidence directory.
+to `candidary-preview`, and continuation of step 8 on a fresh dedicated event. That deployment and
+live run are now complete. `npm run build:cloudflare` and `npm run verify:pwa-build` passed before
+deployment. The previous event and failed export remain untouched. Deployment and live results
+are retained under the ignored recovery evidence directory and in the tracked evidence archive
+linked from the portable handoff.
 
-The new checkout recovered and SHA-verified 38/39 fixture records (36/37 distinct originals).
-`commons-poznan-neon-webp-animated` remains unavailable because its pinned source returns HTTP 429.
-The request-free recorder plan reports 38 planned transfers and zero requests. The previous
-machine's ignored native reports, independent references, task ledger and live-event credentials
-are absent here. Local recovery/test/review records are under
-`output/verification/mobile-image-resume/`. No live evidence pointers, candidate records or decoder
-pins were changed during recovery. The approval covers preview continuation only, with no production
-deployment, merge or branch push.
+The checkout recovered and SHA-verified all 39 fixture records (37 distinct originals), including
+the previously unavailable `commons-poznan-neon-webp-animated`. Historical native reports and
+independent reference files remain absent from this checkout; no iOS, Android or load qualification
+has run. The corpus remains incomplete. Local recovery/test/review records are under
+`output/verification/mobile-image-resume/`. Candidate records, decoder fingerprint and image pins
+are unchanged. During the 2026-09-26 preview continuation, no repository-wide gates, new branch push,
+merge or production deployment ran. The 2026-09-27 commit/push authorization is separate from
+release qualification, merge, load testing, and production deployment.
+
+For the current run, the records-only comparison base is
+`be6811c4beb9cb113ffb446deec9acebfe14759b`, because the export runtime changed after C1. Compare later
+qualification changes against this deployed checkpoint. The historical C1 sequence below remains
+as the original plan; it does not establish runtime identity for the replacement deployment.
 
 This plan applies the migration-first order in `docs/deployment.md` (**Mobile-image admission and
 migration 0026**) to the **preview** environment only: migration first, private decoder second, main

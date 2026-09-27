@@ -10,3 +10,5 @@ shared/image-decoder-contract.ts -text
 shared/image-formats.ts -text
 # Qualification records pin the corpus manifest by SHA-256; keep its bytes identical on every checkout.
 tests/fixtures/mobile-images/manifest.json -text
+# Reviewed evidence filenames are their raw-byte SHA-256; preserve them across operating systems.
+tests/fixtures/mobile-images/evidence/*.json -text
