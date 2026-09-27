@@ -1,5 +1,25 @@
 # Mobile image compatibility evidence
 
+**Current scope, 2026-09-27:** The owner's latest instruction to relax the goal replaces
+the earlier universal/operational completion requirements with the
+[practical supported-format handoff](mobile-image-practical-acceptance-20260927.md).
+It reuses native/live proof for 29 implemented cases, adds a focused check of the two
+regenerated previews, and accepts best-effort BrowserStack iPhone Safari / Android Chrome
+observations within existing trial access. Both retrievals passed with byte/hash and
+private-access checks; the practical acceptance record states the limited actual device
+observations. Unobserved upload/save/share steps may be explicitly deferred. Sampled analytics is
+diagnostic only. HEIC sequences, Live Photo movie companions, exhaustive device coverage,
+full capacity/cost and exact telemetry engineering are deferred. `universal: false` and
+`capacityQualified: false` remain truthful; the unchanged strict verifier does not block
+the reduced project goal. The [failed bounded rehearsal](mobile-image-operational-results-20260927.md)
+remains FAILED. Release configuration and candidate-state restrictions are unchanged.
+
+## Historical implementation snapshot — 2026-09-26
+
+The dated sections below preserve earlier observations and requirements. The
+[current handoff](mobile-image-handoff.md) and practical acceptance document supersede
+their completion scope and record later live success and Windows evidence recovery.
+
 Date: 2026-09-26. Baseline: `eceb4053b572562ed00247a7c6469a2599416723`.
 Working branch: `codex/mobile-image-compatibility` (`origin/main` observed on 2026-09-25: `fa4aae3`,
 which was UI-only and did not overlap this branch; refresh before integration).
@@ -18,7 +38,7 @@ releasable, and they must never merge. No branch push, production change, load r
 run has happened. Local native qualification covers 29 of the 32 required cases. Every case is still
 unqualified end to end until its deployed, load, iOS and Android lanes have evidence.
 
-## Current state
+## Historical implementation state
 
 - **Final local decoder candidate:** `candidary-image-decoder:verification`, Docker image ID
   `sha256:8d4ac6bec3609b0989b00c3cd9923ef9d696a5a199dee29f0c1c3e0e97d3c15c`, baked build fingerprint
@@ -336,7 +356,7 @@ intake closes, and File-based `navigator.canShare` with its download fallback.
 `physical-device` document into ignored storage. Browser engines on Windows do not substitute for
 hardware.
 
-## Decisions and inputs needed
+## Historical decisions and inputs
 
 1. **`heic-sequence` source.** No lawful HEIF image sequence was found. The MPEG/Nokia conformance
    files and WebKit's `sea_animation.heics` lack documented content rights. Options: written permission
@@ -359,23 +379,22 @@ hardware.
 4. **Hardware and people.** Physical iPhone and Android devices (Pro models for ProRAW, Pixel/Samsung
    for Ultra HDR, Motion Photo and Expert RAW), a tester, and consent for any captured test photos.
 
-## Remaining work and release boundary
+## Reduced-scope completion and release boundary
 
-1. Resolve the remaining source and commit-sequence inputs. Add lawful fixtures and independent references. Use focused
-   checks for corpus-only additions; after any native change, rebuild and run one final rendering
-   union with refreshed evidence pointers. Do not repeat unchanged successful checks.
-2. Under separate authorization, follow `docs/verification/mobile-image-preview-release.md`: migrate
-   preview D1 to 0026 first with intake closed, push and pin the decoder image by registry digest,
-   deploy the private preview twin, and deploy the clean candidate checkpoint (candidate records
-   included) to `candidary-preview` with the cutover helper. Then open candidate cases in preview D1
-   only.
-3. Run the deployed original/privacy/deletion lane, the load rehearsal and the physical-device protocol.
-   Record platform limitations only when observed.
-4. Commit only records whose local, live, iOS, Android and load evidence all verify. The universal
-   claim stays closed while any required case is missing, failing or platform-limited.
-5. Production repeats the migration-first order through the normal merge build. Once an extended
-   original or native preview exists, rollback needs a schema-26-compatible reader/export/cleanup
-   version. The old baseline is not a rollback target.
+The [practical acceptance handoff](mobile-image-practical-acceptance-20260927.md) is complete
+for the reduced scope using existing native/live proof, the
+[successful two-preview retrieval](evidence/mobile-image-preview-recovery-20260927.json)
+and [completed limited real-device observations](evidence/mobile-image-practical-20260927/device-smoke.json).
+Both devices rendered the guest upload page; iPhone exercised required-name validation
+and Android accepted a synthetic participant name. Trial expiry prevented picker,
+upload/receipt, private preview, metadata, original download and save/share verification.
+Those lanes are DEFERRED; no end-to-end or device-qualified pass is claimed.
 
-Changes remain uncommitted in the isolated worktree under the single-final-commit instruction. The
-user's primary checkout is untouched.
+Preserve `universal: false`, `capacityQualified: false` and diagnostic-only sampled
+analytics. No historical report, strict verifier or release record is relaxed, and no
+paid upgrade or full device certification is required for reduced-scope completion.
+
+Production admission, final strict release qualification, merge and deployment remain
+separate work with their applicable authorization. Existing candidate release records
+must not merge as-is. After extended writes, rollback must retain a schema-26-compatible
+reader/export/cleanup version. This documentation amendment stays local and unstaged.

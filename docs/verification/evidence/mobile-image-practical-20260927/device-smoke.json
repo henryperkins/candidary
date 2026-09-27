@@ -1,0 +1,68 @@
+{
+  "kind": "candidary.limited-real-device-observations",
+  "recordedAt": "2026-09-27T20:07:27.0623883Z",
+  "provider": "BrowserStack Live",
+  "access": "Free Trial, up to one minute per device",
+  "targetOrigin": "https://candidary-preview.lfd.workers.dev",
+  "scope": "Best-effort rendered-entry observations under owner-approved practical acceptance; not per-fixture mobile qualification",
+  "devices": [
+    {
+      "hardware": "iPhone 16 Pro",
+      "os": "iOS 18.7",
+      "browser": "Safari",
+      "browserBuild": null,
+      "realHardware": true,
+      "observed": [
+        "Guest upload page rendered",
+        "Required-name validation prompted before adding photos"
+      ],
+      "screenshot": "iphone-safari-entry.png",
+      "endReason": "One-minute trial session expired"
+    },
+    {
+      "hardware": "Samsung Galaxy S25",
+      "os": "Android 15.0",
+      "browser": "Chrome",
+      "browserBuild": null,
+      "realHardware": true,
+      "observed": [
+        "Guest upload page rendered",
+        "Synthetic participant name entered"
+      ],
+      "screenshot": "android-chrome-entry.png",
+      "endReason": "One-minute trial session ended"
+    }
+  ],
+  "unverified": [
+    "Native camera or library picker behavior",
+    "Selected File type, size and original hash",
+    "Upload completion and receipt",
+    "Private preview displayed on device",
+    "Original or ZIP download on device",
+    "Save and share handoff",
+    "Per-format mobile matrix"
+  ],
+  "observationalLimitations": [
+    "Remote device pixels and provider labels were observed through BrowserStack Live; exact browser builds were not captured",
+    "Initial Safari navigation lost the URL prefix during remote typing and briefly opened search for part of the non-personal test-event entry link; corrected navigation then rendered Candidary",
+    "No Cloudflare or BrowserStack account token was entered into the device",
+    "Trial access prevented end-to-end verification; missing observations are deferred, never inferred as passes"
+  ],
+  "deviceQualified": false,
+  "universal": false,
+  "capacityQualified": false,
+  "screenshots": [
+    {
+      "file": "iphone-safari-entry.png",
+      "capturedAt": "2026-09-27T20:03:12.8195307Z",
+      "sha256": "4a79a0ffedbe021692a429ea76ccddb1b54d38931a1d3866b0d3c5d79ab55f47",
+      "byteLength": 112346
+    },
+    {
+      "file": "android-chrome-entry.png",
+      "capturedAt": "2026-09-27T20:05:43.0757126Z",
+      "sha256": "6003a8d569a1433b09503b21cbb9c3a0f3f9f00b02013e47b2180023b5c0013c",
+      "byteLength": 123909
+    }
+  ]
+}

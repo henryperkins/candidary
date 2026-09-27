@@ -1,5 +1,25 @@
 # Mobile image preview release plan
 
+**Current project scope, 2026-09-27:** The owner's latest instruction to relax the goal
+supersedes older completion requirements. Follow
+[practical acceptance](mobile-image-practical-acceptance-20260927.md): reuse native/live
+proof for 29 implemented cases, record the two regenerated previews' private retrieval
+result, and attempt representative BrowserStack iPhone Safari / Android Chrome checks
+within existing trial access. Both private retrievals passed with byte/hash and access
+checks; the practical acceptance record states the limited actual device observations.
+Trial-limited device steps can be explicitly deferred. No paid upgrade or full device certification is required.
+Sampled analytics is diagnostic only. HEIC sequences, Live Photo movie companions,
+exhaustive device coverage, capacity/cost and exact telemetry engineering are deferred.
+`universal: false` and `capacityQualified: false` remain truthful. The strict verifier
+and release configuration remain unchanged; they do not block reduced project completion
+and still govern any later strict release. The failed operational run remains FAILED.
+
+## Historical preview release sequence and observations
+
+The dated procedure below records the earlier release plan. Its full device/load and
+records-finalization requirements are separate from the reduced project goal above.
+Candidate-state restrictions and applicable publication/deployment authorization remain.
+
 Status: updated on 2026-09-27 for the authorized cross-machine handoff after the approved preview continuation. The owner approved the
 checkpoint-then-squash sequence (29 candidate cases at 128 MiB) and authorized steps 1–8.
 **Steps 1–8 are complete on preview; universal compatibility remains unverified:**
@@ -58,6 +78,28 @@ has run. The corpus remains incomplete. Local recovery/test/review records are u
 are unchanged. During the 2026-09-26 preview continuation, no repository-wide gates, new branch push,
 merge or production deployment ran. The 2026-09-27 commit/push authorization is separate from
 release qualification, merge, load testing, and production deployment.
+
+**Windows recovery, 2026-09-27:** the [recovery record](mobile-image-recovery-20260927.md)
+supersedes the Ubuntu evidence-availability limitation above. All 37 distinct originals,
+39 references and the two named historical reports were recovered with matching hashes.
+The corpus is structurally valid with 29/32 local cases; end-to-end qualification remains
+incomplete, and the recovered qualification report pins an earlier manifest. Three load
+dry runs passed, but load and physical-device lanes have not run. Recovery changes remain
+local on `codex/mobile-image-qualification-recovery`; no new deployment or release is claimed.
+
+**Approved operational amendment, 2026-09-27:** The owner approved a
+[bounded cold/warm/mixed check](mobile-image-operational-rehearsal.md) for individual
+case admission, deferring the full capacity rehearsal. Native/live/iOS/Android evidence
+and independent operational measurements remain required. The operational profile cannot
+establish full capacity/cost or universal claims. The older full-load steps below are
+historical for that deferred profile; use the operational runbook for the current scope.
+
+**Completed bounded attempt, 2026-09-27:** All three operational scenarios ran on the
+unchanged preview versions. Eight mixed preview operations failed before regeneration
+became ready, and sampled image-accounting rows prevented instrumentation admission.
+The existing key successfully retrieved SQL and GraphQL results. The
+[reviewed failed-attempt record](mobile-image-operational-results-20260927.md) and its
+portable archive preserve the actual evidence; no qualifying load report was produced.
 
 For the current run, the records-only comparison base is
 `be6811c4beb9cb113ffb446deec9acebfe14759b`, because the export runtime changed after C1. Compare later
@@ -448,13 +490,19 @@ version. The deployed pre-0026 root (`af68fba7`) and any pre-0026 Worker are **n
 targets after that point. Never drop 0026, restore a pre-migration database, or delete retained write
 inventories.
 
-## Remaining external prerequisites
+## Reduced project scope complete; later release work remains separate
 
-- The commit-sequence decision and explicit authorization for each bracketed step.
-- An API token with *Account Analytics: Read* for the load export; the OAuth session lacks that scope.
-  Registry publication and the API's acceptance of the digest form remain unverified until step 2.
-- Lawful HEIC-sequence originals, or a consented platform-produced HEICS with an independent
-  reference, and consented physical Live Photo observations.
-- Physical iPhone and Android devices, a Mac with Safari Web Inspector, a tester, and consent for any
-  captured test photos.
-- A load-generation host with enough bandwidth and an otherwise idle preview window.
+The [supported-format evidence handoff](mobile-image-practical-acceptance-20260927.md)
+is complete for the reduced project scope: existing native/live proof for 29 implemented
+cases, [successful private retrieval](evidence/mobile-image-preview-recovery-20260927.json)
+of both regenerated previews, and [limited BrowserStack device observations](evidence/mobile-image-practical-20260927/device-smoke.json).
+The earlier eight failed operations remain failed. Both real devices rendered the guest
+page, with iPhone validation and Android name entry observed. Trial-limited picker,
+upload/receipt, private preview, metadata, original download and save/share lanes are
+DEFERRED, with no end-to-end or device-qualified pass. Exhaustive device, full capacity
+and exact accounting qualification remain deferred.
+
+This work remains local and uncommitted and makes no production-release claim. Strict
+release records, admission changes, merge and production deployment remain separate work
+with their applicable checks and authorization. Reduced project completion does not certify
+those release gates.

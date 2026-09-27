@@ -32,6 +32,7 @@ function fakeCandidary(eventIds: string[], options: Options = {}) {
   const sessions = new Map<string, Session>(), media = new Map<string, Media>();
   const requests: Array<{ method: string; path: string; origin: string | null; csrf: string | null; cookie: string | null }> = [];
   const violations: string[] = [];
+  const partSends: Array<{ mediaId: string; index: number; hash: string; bytes: Uint8Array }> = [];
   const json = (data: unknown, status = 200, headers: HeadersInit = {}) => Response.json({ data, requestId: randomUUID() }, { status, headers });
   const error = (code: string, status: number) => Response.json({ code, message: 'Refused.', requestId: randomUUID() }, { status });
   function session(request: Request) {
@@ -136,6 +137,8 @@ function fakeCandidary(eventIds: string[], options: Options = {}) {
         const bytes = new Uint8Array(await request.arrayBuffer());
         if (bytes.length > 8 * MiB || Number(request.headers.get('content-length')) !== bytes.length || request.headers.get('x-part-sha256') !== sha(bytes)
           || request.headers.get('content-type') !== 'application/octet-stream' || item.transferState !== 'receiving') return error('VALIDATION_FAILED', 422);
+        partSends.push({ mediaId:item.id,index:Number(m[1]),hash:request.headers.get('x-part-sha256')!,bytes });
+        if (item.parts.has(Number(m[1])) && sha(item.parts.get(Number(m[1]))!) !== sha(bytes)) return error('PART_CONFLICT',409);
         item.parts.set(Number(m[1]), bytes); return json({ index: Number(m[1]), accepted: true });
       }
       if (method === 'POST' && rest === `${base}/complete`) {
@@ -168,7 +171,7 @@ function fakeCandidary(eventIds: string[], options: Options = {}) {
     }
     return error('NOT_FOUND', 404);
   }
-  return { events, media, requests, violations, fetch: async (url: URL | string, init: RequestInit) => handle(new Request(url, init)) };
+  return { events, media, requests, violations, partSends, fetch: async (url: URL | string, init: RequestInit) => handle(new Request(url, init)) };
 }
 
 function inputs(scenario: string, gallery: string[], uploads: string[], isolation: string, server: ReturnType<typeof fakeCandidary>, sourceChanges: Record<string, unknown> = {}) {
@@ -248,6 +251,7 @@ describe('reviewed Candidary rehearsal adapter against real route shapes', () =>
     expect(uploaded.filter(item => item.eventId.startsWith('upload_')).length).toBe(6);
     const seeded = [...server.media.values()].filter(item => item.byteSize === seed.bytes.length);
     expect(seeded).toHaveLength(1); expect(seeded[0]!.publication).toBe('published'); expect(seeded[0]!.eventId.startsWith('gallery_')).toBe(true);
+    expect(seeded[0]!.previewReads).toBeGreaterThan(0);
     expect(mixed.probes.find((row: any) => row.kind === 'regeneration-seed')).toMatchObject({ ok: true });
     expect(mixed.previews.filter((row: any) => !row.previewHit)).toHaveLength(1);
     expect(mixed.previews.filter((row: any) => !row.previewHit)[0]).toMatchObject({ ok: false, previewPrivate: false });
@@ -280,5 +284,71 @@ describe('reviewed Candidary rehearsal adapter against real route shapes', () =>
     const privacy = leaked.probes.filter((row: any) => row.kind === 'privacy');
     expect(privacy.some((row: any) => row.violation === true && row.ok === false)).toBe(true);
     expect(observationMetrics(leaked).privacyFailures).toBeGreaterThan(0);
+  });
+
+  it('observes one deliberate same-byte multipart retry and verified original continuity', async () => {
+    const server=fakeCandidary(['gallery_event_0','isolation_event']);
+    const plan={...smallPlan('cold'),workloadProfile:'operational-v1',eventShards:1,guests:1,originals:1,pageTiles:1,visitsPerGuest:1,
+      controls:{directBaseline:0,directDuringLoad:0,privacy:0,deletion:0,cancellation:0,regenerationSeeds:0,retryChecks:1}};
+    const result=await runScenario(plan,createLoadAdapter({...adapterOptions,fetch:server.fetch}),
+      inputs('cold',['gallery_event_0'],[],'isolation_event',server));
+    const retry=result.probes.find((row:any)=>row.kind==='multipart-retry');
+    expect(retry).toMatchObject({ok:true,retryVerified:true,receiptVerified:true,hashVerified:true});
+    const duplicate=server.partSends.filter((row,index,all)=>all.some((other,prior)=>prior<index&&other.mediaId===row.mediaId&&other.index===row.index));
+    expect(duplicate).toHaveLength(1);
+    const first=server.partSends.find(row=>row.mediaId===duplicate[0]!.mediaId&&row.index===duplicate[0]!.index)!;
+    expect(duplicate[0]!.hash).toBe(first.hash);
+    expect(duplicate[0]!.bytes).toEqual(first.bytes);
+    expect(observationMetrics(result).retryChecks).toBe(1);
+  }, 30_000);
+
+  it('cancels preview and original bodies before accepting oversized responses', async () => {
+    const server=fakeCandidary(['gallery_event_0','isolation_event']);
+    let canceled=0;
+    const fetch=async (url:URL|string,init:RequestInit) => {
+      const response=await server.fetch(url,init),path=new URL(String(url)).pathname;
+      if (response.status===200 && /\/api\/media\/[^/]+\/(preview|original)$/u.test(path)) {
+        const preview=path.endsWith('/preview'),limit=preview?20*MiB:raw.bytes.length;
+        let sent=0;
+        return new Response(new ReadableStream({pull(controller){const count=Math.min(MiB,limit+1-sent);controller.enqueue(new Uint8Array(count));sent+=count;
+          if(sent===limit+1)controller.close();},cancel(){canceled++;}}),
+          {headers:{...Object.fromEntries(response.headers),'content-length':String(limit+1)}});
+      }
+      return response;
+    };
+    const plan={...smallPlan('cold'),eventShards:1,guests:1,originals:1,pageTiles:1,visitsPerGuest:1,
+      controls:{directBaseline:0,directDuringLoad:0,privacy:0,deletion:0,cancellation:0,regenerationSeeds:0,retryChecks:0}};
+    const result=await runScenario(plan,createLoadAdapter({...adapterOptions,fetch}),
+      inputs('cold',['gallery_event_0'],[],'isolation_event',server));
+    expect(result.uploads[0].ok).toBe(false);
+    expect(result.previews[0].ok).toBe(false);
+    expect(canceled).toBeGreaterThanOrEqual(2);
+  });
+  it('bounds denial-body inspection and cancels a leaked original before reading it', async () => {
+    const server=fakeCandidary(['gallery_event_0','isolation_event']);
+    let denialCanceled=0,successCanceled=0,successPulled=0,originals=0;
+    const fetch=async (url:URL|string,init:RequestInit) => {
+      const response=await server.fetch(url,init),path=new URL(String(url)).pathname;
+      if (/\/api\/media\/[^/]+\/original$/u.test(path)) originals++;
+      if ((response.status===401 || response.status===403) && path.endsWith('/preview')) {
+        let sent=0;
+        return new Response(new ReadableStream({pull(controller){const bytes=Math.min(8192,80*1024-sent);controller.enqueue(new Uint8Array(bytes));
+          sent+=bytes;if(sent===80*1024)controller.close();},cancel(){denialCanceled++;}},{highWaterMark:0}),{status:response.status});
+      }
+      if (path.endsWith('/original') && originals>1) {
+        return new Response(new ReadableStream({pull(controller){successPulled++;controller.enqueue(new Uint8Array(MiB));controller.close();},
+          cancel(){successCanceled++;}},{highWaterMark:0}),{status:200});
+      }
+      return response;
+    };
+    const plan={...smallPlan('cold'),workloadProfile:'operational-v1',eventShards:1,guests:1,originals:1,pageTiles:1,visitsPerGuest:1,
+      controls:{directBaseline:0,directDuringLoad:0,privacy:3,deletion:0,cancellation:0,regenerationSeeds:0,retryChecks:0}};
+    const result=await runScenario(plan,createLoadAdapter({...adapterOptions,fetch}),
+      inputs('cold',['gallery_event_0'],[],'isolation_event',server));
+    expect(result.probes).toHaveLength(3);
+    expect(result.probes.every((row:any)=>!row.ok && row.violation)).toBe(true);
+    expect(denialCanceled).toBe(2);
+    expect(successCanceled).toBe(1);
+    expect(successPulled).toBe(0);
   });
 });

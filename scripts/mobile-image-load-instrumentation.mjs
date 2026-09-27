@@ -14,7 +14,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { REQUIRED_METRICS, SCENARIOS, buildLoadPlan, observationMetrics } from './mobile-image-load-harness.mjs';
+import { REQUIRED_METRICS, OPERATIONAL_METRICS, SCENARIOS, buildLoadPlan, declaredOperations, observationMetrics } from './mobile-image-load-harness.mjs';
 import { serialize, sha256Hex, validateBundle } from './mobile-image-load-report.mjs';
 
 const deepFreeze = value => {
@@ -118,9 +118,11 @@ const plainObject = value => !!value && typeof value === 'object' && !Array.isAr
 const exactKeys = (value, keys) => plainObject(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 
 export function validateScope(scope) {
-  const { eventIds, ...constant } = plainObject(scope) ? scope : {};
+  const { eventIds, workloadProfile, ...constant } = plainObject(scope) ? scope : {};
   if (!plainObject(scope) || stable(constant) !== stable(PREVIEW_SCOPE) || !exactKeys(eventIds, SCENARIOS)
+    || (workloadProfile !== undefined && !['capacity-v1', 'operational-v1'].includes(workloadProfile))
     || SCENARIOS.some(name => !Array.isArray(eventIds[name]) || !eventIds[name].length || eventIds[name].length > 64
+      || (workloadProfile === 'operational-v1' && eventIds[name].length !== (name === 'mixed' ? 2 : 1))
       || new Set(eventIds[name]).size !== eventIds[name].length || eventIds[name].some(id => typeof id !== 'string' || !eventIdPattern.test(id)))) {
     refuse('scope must be the preview rehearsal scope with valid event identifiers');
   }
@@ -130,16 +132,29 @@ export function validateScope(scope) {
 /** The event IDs the adapter actually uses: the first eventShards gallery IDs, plus upload IDs for mixed. */
 export function scopeFromAuthorizations(authorizations) {
   const eventIds = {};
+  const workloadProfile = authorizations?.cold?.workloadProfile ?? 'capacity-v1';
+  if (!['capacity-v1', 'operational-v1'].includes(workloadProfile)) refuse('unknown workload profile');
   for (const name of SCENARIOS) {
-    const authorization = authorizations?.[name], plan = buildLoadPlan({ scenario: name });
+    const authorization = authorizations?.[name], plan = buildLoadPlan({ scenario: name, workloadProfile });
     if (authorization?.kind !== 'candidary.image-load-authorization' || authorization.scenario !== name
-      || !Array.isArray(authorization.eventIds) || authorization.eventIds.length < plan.eventShards
-      || (name === 'mixed' && (!Array.isArray(authorization.uploadEventIds) || authorization.uploadEventIds.length < plan.eventShards))) {
+      || (authorization.workloadProfile ?? 'capacity-v1') !== workloadProfile
+      || !Array.isArray(authorization.eventIds) || (workloadProfile === 'operational-v1' ? authorization.eventIds.length !== 1 : authorization.eventIds.length < plan.eventShards)
+      || (name === 'mixed' && (!Array.isArray(authorization.uploadEventIds)
+        || (workloadProfile === 'operational-v1' ? authorization.uploadEventIds.length !== 1 : authorization.uploadEventIds.length < plan.eventShards)))
+      || (workloadProfile === 'operational-v1' && (typeof authorization.isolationEventId !== 'string'
+        || !eventIdPattern.test(authorization.isolationEventId)
+        || !Array.isArray(authorization.uploadEventIds)
+        || (name !== 'mixed' && authorization.uploadEventIds.length !== 0)
+        || new Set([...authorization.eventIds, ...authorization.uploadEventIds, authorization.isolationEventId]).size
+          !== authorization.eventIds.length + authorization.uploadEventIds.length + 1))
+      || (workloadProfile === 'operational-v1' && (authorization.approvedRequests !== declaredOperations(plan).total
+        || authorization.approvedUploadBytes !== plan.payloadBounds.uploadBytes || authorization.approvedDownloadBytes !== plan.payloadBounds.downloadBytes))) {
       refuse('each scenario needs its own rehearsal authorization');
     }
     eventIds[name] = [...authorization.eventIds.slice(0, plan.eventShards), ...(name === 'mixed' ? authorization.uploadEventIds.slice(0, plan.eventShards) : [])];
   }
-  return validateScope({ ...JSON.parse(JSON.stringify(PREVIEW_SCOPE)), eventIds });
+  return validateScope({ ...JSON.parse(JSON.stringify(PREVIEW_SCOPE)),
+    ...(workloadProfile === 'operational-v1' ? { workloadProfile } : {}), eventIds });
 }
 
 /** Whole-second bounds: start floored, end exclusive after the second containing endedAt. */
@@ -372,6 +387,7 @@ export function buildInstrumentation({ bundle, exports, scope, pricing = PRICING
   validateScope(scope);
   if (stable(pricing) !== stable(PRICING)) refuse('pricing must be the reviewed constants');
   const observations = validateBundle(bundle);
+  if ((scope.workloadProfile ?? 'capacity-v1') !== (bundle.workloadProfile ?? 'capacity-v1')) refuse('scope profile differs from observations');
   if (!plainObject(exports) || exports.kind !== 'mobile-image-load-deployment-export' || stable(exports.scope) !== stable(scope)
     || !Array.isArray(exports.scenarios) || exports.scenarios.length !== SCENARIOS.length
     || stable(exports.scenarios.map(item => item?.name).sort()) !== stable([...SCENARIOS].sort())) refuse('export must cover every scenario for this scope');
@@ -400,9 +416,10 @@ export function buildInstrumentation({ bundle, exports, scope, pricing = PRICING
       busyFailoverChecks: decoder.busy,
       uploadPoolPreviewJobs: decoder.byPoolLane['upload/preview'] ?? 0,
       previewPoolUploadJobs: decoder.byPoolLane['preview/upload'] ?? 0,
-      costPer10000Originals: cost.costPer10000Originals,
+      ...(bundle.workloadProfile === 'operational-v1' ? {} : { costPer10000Originals: cost.costPer10000Originals }),
     };
-    const metrics = Object.fromEntries(REQUIRED_METRICS.map(key => [key, measured[key]]));
+    const metrics = Object.fromEntries((bundle.workloadProfile === 'operational-v1' ? OPERATIONAL_METRICS : REQUIRED_METRICS)
+      .map(key => [key, measured[key]]));
     if (Object.values(metrics).some(value => !Number.isFinite(value) || value < 0)) refuse('incomplete metric set');
     return { name, window: observed.window, metrics,
       usage: { mainWorker: { requests: usage.mainRequests, errors: usage.mainErrors }, r2: usage.r2, imageReads: image.rows,
@@ -412,6 +429,7 @@ export function buildInstrumentation({ bundle, exports, scope, pricing = PRICING
   });
   return { kind: 'mobile-image-load-instrumentation', harnessVersion: 1, source: 'deployment-instrumentation',
     buildFingerprint: bundle.buildFingerprint, imageRef: bundle.imageRef, exportedAt: exports.exportedAt,
+    ...(bundle.workloadProfile === 'operational-v1' ? { workloadProfile: 'operational-v1' } : {}),
     exportSha256: sha256Hex(serialize(exports)), scope,
     pricing: { retrievedAt: pricing.retrievedAt, currency: pricing.currency, basis: pricing.basis, sources: pricing.sources }, scenarios };
 }

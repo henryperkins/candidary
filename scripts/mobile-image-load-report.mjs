@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { REQUIRED_METRICS, SCENARIOS, assessLoadEvidence, declaredOperations, verifyLoadArtifacts } from './mobile-image-load-harness.mjs';
+import { REQUIRED_METRICS, OPERATIONAL_METRICS, SCENARIOS, assessLoadEvidence, canonicalLoadPlan, declaredOperations, verifyLoadArtifacts } from './mobile-image-load-harness.mjs';
 
 /** The exact bytes that are hashed and published; the release verifier hashes file bytes. */
 export const serialize = value => JSON.stringify(value, null, 2) + '\n';
@@ -40,7 +40,7 @@ function validateIdentity(identity) {
 function validateObservation(observed, name) {
   const start = Date.parse(observed?.window?.startedAt), end = Date.parse(observed?.window?.endedAt);
   if (observed?.kind !== 'mobile-image-load-observations' || observed.harnessVersion !== 1 || observed.plan?.scenario !== name
-    || observed.plan.live !== true || !Number.isFinite(start) || !Number.isFinite(end) || end < start
+    || !canonicalLoadPlan(observed.plan) || !Number.isFinite(start) || !Number.isFinite(end) || end < start
     || !['uploads', 'previews', 'controls', 'probes'].every(group => Array.isArray(observed[group])) || !plainObject(observed.concurrency)) {
     refuse(`${name} observations must be one live harness run`);
   }
@@ -56,7 +56,10 @@ export function bundleObservations(identity, observations) {
     if (matches.length !== 1) refuse('exactly one cold, warm and mixed run is required');
     return validateObservation(matches[0], name);
   });
-  return { kind: 'mobile-image-load-observations-bundle', harnessVersion: 1, ...bound, scenarios };
+  const workloadProfile = scenarios[0].plan.workloadProfile ?? 'capacity-v1';
+  if (scenarios.some(item => (item.plan.workloadProfile ?? 'capacity-v1') !== workloadProfile)) refuse('mixed workload profiles');
+  return { kind: 'mobile-image-load-observations-bundle', harnessVersion: 1, ...bound,
+    ...(workloadProfile === 'operational-v1' ? { workloadProfile } : {}), scenarios };
 }
 
 /** Returns the bundle's observations keyed by scenario name. */
@@ -64,14 +67,18 @@ export function validateBundle(bundle) {
   if (bundle?.kind !== 'mobile-image-load-observations-bundle' || bundle.harnessVersion !== 1 || !Array.isArray(bundle.scenarios)
     || bundle.scenarios.length !== SCENARIOS.length) refuse('invalid observations bundle');
   validateIdentity(bundle);
-  return Object.fromEntries(SCENARIOS.map((name, index) => [name, validateObservation(bundle.scenarios[index], name)]));
+  const observations = Object.fromEntries(SCENARIOS.map((name, index) => [name, validateObservation(bundle.scenarios[index], name)]));
+  if (SCENARIOS.some(name => (observations[name].plan.workloadProfile ?? 'capacity-v1') !== (bundle.workloadProfile ?? 'capacity-v1')))
+    refuse('mixed workload profiles');
+  return observations;
 }
 
 export function buildLoadReport({ bundle, instrumentation, versions }) {
   const observations = validateBundle(bundle);
   if (instrumentation?.kind !== 'mobile-image-load-instrumentation' || instrumentation.harnessVersion !== 1
     || instrumentation.source !== 'deployment-instrumentation' || instrumentation.buildFingerprint !== bundle.buildFingerprint
-    || instrumentation.imageRef !== bundle.imageRef || !Array.isArray(instrumentation.scenarios)) refuse('instrumentation does not match the bundle identity');
+    || instrumentation.imageRef !== bundle.imageRef || !Array.isArray(instrumentation.scenarios)
+    || (instrumentation.workloadProfile ?? 'capacity-v1') !== (bundle.workloadProfile ?? 'capacity-v1')) refuse('instrumentation does not match the bundle identity');
   if (!['harness', 'worker', 'decoder'].every(key => typeof versions?.[key] === 'string' && versionPattern.test(versions[key]))) {
     refuse('harness, main Worker and decoder versions are required');
   }
@@ -79,17 +86,21 @@ export function buildLoadReport({ bundle, instrumentation, versions }) {
     const observed = observations[name], instrumented = instrumentation.scenarios.find(item => item?.name === name);
     if (!plainObject(instrumented?.metrics) || instrumented.window?.startedAt !== observed.window.startedAt
       || instrumented.window?.endedAt !== observed.window.endedAt) refuse(`${name} instrumentation is missing or covers another window`);
-    const metrics = Object.fromEntries(REQUIRED_METRICS.map(key => [key, instrumented.metrics[key]]));
+    const operational = bundle.workloadProfile === 'operational-v1';
+    if (operational && instrumented.metrics.costPer10000Originals != null) refuse(`${name} operational instrumentation cannot claim normalized capacity cost`);
+    const metrics = Object.fromEntries((operational ? OPERATIONAL_METRICS : REQUIRED_METRICS).map(key => [key, instrumented.metrics[key]]));
     if (Object.values(metrics).some(value => !Number.isFinite(value) || value < 0)) refuse(`${name} instrumentation is incomplete`);
     const plan = observed.plan, declared = declaredOperations(plan);
     // Complete means every declared logical operation has an observation row; outcomes are judged separately.
     const complete = observed.uploads.length === declared.uploads && observed.previews.length === declared.previews
       && observed.controls.length === declared.controls && observed.probes.length === declared.probes;
-    return { name, guests: plan.guests, originals: plan.originals, pageTiles: plan.pageTiles, visitsPerGuest: plan.visitsPerGuest,
+    return { name, ...(operational ? { workloadProfile: plan.workloadProfile, payloadBounds: plan.payloadBounds,
+      declaredOperations: declared.total } : {}), guests: plan.guests, originals: plan.originals, pageTiles: plan.pageTiles, visitsPerGuest: plan.visitsPerGuest,
       uploadConcurrency: plan.uploadConcurrency, previewConcurrency: plan.previewConcurrency, eventShards: plan.eventShards, pools: plan.pools,
       complete, window: observed.window, concurrency: observed.concurrency, costUsd: instrumented.cost?.totalUsd ?? null, metrics };
   });
   return { kind: 'mobile-image-load', harnessVersion: 1, source: 'live-rehearsal', buildFingerprint: bundle.buildFingerprint, imageRef: bundle.imageRef,
+    ...(bundle.workloadProfile === 'operational-v1' ? { workloadProfile: 'operational-v1', capacityQualified: false } : {}),
     observationsSha256: sha256Hex(serialize(bundle)), instrumentationSha256: sha256Hex(serialize(instrumentation)),
     versions: { harness: versions.harness, worker: versions.worker, decoder: versions.decoder }, scenarios };
 }

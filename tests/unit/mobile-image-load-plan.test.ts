@@ -40,6 +40,29 @@ describe('mobile image rehearsal boundaries', () => {
     expect(buildLoadPlan({ scenario: 'mixed' }).controls).toEqual({ directBaseline: 100, directDuringLoad: 100, privacy: 50, deletion: 10, cancellation: 10, regenerationSeeds: 20 });
   });
 
+  it('pins the bounded operational plan, conservative payload budgets and exact authorization', () => {
+    for (const [scenario, total, upload, download] of [
+      ['cold',149,6008.5,3757.5+0.625], ['warm',124,488,1920+0.625], ['mixed',151,6048.5,3757.5+0.625],
+    ] as const) {
+      const plan = buildLoadPlan({ scenario, workloadProfile: 'operational-v1' });
+      expect(plan).toMatchObject({ workloadProfile:'operational-v1',guests:4,originals:24,pageTiles:12,visitsPerGuest:2,
+        eventShards:1,uploadConcurrency:4,previewConcurrency:8,pools:{upload:2,preview:2},
+        controls:{directBaseline:10,directDuringLoad:10,privacy:4,deletion:2,cancellation:2,
+          regenerationSeeds:scenario==='mixed'?2:0,retryChecks:scenario==='warm'?0:1},
+        payloadBounds:{uploadBytes:upload*MiB,downloadBytes:download*MiB} });
+      expect(declaredOperations(plan).total).toBe(total);
+      const approved = { ...authorization(scenario), workloadProfile:'operational-v1',eventIds:['gallery_event_0'],
+        uploadEventIds:scenario==='mixed'?['upload_event_0']:[],approvedRequests:total,
+        approvedUploadBytes:upload*MiB,approvedDownloadBytes:download*MiB };
+      expect(authorizeLoad({live:true,scenario,workloadProfile:'operational-v1'},approved,env,context)).toBe(true);
+      for (const change of [{approvedRequests:total-1},{approvedUploadBytes:upload*MiB-1},{approvedDownloadBytes:download*MiB-1},
+        {workloadProfile:'capacity-v1'},{eventIds:ids('gallery',2)}, {uploadEventIds:ids('upload',2)}])
+        expect(() => authorizeLoad({live:true,scenario,workloadProfile:'operational-v1'},{...approved,...change},env,context)).toThrow();
+    }
+    expect(() => buildLoadPlan({scenario:'cold',workloadProfile:'unknown'})).toThrow();
+    expect(() => authorizeLoad({live:true,scenario:'cold'},authorization('cold',{workloadProfile:'operational-v1'}),env,context)).toThrow();
+  });
+
   it('shards the unshrunk workload across events inside the product capacity limits', () => {
     expect(EVENT_CAPACITY).toEqual({ media: MAX_EVENT_MEDIA, bytes: MAX_EVENT_BYTES });
     expect(`https://${PREVIEW_ROOT_HOST}`).toBe(PREVIEW_APPLICATION_ROOT_ORIGIN);

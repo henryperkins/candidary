@@ -25,7 +25,7 @@ export async function verifyRelease({ decoderRelease, mobileRelease, corpus, man
   if (!corpus?.structureValid || !sha(manifestSha256) || decoderRelease?.protocolVersion !== 1 || decoderRelease.previewProfile !== profile
     || !list(decoderRelease.releases) || mobileRelease?.kind !== 'candidary.mobile-image-release' || mobileRelease.schemaVersion !== 26
     || mobileRelease.protocolVersion !== 1 || mobileRelease.previewProfile !== profile || !bytes(mobileRelease.maxOriginalBytes)
-    || !list(mobileRelease.cases)) return { valid: false, admittedCaseIds: [], universal: false, issues: ['Invalid committed release/corpus schema.'] };
+    || !list(mobileRelease.cases)) return { valid: false, admittedCaseIds: [], capacityQualified: false, universal: false, issues: ['Invalid committed release/corpus schema.'] };
   const documents = new Map();
   async function evidence(digest) {
     if (!sha(digest)) throw new Error('Missing evidence digest.');
@@ -40,7 +40,8 @@ export async function verifyRelease({ decoderRelease, mobileRelease, corpus, man
     const q = await evidence(entry.evidenceSha256);
     if (q.kind !== 'mobile-image-qualification' || q.harnessVersion !== 1 || q.buildFingerprint !== entry.buildFingerprint
       || !image(q.imageRef) || q.previewProfile !== profile || q.manifestSha256 !== manifestSha256
-      || !bytes(q.maxOriginalBytes) || !list(q.caseIds) || !q.caseIds.length || q.caseIds.some(id => !requiredCaseIds.includes(id))
+      || !bytes(q.maxOriginalBytes) || !['capacity-v1','operational-v1'].includes(q.qualificationProfile ?? 'capacity-v1')
+      || !list(q.caseIds) || !q.caseIds.length || q.caseIds.some(id => !requiredCaseIds.includes(id))
       || new Set(q.caseIds).size !== q.caseIds.length) throw new Error('Qualification identity/manifest mismatch.');
     return q;
   }
@@ -77,6 +78,10 @@ export async function verifyRelease({ decoderRelease, mobileRelease, corpus, man
         || corpus.cases.find(item => item.id === entry.caseId)?.status !== 'pass'
         || !caseProof(entry.caseId, q, ['local', 'live', 'ios', 'android'])) throw new Error('Intake case lacks complete matching evidence.');
       const load = await evidence(q.loadEvidenceSha256);
+      const qualificationProfile = q.qualificationProfile ?? 'capacity-v1';
+      if ((load.workloadProfile ?? 'capacity-v1') !== qualificationProfile
+        || (qualificationProfile === 'operational-v1' && entry.maxOriginalBytes > 128 * 1024 ** 2))
+        throw new Error('Qualification profile or operational size cap mismatch.');
       const assessment = assessLoadEvidence(load, q);
       if (!assessment.pass) throw new Error(assessment.issues.join(' '));
       if (!verifyLoadArtifacts(load, await evidence(load.observationsSha256), await evidence(load.instrumentationSha256)))
@@ -85,8 +90,13 @@ export async function verifyRelease({ decoderRelease, mobileRelease, corpus, man
     } catch (error) { fail(error.message); }
   }
   const valid = issues.length === 0;
+  const capacityQualified = valid && admitted.size > 0 && mobileRelease.cases.every(entry => {
+    const digest = entry.evidenceSha256, q = documents.get(digest);
+    return (q?.qualificationProfile ?? 'capacity-v1') === 'capacity-v1';
+  });
   return { valid, admittedCaseIds: valid ? [...admitted].sort() : [],
-    universal: valid && corpus.complete === true && requiredCaseIds.every(id => corpus.cases.some(item => item.id === id && item.status === 'pass'))
+    capacityQualified,
+    universal: capacityQualified && corpus.complete === true && requiredCaseIds.every(id => corpus.cases.some(item => item.id === id && item.status === 'pass'))
       && requiredCaseIds.filter(id => !id.startsWith('live-photo-')).every(id => admitted.has(id)), issues: [...new Set(issues)] };
 }
 
@@ -115,5 +125,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     });
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.valid && (!args.includes('--require-universal') || report.universal) ? 0 : 1;
-  } catch { console.log(JSON.stringify({ valid: false, admittedCaseIds: [], universal: false, issues: ['Missing or invalid release evidence.'] })); process.exitCode = 1; }
+  } catch { console.log(JSON.stringify({ valid: false, admittedCaseIds: [], capacityQualified: false, universal: false, issues: ['Missing or invalid release evidence.'] })); process.exitCode = 1; }
 }

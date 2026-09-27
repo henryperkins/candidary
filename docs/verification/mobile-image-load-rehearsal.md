@@ -1,11 +1,20 @@
 # Mobile image load rehearsal (preview only)
 
-Status: prepared locally on 2026-09-25. **No live request, Cloudflare API call, deployment or
+**Scope amendment, 2026-09-27:** This full capacity rehearsal is deferred. The owner
+approved a [bounded operational profile](mobile-image-operational-rehearsal.md) for
+individual case admission, while capacity/cost and universal claims remain unverified.
+The workload and full-profile criteria below are retained for a future capacity run.
+Omitting `--profile` in the harness still selects this historical full workload.
+The bounded attempt has since completed without qualifying; see its
+[reviewed results and archive](mobile-image-operational-results-20260927.md).
+
+Historical preparation status, recorded on 2026-09-25 (superseded for the later bounded
+attempt): **No live request, Cloudflare API call, deployment or
 remote mutation has been made.** Every step marked **[authorization]** needs the release owner's
 explicit, separate approval. Approving the local implementation does not cover any of them.
 
-This rehearsal produces the `mobile-image-load` evidence that `scripts/verify-mobile-image-release.mjs`
-requires before any main-app intake case can be admitted. It runs only against the private
+This rehearsal produces full `capacity-v1` evidence accepted by `scripts/verify-mobile-image-release.mjs`.
+The approved `operational-v1` alternative is described in the linked runbook. It runs only against the private
 **preview** deployment (`candidary-preview` plus `candidary-image-decoder-preview`), on dedicated
 rehearsal events, while the preview environment is otherwise idle. The release order around it is
 in `docs/verification/mobile-image-preview-release.md` (step 7).
@@ -315,7 +324,11 @@ RSS and at least one busy failover, which a genuinely warm window can never prod
 made the gate unpassable by honest evidence and did not flag busy-only decoder traffic during warm.
 No target was relaxed; warm and mixed are stricter than before.
 
-## Still unauthorized and unproven
+## Historical preparation snapshot
+
+The following records the original preparation state. Later preview publication,
+authorization, API access and bounded-run outcomes are documented in the current
+handoff and operational results; these statements are not their current status.
 
 - Every bracketed step: event creation, live scenario runs, the Cloudflare API export, decoder
   image publication, deployment, remote migration and preview D1 case switches.

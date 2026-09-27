@@ -12,3 +12,6 @@ shared/image-formats.ts -text
 tests/fixtures/mobile-images/manifest.json -text
 # Reviewed evidence filenames are their raw-byte SHA-256; preserve them across operating systems.
 tests/fixtures/mobile-images/evidence/*.json -text
+# Portable practical-acceptance observations retain their reviewed raw bytes.
+docs/verification/evidence/mobile-image-preview-recovery-20260927.json -text
+docs/verification/evidence/mobile-image-practical-20260927/device-smoke.json -text whitespace=cr-at-eol

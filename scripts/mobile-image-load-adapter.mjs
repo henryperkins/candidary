@@ -13,6 +13,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { open, readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
+import { DENIAL_BODY_MAX_BYTES } from './mobile-image-load-harness.mjs';
 
 const MiB = 1024 ** 2;
 export const PART_BYTES = 8 * MiB;
@@ -216,13 +217,13 @@ export function createLoadAdapter(options = {}) {
       if (response?.status === 200) {
         const ack = await data(response, 200);
         if (ack?.index !== index || ack.accepted !== true) fail();
-        return;
+        return chunk;
       }
       await response?.body?.cancel().catch(() => {});
       if (response && !retryable(response.status)) fail();
       // A lost acknowledgement may still have accepted the exact part.
       const status = await data(await call(jar, 'GET', path), 200).catch(() => null);
-      if (status?.transfer?.acceptedParts?.includes(index)) return;
+      if (status?.transfer?.acceptedParts?.includes(index)) return chunk;
       if (attempt === 2) fail();
       await sleep(350 * 2 ** attempt);
     }
@@ -242,8 +243,30 @@ export function createLoadAdapter(options = {}) {
     const response = await call(state.managers.get(eventId).jar, 'GET', `/api/media/${encodeURIComponent(mediaId)}/original`, { timeoutMs: downloadTimeoutMs });
     if (response.status !== 200 || !response.body) { await response.body?.cancel().catch(() => {}); return null; }
     const hash = createHash('sha256'); let bytes = 0;
-    for await (const chunk of response.body) { hash.update(chunk); bytes += chunk.byteLength; if (bytes > expectedBytes) break; }
+    const reader = response.body.getReader();
+    try {
+      if (Number(response.headers.get('content-length')) > expectedBytes) { await reader.cancel(); return null; }
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        bytes += value.byteLength;
+        if (bytes > expectedBytes) { await reader.cancel(); return null; }
+        hash.update(value);
+      }
+    } finally { reader.releaseLock(); }
     return { sha256: hash.digest('hex'), bytes, declared: Number(response.headers.get('content-length')) };
+  }
+  async function boundedPreview(response) {
+    if (!response.body) return 0;
+    const reader = response.body.getReader(); let bytes = 0;
+    try {
+      if (Number(response.headers.get('content-length')) > DIRECT_MAX_BYTES) { await reader.cancel(); return 0; }
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        bytes += value.byteLength;
+        if (bytes > DIRECT_MAX_BYTES) { await reader.cancel(); return 0; }
+      }
+      return bytes;
+    } finally { reader.releaseLock(); }
   }
   async function publish(eventId, mediaId) {
     const published = await data(await call(state.managers.get(eventId).jar, 'PATCH', `/api/manage/events/${eventId}/media/${encodeURIComponent(mediaId)}`,
@@ -254,9 +277,31 @@ export function createLoadAdapter(options = {}) {
   }
   /** A denial must be a closed 401/403 envelope with no decoder, object-key or digest material. */
   async function denied(response) {
-    const text = await response.text().catch(() => '');
-    const leak = [...response.headers.keys()].some(name => name.startsWith('x-decoder')) || /[a-f0-9]{64}/u.test(text) || /media\//u.test(text);
-    return { denied: (response.status === 401 || response.status === 403) && !leak, violation: (response.status >= 200 && response.status < 300) || leak };
+    const headerLeak = [...response.headers.keys()].some(name => name.startsWith('x-decoder'));
+    if (response.status !== 401 && response.status !== 403) {
+      await response.body?.cancel().catch(() => {});
+      return { denied: false, violation: (response.status >= 200 && response.status < 300) || headerLeak };
+    }
+    if (Number(response.headers.get('content-length')) > DENIAL_BODY_MAX_BYTES) {
+      await response.body?.cancel().catch(() => {});
+      return { denied: false, violation: true };
+    }
+    const parts = []; let bytes = 0;
+    if (response.body) {
+      const reader = response.body.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await reader.read(); if (done) break;
+          const remaining = DENIAL_BODY_MAX_BYTES - bytes;
+          if (value.byteLength > remaining) { await reader.cancel().catch(() => {}); return { denied: false, violation: true }; }
+          parts.push(Buffer.from(value)); bytes += value.byteLength;
+        }
+      } catch { return { denied: false, violation: true }; }
+      finally { reader.releaseLock(); }
+    }
+    const text = Buffer.concat(parts, bytes).toString('utf8');
+    const leak = headerLeak || /[a-f0-9]{64}/u.test(text) || /media\//u.test(text);
+    return { denied: !leak, violation: leak };
   }
   /** Cold probes run beside the first uploads; they wait for a published target instead of failing. */
   async function target(index) {
@@ -326,8 +371,15 @@ export function createLoadAdapter(options = {}) {
       const eventId = state.galleryEvents[shard], list = state.published.get(eventId);
       if (!list.length) fail();
       const mediaId = list[(localGuest * state.plan.pageTiles + tile) % list.length];
-      const response = await call(await guestJar(eventId, guestIndex), 'GET', `/api/media/${encodeURIComponent(mediaId)}/preview`);
-      const bytes = response.body ? new Uint8Array(await response.arrayBuffer()).byteLength : 0;
+      const jar = await guestJar(eventId, guestIndex), path = `/api/media/${encodeURIComponent(mediaId)}/preview`;
+      let response;
+      for (let attempt = 0; ; attempt++) {
+        response = await call(jar, 'GET', path);
+        if (state.plan.workloadProfile !== 'operational-v1' || response.status !== 503 || attempt === 2) break;
+        await response.body?.cancel().catch(() => {});
+        await sleep(350 * 2 ** attempt);
+      }
+      const bytes = await boundedPreview(response);
       const h = response.headers;
       const previewHit = response.status === 200;
       const previewPrivate = previewHit && h.get('cache-control') === 'private, no-store' && /\bcookie\b/iu.test(h.get('vary') ?? '')
@@ -379,7 +431,40 @@ export function createLoadAdapter(options = {}) {
       if (kind === 'regeneration-seed') {
         const shard = index % state.plan.eventShards, eventId = state.galleryEvents[shard];
         const mediaId = await directUpload(await guestJar(eventId, shard), eventId, state.sources.seed, `seed-${state.runId}-${index}`, guestName(shard));
-        return { ok: await publish(eventId, mediaId) };
+        const ok = await publish(eventId, mediaId);
+        if (ok && state.plan.scenario === 'mixed') {
+          const list = state.published.get(eventId);
+          list.splice(list.indexOf(mediaId), 1); list.unshift(mediaId);
+        }
+        return { ok };
+      }
+      if (kind === 'multipart-retry') {
+        const shard = index % state.plan.eventShards, eventId = state.uploadEvents[shard];
+        const jar = await guestJar(eventId, shard), entry = state.sources.smallest;
+        const { mediaId, transfer, path } = await reserveTransfer(jar, eventId, entry, `retry-${state.runId}-${index}`, guestName(shard));
+        const chunk = await sendPart(jar, path, entry, 0);
+        // Deliberate replay is exactly one extra send of the accepted part, with the same file bytes/hash.
+        const replay = await data(await call(jar, 'PUT', `${path}/parts/0`, { body: chunk.bytes, headers: {
+          'content-type': 'application/octet-stream', 'x-part-sha256': chunk.sha256, 'content-length': String(chunk.bytes.byteLength) } }), 200);
+        if (replay?.index !== 0 || replay.accepted !== true) fail();
+        const accepted = await data(await call(jar, 'GET', path), 200);
+        const retryVerified = accepted?.transfer?.mediaId === mediaId && accepted.transfer.acceptedParts?.includes(0);
+        if (!retryVerified) fail();
+        for (let partIndex = 1; partIndex < transfer.partCount; partIndex++) await sendPart(jar, path, entry, partIndex);
+        await data(await call(jar, 'POST', `${path}/complete`, { json: {} }), 200, 202);
+        const started = now(); let receiptVerified = false;
+        for (;;) {
+          const status = await data(await call(jar, 'GET', path), 200);
+          if (status?.transfer?.state === 'delivered') {
+            receiptVerified = status.transfer.mediaId === mediaId && status.media?.id === mediaId && status.media.uploadState === 'stored';
+            break;
+          }
+          if (!['processing', 'retryable'].includes(status?.transfer?.state) || now() - started > pollTimeoutMs) break;
+          await sleep(pollIntervalMs);
+        }
+        const original = receiptVerified ? await download(eventId, mediaId, entry.byteSize) : null;
+        const hashVerified = !!original && original.sha256 === entry.sha256 && original.bytes === entry.byteSize && original.declared === entry.byteSize;
+        return { ok: retryVerified && receiptVerified && hashVerified, retryVerified, receiptVerified, hashVerified };
       }
       fail();
     },

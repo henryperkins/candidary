@@ -1,5 +1,16 @@
 # Mobile image physical-device protocol
 
+**Current scope, 2026-09-27:** The owner selected BrowserStack for limited real-device
+smoke observations under [practical acceptance](mobile-image-practical-acceptance-20260927.md).
+BrowserStack real hardware counts as actual device observation for the steps performed,
+even when the operator does not hold the phone. Record the actual hardware, OS/browser,
+steps and outcome; trial-limited upload/save/share observations may be deferred. The
+exhaustive per-fixture protocol below is deferred and remains historical. A cloud-device
+smoke observation does not certify that full protocol; no device pass is claimed by this
+amendment, and full device certification or paid access is not a completion requirement.
+
+## Historical exhaustive protocol
+
 Status: **prepared, not executed.** No iPhone or Android phone has been used for this
 lane. This protocol, `scripts/record-mobile-device-evidence.mjs` and its unit tests
 contain no device result, and nothing here may be read as one. Every iOS Safari and

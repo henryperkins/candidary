@@ -6,12 +6,14 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const MiB = 1024 ** 2;
+export const DENIAL_BODY_MAX_BYTES = 64 * 1024;
 /** Mirrors shared/constants.ts MAX_EVENT_MEDIA/MAX_EVENT_BYTES; a unit test pins the pair. */
 export const EVENT_CAPACITY = { media: 10_000, bytes: 100 * 1024 ** 3 };
 /** Mirrors shared/origins.ts PREVIEW_APPLICATION_ROOT_ORIGIN. */
 export const PREVIEW_ROOT_HOST = 'candidary-preview.lfd.workers.dev';
 export const SCENARIOS = ['cold', 'warm', 'mixed'];
-const PROBE_KINDS = ['privacy', 'deletion', 'cancellation', 'regeneration-seed'];
+const PROBE_KINDS = ['privacy', 'deletion', 'cancellation', 'regeneration-seed', 'multipart-retry'];
+export const WORKLOAD_PROFILES = ['capacity-v1', 'operational-v1'];
 // Controls/probes are bounded by 20 MiB direct files; keep 10% of every event free for them.
 const CAPACITY_HEADROOM = 0.9;
 
@@ -24,7 +26,27 @@ export function minimumEventShards(plan) {
 }
 export function buildLoadPlan(options = {}) {
   const scenario = options.scenario ?? 'mixed';
-  const plan = { scenario, live: false, guests: 500, originals: 10_000,
+  const workloadProfile = options.workloadProfile ?? 'capacity-v1';
+  if (!SCENARIOS.includes(scenario) || !WORKLOAD_PROFILES.includes(workloadProfile)) throw new Error('Unknown workload profile or scenario.');
+  if (workloadProfile === 'operational-v1') {
+    const sourceSizes = [25 * MiB, 50 * MiB, 75 * MiB];
+    const controls = { directBaseline: 10, directDuringLoad: 10, privacy: 4, deletion: 2, cancellation: 2,
+      regenerationSeeds: scenario === 'mixed' ? 2 : 0, retryChecks: scenario === 'warm' ? 0 : 1 };
+    // Media payload only. Three possible sends for each multipart part, plus one deliberate
+    // repeated accepted part. JSON/headers, polls and internal R2/decoder traffic are excluded.
+    const originalsUpper = 8 * sourceSizes.reduce((sum, bucket) => sum + bucket * 1.5, 0);
+    const uploadBytes = (scenario === 'warm' ? 0 : originalsUpper * 3 + (sourceSizes[0] * 1.5 * 3 + 8 * MiB))
+      + (controls.directBaseline + controls.directDuringLoad + controls.deletion + controls.regenerationSeeds) * 20 * MiB
+      + controls.cancellation * 8 * MiB * 3;
+    const downloadBytes = 4 * 12 * 2 * 20 * MiB
+      + (scenario === 'warm' ? 0 : originalsUpper + sourceSizes[0] * 1.5)
+      + (controls.privacy + controls.deletion * 2 + controls.cancellation) * DENIAL_BODY_MAX_BYTES;
+    return { scenario, workloadProfile, live: false, guests: 4, originals: 24, pageTiles: 12, visitsPerGuest: 2,
+      sourceSizes, uploadConcurrency: 4, previewConcurrency: 8, uploadIntervalMs: 100, previewIntervalMs: 50,
+      controls, controlConcurrency: 1, controlIntervalMs: 250, pools: { upload: 2, preview: 2 },
+      qualification: 'missing', eventShards: 1, payloadBounds: { uploadBytes, downloadBytes } };
+  }
+  const plan = { scenario, workloadProfile, live: false, guests: 500, originals: 10_000,
     pageTiles: 48, visitsPerGuest: 2, sourceSizes: [25 * MiB, 50 * MiB, 75 * MiB],
     uploadConcurrency: 4, previewConcurrency: 8, uploadIntervalMs: 100, previewIntervalMs: 50,
     // Direct-path negative controls, product-flow probes and mixed-only regeneration seeds.
@@ -34,13 +56,41 @@ export function buildLoadPlan(options = {}) {
     pools: { upload: 2, preview: 2 }, qualification: 'missing' };
   return { ...plan, eventShards: minimumEventShards(plan) };
 }
+const stable = value => Array.isArray(value) ? `[${value.map(stable).join(',')}]`
+  : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`
+    : JSON.stringify(value);
+/** Historical capacity artifacts omitted workloadProfile; operational artifacts must pin every plan field. */
+export function canonicalLoadPlan(plan) {
+  if (!plan || !WORKLOAD_PROFILES.includes(plan.workloadProfile ?? 'capacity-v1')) return false;
+  const canonical = buildLoadPlan({ scenario: plan.scenario, workloadProfile: plan.workloadProfile });
+  canonical.live = true;
+  if (plan.workloadProfile === undefined) delete canonical.workloadProfile;
+  return stable(plan) === stable(canonical);
+}
+// Mirrors the fixed preview scope in mobile-image-load-instrumentation.mjs. Duplication fails
+// closed if that deployment scope changes without a corresponding release-verifier review.
+const OPERATIONAL_SCOPE_BASE = {
+  kind: 'candidary.image-load-scope', environment: 'preview', workloadProfile: 'operational-v1',
+  imageDataset: 'candidary_image_metrics_preview', decoderDataset: 'candidary_image_decoder_preview',
+  mainScript: 'candidary-preview', buckets: ['candidary-preview-media', 'candidary-preview-media-canonical'],
+  containers: { instanceType: 'standard-2', pools: { upload: 2, preview: 2 }, sleepAfterSeconds: 600 },
+};
+function validOperationalScope(scope) {
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return false;
+  const { eventIds, ...base } = scope;
+  const id = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{8,128}$/u.test(value);
+  return stable(base) === stable(OPERATIONAL_SCOPE_BASE) && eventIds && typeof eventIds === 'object' && !Array.isArray(eventIds)
+    && stable(Object.keys(eventIds).sort()) === stable([...SCENARIOS].sort())
+    && SCENARIOS.every(name => Array.isArray(eventIds[name]) && eventIds[name].length === (name === 'mixed' ? 2 : 1)
+      && eventIds[name].every(id) && new Set(eventIds[name]).size === eventIds[name].length);
+}
 /** The exact logical-operation total an authorization must approve for one scenario run. */
 export function declaredOperations(plan) {
   const c = plan.controls;
   const uploads = plan.scenario === 'warm' ? 0 : plan.originals;
   const previews = plan.guests * plan.pageTiles * plan.visitsPerGuest;
   const controls = c.directBaseline + c.directDuringLoad;
-  const probes = c.privacy + c.deletion + c.cancellation + c.regenerationSeeds;
+  const probes = c.privacy + c.deletion + c.cancellation + c.regenerationSeeds + (c.retryChecks ?? 0);
   return { uploads, previews, controls, probes, total: uploads + previews + controls + probes };
 }
 export function guestsInShard(plan, shard) {
@@ -78,7 +128,8 @@ export function authorizeLoad(options, authorization, env = process.env, context
   if (!options.live) return false;
   const now = context.now ?? Date.now();
   const repoRoot = context.repoRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const plan = buildLoadPlan({ scenario: options.scenario ?? authorization?.scenario });
+  const plan = buildLoadPlan({ scenario: options.scenario ?? authorization?.scenario, workloadProfile: options.workloadProfile });
+  const operational = plan.workloadProfile === 'operational-v1';
   let url;
   try { url = new URL(authorization?.target ?? 'https://invalid'); } catch { url = new URL('https://invalid'); }
   const expires = Date.parse(authorization?.expiresAt);
@@ -91,8 +142,8 @@ export function authorizeLoad(options, authorization, env = process.env, context
     || authorization.environment !== 'preview' || authorization.dedicatedRehearsalEvent !== true
     || !SCENARIOS.includes(plan.scenario) || authorization.scenario !== plan.scenario
     || typeof authorization.authorizedBy !== 'string' || !authorization.authorizedBy.trim()
-    || !ids(events) || events.length < plan.eventShards || !ids(uploads)
-    || (plan.scenario === 'mixed' ? uploads.length < plan.eventShards : uploads.length !== 0)
+    || !ids(events) || (operational ? events.length !== 1 : events.length < plan.eventShards) || !ids(uploads)
+    || (plan.scenario === 'mixed' ? (operational ? uploads.length !== 1 : uploads.length < plan.eventShards) : uploads.length !== 0)
     || !eventIdPattern.test(authorization.isolationEventId ?? '') || new Set(all).size !== all.length
     || !Number.isFinite(expires) || expires <= now || expires - now > 72 * 3600_000
     || idle?.idle !== true || !Number.isFinite(idleStart) || !Number.isFinite(idleEnd) || idleStart > now || idleEnd < expires
@@ -100,6 +151,10 @@ export function authorizeLoad(options, authorization, env = process.env, context
     || !(url.hostname === PREVIEW_ROOT_HOST || url.hostname.endsWith(`-${PREVIEW_ROOT_HOST}`))
     || url.pathname !== '/' || url.search || url.hash
     || !privatePath(authorization.credentialsPath, { ...context, repoRoot }) || !privatePath(authorization.sourcesPath, { ...context, repoRoot })
+    || (operational ? authorization.workloadProfile !== 'operational-v1'
+      || authorization.approvedUploadBytes !== plan.payloadBounds.uploadBytes
+      || authorization.approvedDownloadBytes !== plan.payloadBounds.downloadBytes
+      : authorization.workloadProfile !== undefined && authorization.workloadProfile !== 'capacity-v1')
     || authorization.approvedRequests !== declaredOperations(plan).total) {
     throw new Error('A current, explicit preview rehearsal authorization is required.');
   }
@@ -136,7 +191,7 @@ const fields = {
   uploads: ['verificationMs', 'sourceBytes', 'receiptVerified', 'hashVerified', 'incorrectReceipt', 'hashMismatch'],
   previews: ['previewHit', 'previewPrivate'],
   controls: ['phase'],
-  probes: ['kind', 'violation'],
+  probes: ['kind', 'violation', 'retryVerified', 'receiptVerified', 'hashVerified'],
 };
 /** Allowlisted primitives only: no credential, filename, identifier, body or exception text leaves the adapter. */
 function sanitize(group, values) {
@@ -165,7 +220,8 @@ export async function runScenario(plan, adapter, authorization) {
     const control = phase => adapter.control ? paced(phase === 'baseline' ? c.directBaseline : c.directDuringLoad, plan.controlConcurrency,
       plan.controlIntervalMs, index => adapter.control({ index, phase, pool: 'direct' })
         .then(result => ({ ...result, phase }), () => ({ ok: false, phase })), lanes.control) : [];
-    const probeList = [...Array(c.privacy).fill('privacy'), ...Array(c.deletion).fill('deletion'), ...Array(c.cancellation).fill('cancellation')];
+    const probeList = [...Array(c.privacy).fill('privacy'), ...Array(c.deletion).fill('deletion'), ...Array(c.cancellation).fill('cancellation'),
+      ...Array(c.retryChecks ?? 0).fill('multipart-retry')];
     const probe = (kinds, offset = 0) => adapter.probe ? paced(kinds.length, plan.controlConcurrency, plan.controlIntervalMs,
       // A failed control/probe keeps its declared kind so accounting cannot silently drop it.
       index => adapter.probe({ index: index + offset, kind: kinds[index] })
@@ -201,40 +257,53 @@ export const REQUIRED_METRICS = ['originalBytesFetched','nativeDecodes','nativeS
   'successfulPreviewRequests','privacyChecks','deletionChecks','directControlRequests','busyFailoverChecks','cancellationChecks',
   // Non-busy preview-pool jobs: regeneration that upload retries cannot imitate.
   'regenerationDecodes'];
+export const OPERATIONAL_METRICS = [...REQUIRED_METRICS.filter(key => key !== 'costPer10000Originals'), 'retryChecks'];
 
 export function assessLoadEvidence(report, identity) {
   const issues = [];
+  const workloadProfile = report?.workloadProfile ?? 'capacity-v1';
+  const operational = workloadProfile === 'operational-v1';
   if (report?.kind !== 'mobile-image-load' || report.harnessVersion !== 1 || report.source !== 'live-rehearsal'
     || report.buildFingerprint !== identity.buildFingerprint || report.imageRef !== identity.imageRef
     || !/^[a-f0-9]{64}$/u.test(report.observationsSha256 ?? '') || !/^[a-f0-9]{64}$/u.test(report.instrumentationSha256 ?? '')
-    || !report.versions?.harness || !report.versions?.worker || !report.versions?.decoder) issues.push('Missing independent load identity/instrumentation.');
+    || !report.versions?.harness || !report.versions?.worker || !report.versions?.decoder
+    || !WORKLOAD_PROFILES.includes(workloadProfile) || (operational && report.capacityQualified !== false)) issues.push('Missing independent load identity/instrumentation.');
   for (const name of SCENARIOS) {
     const scenario = report?.scenarios?.find(item => item.name === name);
     const m = scenario?.metrics;
-    if (!scenario || scenario.guests !== 500 || scenario.originals !== 10_000 || scenario.pageTiles !== 48
-      || scenario.visitsPerGuest < 2 || !Number.isInteger(scenario.uploadConcurrency) || scenario.uploadConcurrency < 1
-      || !Number.isInteger(scenario.previewConcurrency) || scenario.previewConcurrency < 1 || scenario.complete !== true
-      || !m || !REQUIRED_METRICS.every(key => Number.isFinite(m[key]) && m[key] >= 0)) {
+    const expected = buildLoadPlan({ scenario: name, workloadProfile: operational ? 'operational-v1' : 'capacity-v1' });
+    const metricKeys = operational ? OPERATIONAL_METRICS : REQUIRED_METRICS;
+    if (!scenario || (scenario.workloadProfile ?? 'capacity-v1') !== workloadProfile
+      || scenario.guests !== expected.guests || scenario.originals !== expected.originals || scenario.pageTiles !== expected.pageTiles
+      || scenario.visitsPerGuest !== expected.visitsPerGuest || scenario.uploadConcurrency !== expected.uploadConcurrency
+      || scenario.previewConcurrency !== expected.previewConcurrency || scenario.complete !== true
+      || (operational && (scenario.eventShards !== 1 || stable(scenario.payloadBounds) !== stable(expected.payloadBounds)
+        || scenario.declaredOperations !== declaredOperations(expected).total))
+      || !m || !metricKeys.every(key => Number.isFinite(m[key]) && m[key] >= 0)
+      || (operational && m.costPer10000Originals != null)) {
       issues.push(`${name}: missing complete workload/measurements.`); continue;
     }
-    const previewRequests = 500 * 48 * scenario.visitsPerGuest;
-    const expectedUploads = name === 'warm' ? 0 : 10_000;
-    if (m.uploadRequests !== expectedUploads || m.deliveredOriginals > expectedUploads || m.deliveredOriginals < expectedUploads * .99
+    const previewRequests = expected.guests * expected.pageTiles * expected.visitsPerGuest;
+    const expectedUploads = name === 'warm' ? 0 : expected.originals;
+    if (m.uploadRequests !== expectedUploads || m.deliveredOriginals > expectedUploads || m.deliveredOriginals < expectedUploads * (operational ? 1 : .99)
       || m.verifiedOriginalHashes !== m.deliveredOriginals || m.previewRequests !== previewRequests
-      || m.successfulPreviewRequests < previewRequests * .99 || m.successfulPreviewRequests > previewRequests
-      || m.previewHits + m.previewMisses !== previewRequests || m.privacyChecks < 1 || m.deletionChecks < 1
-      || m.directControlRequests < 100 || m.cancellationChecks < 1
+      || m.successfulPreviewRequests < previewRequests * (operational ? 1 : .99) || m.successfulPreviewRequests > previewRequests
+      || (operational ? m.previewHits + m.previewMisses < previewRequests : m.previewHits + m.previewMisses !== previewRequests)
+      || m.privacyChecks < expected.controls.privacy || m.deletionChecks < expected.controls.deletion
+      || m.directControlRequests < expected.controls.directBaseline || m.cancellationChecks < expected.controls.cancellation
+      || (operational && (m.retryChecks !== expected.controls.retryChecks || m.unrecoveredTransientErrorRate !== 0
+        || (name !== 'warm' && scenario.concurrency?.upload?.maxActive < 2)))
       || m.p50Ms <= 0 || m.p95Ms < m.p50Ms || m.p99Ms < m.p95Ms || m.throughputPerSecond <= 0
       // Decoding scenarios must show measured peak memory and exercised busy failover. A warm
       // window has no decoder work to measure; its zero-activity rule is a go/no-go target below.
-      || (name !== 'warm' && (m.peakRssBytes <= 0 || m.busyFailoverChecks < 1
+      || (name !== 'warm' && (m.peakRssBytes <= 0 || (!operational && m.busyFailoverChecks < 1)
         || m.nativeDecodes < m.deliveredOriginals || m.nativeSeconds <= 0 || m.verificationP95Ms <= 0
         || m.originalBytesFetched < m.deliveredOriginals * 25 * MiB))
       || (name === 'mixed' && (m.previewMisses < 1 || m.nativeDecodes <= m.deliveredOriginals || m.regenerationDecodes < 1))
       || (name === 'warm' && (m.previewMisses !== 0 || m.warmPreviewP95Ms <= 0))) issues.push(`${name}: measurements do not account for the declared workload.`);
     if (m.incorrectReceipts || m.originalHashFailures || m.privacyFailures || m.uploadPoolPreviewJobs || m.previewPoolUploadJobs
       || m.unrecoveredTransientErrorRate >= .01 || m.warmPreviewP95Ms > 2000 || m.verificationP95Ms > 120000
-      || m.peakRssBytes > 3 * 1024 ** 3 || m.peakScratchBytes > 2 * 1024 ** 3 || m.directP95Degradation > .10
+      || m.peakRssBytes > 3 * 1024 ** 3 || m.peakScratchBytes > 2 * 1024 ** 3 || (!operational && m.directP95Degradation > .10)
       // Warm persisted previews: zero original reads and zero decoder activity of any kind (a busy
       // refusal is still a decode request, and any RSS/scratch/native time means one ran).
       || (name === 'warm' && (m.originalBytesFetched || m.nativeDecodes || m.nativeSeconds || m.peakRssBytes || m.peakScratchBytes
@@ -276,6 +345,8 @@ export function observationMetrics(observed) {
     privacyFailures: observed.previews.filter(row => row.previewHit === true && row.previewPrivate !== true).length
       + probes('privacy').filter(row => row.violation === true).length + probes('deletion').filter(row => row.violation === true).length,
     privacyChecks: ok(probes('privacy')).length, deletionChecks: ok(probes('deletion')).length, cancellationChecks: ok(probes('cancellation')).length,
+    ...(observed.plan.workloadProfile === 'operational-v1' ? { retryChecks: probes('multipart-retry')
+      .filter(row => row.ok && row.retryVerified === true && row.receiptVerified === true && row.hashVerified === true).length } : {}),
     unrecoveredTransientErrorRate: operations ? Math.max(0, failures) / operations : 1,
     throughputPerSecond: span > 0 ? (delivered.length + previews.length) / span : 0,
   };
@@ -285,14 +356,30 @@ export function observationMetrics(observed) {
  * exported deployment counters; a document saying complete is insufficient. */
 export function verifyLoadArtifacts(report, observations, instrumentation) {
   const identity = artifact => artifact?.harnessVersion === 1 && artifact.buildFingerprint === report.buildFingerprint && artifact.imageRef === report.imageRef;
+  const reportProfile = report?.workloadProfile ?? 'capacity-v1';
+  const embeddedScopePresent = instrumentation && Object.hasOwn(instrumentation, 'scope');
+  const embeddedScope = instrumentation?.scope;
+  const embeddedProfile = embeddedScope?.workloadProfile ?? 'capacity-v1';
   if (observations?.kind !== 'mobile-image-load-observations-bundle' || instrumentation?.kind !== 'mobile-image-load-instrumentation'
-    || instrumentation.source !== 'deployment-instrumentation' || !identity(observations) || !identity(instrumentation)) return false;
+    || instrumentation.source !== 'deployment-instrumentation' || !identity(observations) || !identity(instrumentation)
+    || !Array.isArray(report?.scenarios) || !Array.isArray(observations.scenarios) || !Array.isArray(instrumentation.scenarios)
+    || [report.scenarios, observations.scenarios, instrumentation.scenarios].some(rows => rows.length !== SCENARIOS.length)
+    || SCENARIOS.some(name => report.scenarios.filter(row => row.name === name).length !== 1
+      || observations.scenarios.filter(row => row.plan?.scenario === name).length !== 1
+      || instrumentation.scenarios.filter(row => row.name === name).length !== 1)
+    || (embeddedScopePresent && (!embeddedScope || typeof embeddedScope !== 'object' || Array.isArray(embeddedScope)
+      || !WORKLOAD_PROFILES.includes(embeddedProfile) || embeddedProfile !== reportProfile))
+    || (report.workloadProfile === 'operational-v1' && !validOperationalScope(instrumentation.scope))) return false;
   return report.scenarios.every(scenario => {
     const observed = observations.scenarios?.find(item => item.plan?.scenario === scenario.name);
     const instrumented = instrumentation.scenarios?.find(item => item.name === scenario.name);
     const m = scenario.metrics;
-    if (observed?.kind !== 'mobile-image-load-observations' || observed.harnessVersion !== 1 || observed.plan.live !== true
-      || observed.plan.guests !== 500 || observed.plan.originals !== 10_000 || observed.plan.pageTiles !== 48
+    if (observed?.kind !== 'mobile-image-load-observations' || observed.harnessVersion !== 1 || !canonicalLoadPlan(observed.plan)
+      || (observed.plan.workloadProfile ?? 'capacity-v1') !== (report.workloadProfile ?? 'capacity-v1')
+      || (observations.workloadProfile ?? 'capacity-v1') !== (report.workloadProfile ?? 'capacity-v1')
+      || (instrumentation.workloadProfile ?? 'capacity-v1') !== (report.workloadProfile ?? 'capacity-v1')
+      || (report.workloadProfile === 'operational-v1' && instrumented?.metrics?.costPer10000Originals != null)
+      || observed.plan.guests !== scenario.guests || observed.plan.originals !== scenario.originals || observed.plan.pageTiles !== scenario.pageTiles
       || observed.plan.visitsPerGuest !== scenario.visitsPerGuest || observed.plan.uploadConcurrency !== scenario.uploadConcurrency
       || observed.plan.previewConcurrency !== scenario.previewConcurrency || !instrumented?.metrics
       || instrumented.window?.startedAt !== observed.window?.startedAt || instrumented.window?.endedAt !== observed.window?.endedAt
@@ -306,7 +393,8 @@ export function verifyLoadArtifacts(report, observations, instrumentation) {
     }
     if (observed.controls.filter(row => row.phase === 'baseline').length !== c.directBaseline
       || PROBE_KINDS.some(kind => observed.probes.filter(row => row.kind === kind).length
-        !== { privacy: c.privacy, deletion: c.deletion, cancellation: c.cancellation, 'regeneration-seed': c.regenerationSeeds }[kind])) return false;
+        !== { privacy: c.privacy, deletion: c.deletion, cancellation: c.cancellation, 'regeneration-seed': c.regenerationSeeds,
+          'multipart-retry': c.retryChecks ?? 0 }[kind])) return false;
     const delivered = observed.uploads.filter(item => item.ok);
     const previews = observed.previews.filter(item => item.ok);
     if (delivered.length !== m.deliveredOriginals || previews.length !== m.successfulPreviewRequests
@@ -323,13 +411,14 @@ export function verifyLoadArtifacts(report, observations, instrumentation) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2), value = flag => args[args.indexOf(flag) + 1];
   try {
-    const plan = buildLoadPlan({ scenario: args.includes('--scenario') ? value('--scenario') : 'mixed' });
+    const plan = buildLoadPlan({ scenario: args.includes('--scenario') ? value('--scenario') : 'mixed',
+      workloadProfile: args.includes('--profile') ? value('--profile') : undefined });
     if (!SCENARIOS.includes(plan.scenario)) throw new Error('Unknown scenario.');
     if (!args.includes('--live')) console.log(JSON.stringify({ ...plan, declaredOperations: declaredOperations(plan) }, null, 2));
     else {
       if (!['--authorization', '--adapter', '--report'].every(flag => args.includes(flag))) throw new Error('Live mode requires authorization, reviewed adapter and report paths.');
       const authorization = JSON.parse(await readFile(resolve(value('--authorization')), 'utf8'));
-      authorizeLoad({ live: true, scenario: plan.scenario }, authorization);
+      authorizeLoad({ live: true, scenario: plan.scenario, workloadProfile: plan.workloadProfile }, authorization);
       const module = await import(pathToFileURL(resolve(value('--adapter'))).href);
       const adapter = typeof module.createLoadAdapter === 'function' ? module.createLoadAdapter() : module;
       plan.live = true;

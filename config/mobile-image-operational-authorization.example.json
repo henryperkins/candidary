@@ -1,0 +1,25 @@
+{
+  "kind": "candidary.image-load-authorization.example",
+  "notice": "TEMPLATE ONLY. Authorizes nothing. Copy to a private path, fill all values for one scenario, and obtain explicit release-owner approval. Use one gallery event, one distinct mixed upload event only for mixed, and one distinct isolation event. Use the exact dry-run payloadBounds and declaredOperations for the selected operational-v1 scenario.",
+  "environment": "preview",
+  "target": "https://<preview-alias>-candidary-preview.lfd.workers.dev/",
+  "scenario": "<cold|warm|mixed>",
+  "workloadProfile": "operational-v1",
+  "authorizedBy": "<release owner who approved this run>",
+  "dedicatedRehearsalEvent": false,
+  "eventIds": ["<gallery-event>"],
+  "uploadEventIds": ["<mixed-upload-event; use empty array for cold/warm>"],
+  "isolationEventId": "<isolation-event>",
+  "expiresAt": "<ISO-8601 instant within 72 hours of approval>",
+  "credentialsPath": "<absolute private or git-ignored path>",
+  "sourcesPath": "<absolute private or git-ignored path>",
+  "previewEnvironmentIdle": {
+    "idle": false,
+    "windowStart": "<ISO-8601 instant at or before the run>",
+    "windowEnd": "<ISO-8601 instant at or after expiresAt>",
+    "statement": "<who confirmed no other preview traffic during this window>"
+  },
+  "approvedRequests": 0,
+  "approvedUploadBytes": 0,
+  "approvedDownloadBytes": 0
+}

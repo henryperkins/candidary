@@ -284,6 +284,38 @@ describe('deployment instrumentation and load report', () => {
     expect(() => scopeFromAuthorizations({ cold: authorization('warm'), warm: authorization('warm'), mixed: authorization('mixed') })).toThrow();
   });
 
+  it('carries one operational gallery and mixed upload event through scope and rejects profile substitution', () => {
+    const authorizations=Object.fromEntries(['cold','warm','mixed'].map(scenario=>{
+      const plan=buildLoadPlan({scenario,workloadProfile:'operational-v1'});
+      return [scenario,{kind:'candidary.image-load-authorization',scenario,workloadProfile:'operational-v1',
+        eventIds:['gallery_event_0'],uploadEventIds:scenario==='mixed'?['upload_event_0']:[],isolationEventId:'isolation_event',
+        approvedRequests:scenario==='warm'?124:scenario==='cold'?149:151,
+        approvedUploadBytes:plan.payloadBounds.uploadBytes,approvedDownloadBytes:plan.payloadBounds.downloadBytes}];
+    }));
+    const operationalScope=scopeFromAuthorizations(authorizations);
+    expect(operationalScope).toMatchObject({workloadProfile:'operational-v1',eventIds:{cold:['gallery_event_0'],warm:['gallery_event_0'],
+      mixed:['gallery_event_0','upload_event_0']}});
+    expect(()=>scopeFromAuthorizations({...authorizations,warm:{...authorizations.warm,workloadProfile:'capacity-v1'}})).toThrow();
+    expect(()=>scopeFromAuthorizations({...authorizations,mixed:{...authorizations.mixed,approvedDownloadBytes:1}})).toThrow();
+    expect(()=>scopeFromAuthorizations({...authorizations,cold:{...authorizations.cold,uploadEventIds:['extra_event_0']}})).toThrow();
+    expect(()=>scopeFromAuthorizations({...authorizations,mixed:{...authorizations.mixed,isolationEventId:'gallery_event_0'}})).toThrow();
+    expect(()=>scopeFromAuthorizations({...authorizations,cold:{...authorizations.cold,eventIds:['gallery_event_0','extra_event_0']}})).toThrow();
+    const observations=['cold','warm','mixed'].map(name=>{
+      const value=syntheticObservations(name),plan={...buildLoadPlan({scenario:name,workloadProfile:'operational-v1'}),live:true};
+      return {...value,plan,uploads:value.uploads.slice(0,name==='warm'?0:24),previews:value.previews.slice(0,96),
+        controls:value.controls.slice(0,20),probes:value.probes.slice(0,plan.controls.privacy+plan.controls.deletion+plan.controls.cancellation)
+          .concat(Array.from({length:plan.controls.regenerationSeeds},(_,index)=>({index:8+index,kind:'regeneration-seed',ok:true,elapsedMs:1,violation:false})),
+            Array.from({length:plan.controls.retryChecks},(_,index)=>({index:8+plan.controls.regenerationSeeds+index,
+              kind:'multipart-retry',ok:true,retryVerified:true,receiptVerified:true,hashVerified:true,elapsedMs:1,violation:false}))) };
+    });
+    const bundle=bundleObservations(identity,observations);
+    expect(bundle.workloadProfile).toBe('operational-v1');
+    expect(()=>bundleObservations(identity,[...observations.slice(0,2),syntheticObservations('mixed')])).toThrow();
+    expect(()=>buildInstrumentation({bundle,exports:exportsFor(),scope,pricing:PRICING})).toThrow();
+    const capacity=chain();
+    expect(verifyLoadArtifacts(capacity.report,{...synthetic(),scenarios:[...synthetic().scenarios,synthetic().scenarios[0]]},capacity.instrumentation)).toBe(false);
+  });
+
   it('runs the offline command sequence: bundle, dry-run export plan, instrumentation build and SHA-named report evidence', () => {
     const dir = mkdtempSync(join(tmpdir(), 'candidary-load-report-'));
     const write = (name: string, value: unknown) => { const path = join(dir, name); writeFileSync(path, JSON.stringify(value)); return path; };

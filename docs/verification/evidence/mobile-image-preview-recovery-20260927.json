@@ -1,0 +1,144 @@
+{
+  "kind": "candidary.preview-recovery-observation",
+  "observedAt": "2026-09-27T20:03:29.303Z",
+  "startedAt": "2026-09-27T20:03:24.977Z",
+  "targetOrigin": "https://candidary-preview.lfd.workers.dev",
+  "deployment": {
+    "observedAt": "2026-09-27T20:01:50.681Z",
+    "deployments": [
+      {
+        "name": "candidary-preview",
+        "success": true,
+        "status": 200,
+        "versions": [
+          {
+            "version_id": "2c42b186-3b75-4d30-81ea-982fcb579079",
+            "percentage": 100
+          }
+        ]
+      },
+      {
+        "name": "candidary-image-decoder-preview",
+        "success": true,
+        "status": 200,
+        "versions": [
+          {
+            "version_id": "ca4d8ff4-831d-4e92-867c-eafc806277f4",
+            "percentage": 100
+          }
+        ]
+      }
+    ]
+  },
+  "seedSelection": {
+    "selectedAt": "2026-09-27T20:01:49.697Z",
+    "matchedCount": 2,
+    "source": "Read-only D1 SELECT for existing dedicated gallery event and mixed window; seed-% JPEG originals 20000001..20971520 bytes",
+    "mixedWindow": {
+      "startedAt": "2026-09-27T19:34:00.171Z",
+      "endedAt": "2026-09-27T19:41:18.693Z"
+    },
+    "states": [
+      {
+        "seed": 1,
+        "original": "stored",
+        "preview": "ready",
+        "runCount": 1,
+        "failureCode": null,
+        "producerKind": "workflow"
+      },
+      {
+        "seed": 2,
+        "original": "stored",
+        "preview": "ready",
+        "runCount": 1,
+        "failureCode": null,
+        "producerKind": "workflow"
+      }
+    ]
+  },
+  "payloadReadCapBytes": 20971520,
+  "exchangeStatus": 200,
+  "previews": [
+    {
+      "seed": 1,
+      "requestStartedAt": "2026-09-27T20:03:25.664Z",
+      "completedAt": "2026-09-27T20:03:27.056Z",
+      "status": 200,
+      "elapsedMs": 1391.472,
+      "bodyByteLength": 1991104,
+      "bodySha256": "77b54c79245a15729ac6a61b19e7eadb41d1debc88ac3532d3983cda76035a15",
+      "storedByteSizeMatches": true,
+      "storedSha256Matches": true,
+      "webpSignature": true,
+      "headers": {
+        "content-type": "image/webp",
+        "content-length": "1991104",
+        "cache-control": "private, no-store",
+        "vary": "Cookie",
+        "cross-origin-resource-policy": "same-origin",
+        "x-content-type-options": "nosniff",
+        "cf-cache-status": null
+      },
+      "headersCorrect": true,
+      "authenticatedAs": "guest"
+    },
+    {
+      "seed": 2,
+      "requestStartedAt": "2026-09-27T20:03:27.056Z",
+      "completedAt": "2026-09-27T20:03:29.111Z",
+      "status": 200,
+      "elapsedMs": 2054.999,
+      "bodyByteLength": 1991104,
+      "bodySha256": "77b54c79245a15729ac6a61b19e7eadb41d1debc88ac3532d3983cda76035a15",
+      "storedByteSizeMatches": true,
+      "storedSha256Matches": true,
+      "webpSignature": true,
+      "headers": {
+        "content-type": "image/webp",
+        "content-length": "1991104",
+        "cache-control": "private, no-store",
+        "vary": "Cookie",
+        "cross-origin-resource-policy": "same-origin",
+        "x-content-type-options": "nosniff",
+        "cf-cache-status": null
+      },
+      "headersCorrect": true,
+      "authenticatedAs": "guest"
+    }
+  ],
+  "denials": [
+    {
+      "seed": 1,
+      "requestedAt": "2026-09-27T20:03:29.111Z",
+      "status": 401,
+      "bodyByteLength": 127,
+      "contentType": "application/json",
+      "cacheControl": "no-store",
+      "noImageBody": true,
+      "noSensitiveMaterial": true
+    },
+    {
+      "seed": 2,
+      "requestedAt": "2026-09-27T20:03:29.201Z",
+      "status": 401,
+      "bodyByteLength": 127,
+      "contentType": "application/json",
+      "cacheControl": "no-store",
+      "noImageBody": true,
+      "noSensitiveMaterial": true
+    }
+  ],
+  "conclusion": "Both already-ready regeneration seed previews returned HTTP 200 to a guest; bounded response bodies match stored byte counts and SHA-256 proofs. Unauthenticated requests were denied.",
+  "limitations": [
+    "The original eight failed mixed preview operations remain failed.",
+    "This observation does not establish a fresh regeneration delay bound.",
+    "This is a retrieval check, not another load rehearsal or qualification.",
+    "The earlier 48 original hash checks are unchanged; originals were not downloaded again."
+  ],
+  "privacy": {
+    "credentialExclusionPassed": true,
+    "noCredentialOrSessionOrEventOrMediaIdentifiers": true,
+    "imageBodiesPersisted": false
+  }
+}

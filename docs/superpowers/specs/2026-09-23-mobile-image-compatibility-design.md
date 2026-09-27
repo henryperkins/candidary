@@ -1,7 +1,44 @@
 # Mobile image compatibility design
 
+## Current practical acceptance amendment — 2026-09-27
+
+The owner's latest instruction, “Relax the requirements of achieving the goal,” supersedes
+the universal and operational project-completion requirements below. The current goal is
+the [supported-format engineering/evidence handoff](../../verification/mobile-image-practical-acceptance-20260927.md)
+for broad iPhone and Android photo support across 29 implemented cases: reuse existing
+native/live original-byte/privacy proof, record the focused two-preview retrieval result,
+and attempt representative BrowserStack iPhone Safari / Android Chrome observations within
+existing trial access. Unobserved upload/save/share steps may be explicitly deferred;
+no paid upgrade or full device certification is required. Both private retrievals passed;
+the practical acceptance record states the actual limited device observations.
+
+HEIC sequences, Live Photo movie companions, exhaustive device coverage, full capacity/cost
+and exact telemetry engineering are deferred. Sampled analytics is diagnostic only. The
+historical operational run remains FAILED and immutable. `universal: false` and
+`capacityQualified: false` remain truthful; strict verifiers, release configuration and
+historical evidence are unchanged. The strict universal gate does not block the reduced
+project goal. Existing privacy/original-byte invariants and separate release/publication
+boundaries remain in force. The older amendments and detailed procedure below are historical
+where they conflict with this current completion scope.
+
 Status: core architecture and original written specification approved in the task on 2026-09-23. The user subsequently approved the revised A/B/C plan and the review amendments below, with the recommended Native execution method.
 Baseline: `eceb4053b572562ed00247a7c6469a2599416723`.
+
+## Approved operational qualification amendment — 2026-09-27
+
+The owner approved deferring the full 500-guest/10,000-original capacity and cost
+rehearsal and using a bounded operational check for individual case admission. The
+[operational runbook](../../verification/mobile-image-operational-rehearsal.md) defines
+the fixed cold/warm/mixed profile, three-event layout, retry/regeneration probes, payload
+ceilings and evidence checks. This amendment supersedes older statements that full
+event-scale measurements are mandatory for every new case.
+
+Per-case admission still requires matching native, live, physical iOS and Android
+evidence, immutable decoder identity, current manifest and passing measured operational
+evidence. Operational qualification leaves capacity/cost claims unverified and keeps
+the universal claim closed. Legacy full-scale records retain their existing semantics;
+reduced counts or missing evidence cannot satisfy that profile. Existing production
+code, byte preservation, access controls, schema and decoder limits are unchanged.
 
 ## Approved amendments from the 2026-09-23 review
 
@@ -9,7 +46,7 @@ The [replacement coordinator and Plans A/B/C](../plans/2026-09-23-mobile-image-c
 
 1. The decoder is a **separate private Worker**, with a preview twin, reached through a main-app service binding. Only that service owns Container/Durable Object classes. Upload and preview regeneration use separate pools, with one active decode per instance and bounded busy failover.
 2. Existing admitted originals up to **20 MiB** keep the existing decoder-independent ingress. **8 MiB** remains the resumable part size. Known formats, currently admitted formats and readable historical originals have separate contracts.
-3. Extended upload-time previews are persisted privately under durable preview ownership and the deletion/tombstone protocol. Repeated gallery visits read these derivatives. Real mixed/cold/warm event-scale measurements are admission prerequisites.
+3. Extended upload-time previews are persisted privately under durable preview ownership and the deletion/tombstone protocol. Repeated gallery visits read these derivatives. Real mixed/cold/warm measurements under the selected qualification profile are admission prerequisites; the 2026-09-27 amendment permits bounded operational evidence while deferring full capacity qualification.
 4. Resumable parts use R2 multipart upload to an inventoried **unique assembly key**, never the authoritative final key. Part proofs, upload IDs, ambiguous create/complete/abort state and completed-object cleanup remain durable even though standalone part objects are removed.
 5. Transfer lifetime scales with file size and extends on accepted parts/valid processing leases: initial idle window `clamp(900, ceil(byteSize/125000)+600, 7200)` seconds, hard cap six hours from initiation, bounded further by actor/event access expiry. Reservation and promotion horizons extend coherently; cleanup never exempts expired/fenced transfers.
 6. Schema migration precedes new main-app code, proved against populated old data and the current old application. Old-code compatibility before extended writes does not establish a rollback after extended writes. Recreated production trigger/index SQL is compared before remote migration.
@@ -85,7 +122,7 @@ Use a forward migration after 0025. The media MIME CHECK must expand without alt
 
 Add separate processing and transfer-session records rather than overloading `upload_state` until the state transition semantics are fully tested. Existing APIs retain their allowlists: guests do not gain object keys, hashes, upload-owner identities or storage internals. UI readiness may be exposed only through documented minimal states.
 
-Each new case requires qualified decoder, schema, transport, private preview, consumer and device evidence together. Existing uploads remain operational while extended intake is disabled. Apply the migration before deploying new main-app code; prove the old application against the populated upgrade while extended intake is closed. Independently deploy/verify the decoder service/twin from pinned registry images, including actual fingerprint/case evidence and measured capacity, before opening cases. Rollback stops intake while retaining compatible reads/exports/cleanup; the old 0025 Worker cannot serve as rollback after types/preview records it does not understand have been written.
+Each new case requires qualified decoder, schema, transport, private preview, consumer and device evidence together. Existing uploads remain operational while extended intake is disabled. Apply the migration before deploying new main-app code; prove the old application against the populated upgrade while extended intake is closed. Independently deploy/verify the decoder service/twin from pinned registry images, including actual fingerprint/case evidence and measured evidence under the selected operational or capacity profile, before opening cases. Rollback stops intake while retaining compatible reads/exports/cleanup; the old 0025 Worker cannot serve as rollback after types/preview records it does not understand have been written.
 
 ## Evidence and completion
 

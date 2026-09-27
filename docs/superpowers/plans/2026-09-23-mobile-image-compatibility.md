@@ -1,5 +1,26 @@
 # Mobile Image Compatibility Implementation Plan
 
+## Current practical acceptance amendment — 2026-09-27
+
+The owner's latest instruction, “Relax the requirements of achieving the goal,” supersedes
+the universal/operational completion scope below. Follow the
+[practical acceptance record](../../verification/mobile-image-practical-acceptance-20260927.md):
+deliver a supported-format engineering/evidence handoff for broad iPhone and Android photo
+support across 29 implemented cases using existing native/live original-byte/privacy proof,
+the focused two-preview retrieval result, and best-effort BrowserStack iPhone Safari /
+Android Chrome observations. Both private retrievals passed; the practical acceptance record
+states the actual limited device observations. Existing trial access is
+sufficient for attempts; explicitly defer unobserved upload/save/share steps without requiring
+a paid upgrade or full device certification.
+
+Defer HEIC sequences, Live Photo movie companions, exhaustive device coverage, full capacity/cost
+and exact telemetry engineering. Sampled analytics is diagnostic only. Preserve the FAILED
+operational run, strict verifiers, fixture/evidence files and release configuration unchanged;
+retain `universal: false` and `capacityQualified: false`. The strict universal verifier is not
+a blocker for reduced project completion. Candidate-state restrictions and separate
+release/publication authorization remain. Older goals, status and procedures below are
+historical where their completion scope conflicts with this amendment.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver unchanged mobile originals and authorized previews for the complete approved scope; make a universal claim only when the complete evidence supports it.
@@ -9,6 +30,14 @@
 **Tech Stack:** React/TypeScript/Hono, Workers/D1/R2/Workflows, Vitest and Playwright. B alone adds Containers, Durable Objects and native libraries.
 
 **Spec:** [Design and review amendments](../specs/2026-09-23-mobile-image-compatibility-design.md).
+
+**Current amendment (2026-09-27):** The approved [bounded operational profile](../../verification/mobile-image-operational-rehearsal.md)
+supersedes mandatory full-scale load qualification for individual case admission. The
+500-guest/10,000-original capacity rehearsal is deferred. Native/live/physical-device
+evidence and pinned operational measurements remain required; capacity and universal
+claims stay closed under the operational profile. Later deployed/live and Windows
+recovery status is in [the handoff](../../verification/mobile-image-handoff.md); the
+2026-09-26 implementation status below is historical.
 
 **Status (2026-09-26):** Revised plan and review amendments approved on 2026-09-23; local implementation and Linux native execution are authorized. Local A/B/C implementation passed independent review. C14 fixes the focused mobile-script lint errors; B9 prepares the declared load sources; B10 closes the lawful phone JXL-DNG gap. The owner approved raising only animated previews to 20 MiB, preserving existing fidelity. B12 applies that limit across native output, Worker transport/storage and the unpublished 0026 constraint; the still cap remains 8 MiB. B12h's rebuilt image (`a4c23860…`) passes all 39 available real-file fixtures in one final union, qualifying 29/32 local cases. All previously passing preview hashes, original bytes, references and tolerances are unchanged. The fresh B12/B12h scoped review found no Critical, Important or Minor findings. HEIC-sequence and both Live Photo cases remain missing; the report deliberately stays incomplete. A fresh clone after the eventual release commit must reproduce the new fingerprint with the existing `-text` attributes. Remaining work: lawful sequence/device evidence, resolution of the draft publication sequence's conflict with the single-final-commit rule, and separately authorized publication, migration, deployed/load and physical-device checks. Later on 2026-09-26, C16 showed that no honest preview path keeps the literal single-final-commit rule, and rewrote the preview runbook as an executable checkpoint-then-squash sequence awaiting approval. The same task ran a read-only preflight: preview D1 has only 0026 pending, and its schema is semantically equal to the reviewed 0025 snapshot. C18 adds the missing `live-workflow` evidence recorder. B13 found no new lawful HEIC-sequence source. Release lists remain empty and universal compatibility is unverified. See `docs/verification/mobile-image-compatibility.md` and the task ledger under `output/verification/mobile-image-tasks/`. Nothing is staged or committed.
 

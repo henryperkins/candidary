@@ -16,8 +16,13 @@ The reviewed 2026-09-26 live report
 is tracked so all 39 current live pointers resolve in a fresh clone. Its raw bytes
 are protected by `.gitattributes`. Native history below describes previous runs;
 those ignored reports and independent references were not recovered in the Ubuntu
-checkout. See [the current handoff](../../../docs/verification/mobile-image-handoff.md)
-for evidence locations, recovery instructions, and remaining qualification work.
+checkout. The subsequent [Windows recovery](../../../docs/verification/mobile-image-recovery-20260927.md)
+found and hash-verified all 37 distinct originals, all 39 references, native report
+`9083069a…48d4fe` and historical qualification report `38530b5b…2a55`. The two exact reports
+are explicitly allowlisted as local changes for preservation; original/reference binaries
+remain ignored. The qualification report pins an earlier manifest and is not current
+release qualification. See [the current handoff](../../../docs/verification/mobile-image-handoff.md)
+for evidence locations and remaining qualification work.
 
 From the repository root in Ubuntu 26.04, with `python3-pil` 12.1.1 and
 `libheif-examples` 1.21.2 (including HEVC/AV1 decoder plugins), and
