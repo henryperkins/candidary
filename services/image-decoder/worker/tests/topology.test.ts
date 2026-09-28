@@ -63,6 +63,20 @@ describe('private service topology', () => {
     expect(production.env.preview.analytics_engine_datasets).toEqual([{ binding: 'DECODER_METRICS', dataset: 'candidary_image_decoder_preview' }]);
   });
 
+  it('pins both production pools to the immutable qualified release image', () => {
+    const production = config(resolve('wrangler.jsonc'));
+    // Read the committed artifact directly, independently of the runtime mock above.
+    const qualifiedRelease = config(resolve('../../../config/image-decoder-release.json')).releases[0];
+    expect(qualifiedRelease.imageRef).toMatch(/@sha256:[0-9a-f]{64}$/);
+    expect(production.containers.map((container: { image: string }) => container.image)).toEqual([
+      qualifiedRelease.imageRef,
+      qualifiedRelease.imageRef,
+    ]);
+    for (const container of production.containers) {
+      expect(container.image_build_context).toBeUndefined();
+    }
+  });
+
   it('keeps prod/preview private with separate Worker-owned pool bindings', () => {
     const production = config(resolve('wrangler.jsonc'));
     const preview = production.env.preview;
