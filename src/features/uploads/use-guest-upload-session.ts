@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { uploadCapabilitySummary } from '../../../shared/mobile-image-contract';
 
 import { createBrowserTransport } from './browser-upload-transport';
 import type { UploadFlowSession } from './GuestUploadFlow';
-import { createUploadSelection } from './upload-selection';
+import { createUploadSelection, imageAccept } from './upload-selection';
+import { useUploadCapabilities } from './use-upload-capabilities';
+import { rememberUploads,forgetUploads,restoreUploadHints,hasUploadHints,resumeImageAccept } from './upload-resume-hints';
 import {
   getReceiptCount,
   removeQueueItem,
@@ -26,6 +29,9 @@ export function useGuestUploadSession({
   transport,
   onDelivered,
 }: UseGuestUploadSessionOptions): UploadFlowSession {
+  const root = `/api/event/${encodeURIComponent(slug)}/uploads`;
+  const capabilities = useUploadCapabilities(root, !transport && uploadsAvailable);
+  const accept = [imageAccept(capabilities),resumeImageAccept(root)].filter(Boolean).join(',');
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const [sending, setSending] = useState(false);
   const itemsRef = useRef(items);
@@ -40,9 +46,10 @@ export function useGuestUploadSession({
   nameRef.current = guestName;
 
   const publish = useCallback((next: UploadQueueItem[]) => {
+    rememberUploads(root,next);
     itemsRef.current = next;
     if (mountedRef.current) setItems(next);
-  }, []);
+  }, [root]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -65,21 +72,22 @@ export function useGuestUploadSession({
 
   const adoptFiles = useCallback((files: FileList | null, isNewCapture: boolean) => {
     if (!files?.length || !availableRef.current) return;
-    const selected = createUploadSelection(files, isNewCapture);
+    const selected = restoreUploadHints(root,createUploadSelection(files, isNewCapture,capabilities),itemsRef.current.map(item => item.id));
     for (const item of selected) {
       if (item.previewUrl) objectUrls.current.add(item.previewUrl);
     }
     publish([...itemsRef.current, ...selected]);
-  }, [publish]);
+  }, [publish,root,capabilities]);
 
   const removeItem = useCallback((itemId: string) => {
+    forgetUploads(root,[itemId]);
     const target = itemsRef.current.find((item) => item.id === itemId);
     if (target?.previewUrl) {
       URL.revokeObjectURL(target.previewUrl);
       objectUrls.current.delete(target.previewUrl);
     }
     publish(removeQueueItem(itemsRef.current, itemId));
-  }, [publish]);
+  }, [publish,root]);
 
   const canRemoveItem = useCallback((itemId: string) => {
     const target = itemsRef.current.find((item) => item.id === itemId);
@@ -117,6 +125,9 @@ export function useGuestUploadSession({
   }, []);
 
   return useMemo(() => ({
+    imageAccept: accept,
+    selectionHint: uploadCapabilitySummary(capabilities),
+    hasResumeHints: hasUploadHints(root),
     items,
     sending,
     receiptCount,
@@ -125,5 +136,5 @@ export function useGuestUploadSession({
     removeItem,
     send,
     cancel,
-  }), [adoptFiles, canRemoveItem, cancel, items, receiptCount, removeItem, send, sending]);
+  }), [accept,root,capabilities,adoptFiles, canRemoveItem, cancel, items, receiptCount, removeItem, send, sending]);
 }

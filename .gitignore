@@ -8,6 +8,7 @@ output/
 coverage/
 *.log
 *.tsbuildinfo
+__pycache__/
 .DS_Store
 Thumbs.db
 .superpowers/

@@ -120,12 +120,15 @@ const EXPECTED_TOPOLOGY = {
       { binding: 'CANONICAL_MEDIA_BUCKET', bucket_name: 'candidary-media-canonical-v2' },
     ],
     send_email: [{ name: 'EMAIL' }],
+    services: [{ binding:'IMAGE_DECODER',service:'candidary-image-decoder' }],
     ratelimits: [
       { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '1001', simple: { limit: 20, period: 60 } },
       { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '1002', simple: { limit: 30, period: 60 } },
       { name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '1003', simple: { limit: 120, period: 60 } },
     ],
     workflows: [
+      { name:'candidary-image-preview',binding:'IMAGE_PREVIEW_WORKFLOW',class_name:'ImagePreviewWorkflow' },
+      { name:'candidary-upload-completion',binding:'UPLOAD_COMPLETION_WORKFLOW',class_name:'UploadCompletionWorkflow' },
       { name: 'candidary-export', binding: 'EXPORT_WORKFLOW', class_name: 'ExportWorkflow' },
       {
         name: 'candidary-cover-render',
@@ -141,6 +144,7 @@ const EXPECTED_TOPOLOGY = {
     crons: ['17 3 * * *', '47 * * * *'],
     vars: {
       APP_ORIGIN: 'https://candidary.app',
+      IMAGE_DECODER_ENVIRONMENT: 'production',
       ALTERNATE_ORIGINS: 'https://candidary.online',
       EMAIL_FROM: 'hello@candidary.app',
     },
@@ -161,12 +165,15 @@ const EXPECTED_TOPOLOGY = {
       { binding: 'CANONICAL_MEDIA_BUCKET', bucket_name: 'candidary-preview-media-canonical' },
     ],
     send_email: [],
+    services: [{ binding:'IMAGE_DECODER',service:'candidary-image-decoder-preview' }],
     ratelimits: [
       { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '2001', simple: { limit: 20, period: 60 } },
       { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '2002', simple: { limit: 30, period: 60 } },
       { name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '2003', simple: { limit: 120, period: 60 } },
     ],
     workflows: [
+      { name:'candidary-image-preview-preview',binding:'IMAGE_PREVIEW_WORKFLOW',class_name:'ImagePreviewWorkflow' },
+      { name:'candidary-upload-completion-preview',binding:'UPLOAD_COMPLETION_WORKFLOW',class_name:'UploadCompletionWorkflow' },
       { name: 'candidary-preview-export', binding: 'EXPORT_WORKFLOW', class_name: 'ExportWorkflow' },
       {
         name: 'candidary-preview-cover-render',
@@ -182,6 +189,7 @@ const EXPECTED_TOPOLOGY = {
     crons: [],
     vars: {
       APP_ORIGIN: 'https://candidary-preview.lfd.workers.dev',
+      IMAGE_DECODER_ENVIRONMENT: 'preview',
       ALTERNATE_ORIGINS: '',
       EMAIL_FROM: 'hello@candidary.app',
     },
@@ -214,6 +222,10 @@ function deploymentTargetMatches(config: Record<string, unknown>, target: Deploy
       expected.r2_buckets,
     )
     && isDeepStrictEqual(config.images, expected.images)
+    && isDeepStrictEqual(config.services, expected.services)
+    && (config.containers === undefined || isDeepStrictEqual(config.containers, []))
+    && (config.migrations === undefined || isDeepStrictEqual(config.migrations, []))
+    && (config.durable_objects === undefined || isDeepStrictEqual(config.durable_objects, { bindings:[] }))
     && isDeepStrictEqual(projectRecords(config.send_email, ['name']), expected.send_email)
     && isDeepStrictEqual(config.ratelimits, expected.ratelimits)
     && isDeepStrictEqual(config.workflows, expected.workflows)

@@ -2,7 +2,8 @@ import type { SupportedImageType } from '../shared/constants';
 import type { TimelineSource } from '../shared/contracts';
 import { instantForLocalDateTimeSeconds } from '../shared/event-time';
 import { isLegacyEventStart } from '../shared/rsvp';
-import { inspectJpegCaptureTime } from './security/exif-capture-time';
+import { inspectJpegCaptureTime, inspectJpegCaptureTimeSource, type JpegCaptureTime } from './security/exif-capture-time';
+import type { ImageRangeReader } from './security/image-reader-core';
 
 export interface MediaTimeline {
   capturedAt: string | null;
@@ -21,6 +22,10 @@ export interface MediaTimelineInput {
 export interface MediaTimelineContext {
   eventStartAt: string;
   eventTimezone: string;
+}
+
+export async function resolveMediaTimelineSource(input:Omit<MediaTimelineInput,'bytes'> & {source:ImageRangeReader}): Promise<MediaTimeline> {
+  return resolveTimelineMetadata(input,input.mimeType==='image/jpeg' ? await inspectJpegCaptureTimeSource(input.source) : null);
 }
 
 const CAPTURE_PRE_EVENT_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -51,6 +56,10 @@ function isRealCalendarDate(year: number, month: number, day: number): boolean {
  * believable received-time position beats an incorrect device clock.
  */
 export function resolveMediaTimeline(input: MediaTimelineInput): MediaTimeline {
+  return resolveTimelineMetadata(input,input.mimeType==='image/jpeg' ? inspectJpegCaptureTime(input.bytes) : null);
+}
+
+function resolveTimelineMetadata(input:Omit<MediaTimelineInput,'bytes'>, exif:JpegCaptureTime|null): MediaTimeline {
   const fallback = receivedFallback(input.storedAt);
   if (input.mimeType !== 'image/jpeg') return fallback;
   if (isLegacyEventStart(input.eventStartAt)) return fallback;
@@ -58,7 +67,8 @@ export function resolveMediaTimeline(input: MediaTimelineInput): MediaTimeline {
   const storedMs = Date.parse(input.storedAt);
   if (!Number.isFinite(eventStartMs) || !Number.isFinite(storedMs)) return fallback;
 
-  const exif = inspectJpegCaptureTime(input.bytes);
+  // The parser skips large APP payloads under its read/work budget; the event
+  // plausibility window below applies equally to early and late EXIF fields.
   if (!exif) return fallback;
   const dateTime = DATE_TIME_ORIGINAL.exec(exif.dateTimeOriginal);
   if (!dateTime) return fallback;

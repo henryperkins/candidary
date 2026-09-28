@@ -21,6 +21,9 @@ export interface UploadFlowSession {
   readonly items: readonly UploadQueueItem[];
   readonly sending: boolean;
   readonly receiptCount: number;
+  readonly imageAccept?: string;
+  readonly hasResumeHints?: boolean;
+  readonly selectionHint?: string;
   adoptFiles(files: FileList | null, isNewCapture: boolean): void;
   canRemoveItem(itemId: string): boolean;
   removeItem(itemId: string): void;
@@ -357,13 +360,17 @@ export function GuestUploadFlow({
         </p>}
       </div>}
 
+      {session.hasResumeHints && !sending && receiptCount === 0 && <p className="progress-note">
+        Choose the same originals to resume an interrupted upload. Photos must be selected again after a reload.
+      </p>}
+      {(showSources || items.length === 0) && session.selectionHint && <p className="progress-note">{session.selectionHint}</p>}
       <input
         ref={cameraInput}
         className="sr-only"
         hidden
         data-photo-source="camera"
         type="file"
-        accept={IMAGE_ACCEPT}
+        accept={session.imageAccept ?? IMAGE_ACCEPT}
         capture="environment"
         aria-label="Take a photo from your camera"
         onChange={(change) => {
@@ -377,7 +384,7 @@ export function GuestUploadFlow({
         hidden
         data-photo-source="library"
         type="file"
-        accept={IMAGE_ACCEPT}
+        accept={session.imageAccept ?? IMAGE_ACCEPT}
         multiple
         aria-label="Choose recent photos from your library"
         onChange={(change) => {

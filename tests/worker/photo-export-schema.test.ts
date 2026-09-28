@@ -80,7 +80,7 @@ describe('photo export forward schema', () => {
     const query = capturedQuery.replace(/\$\{([A-Z_]+)\}/gu, (_, name: string) => substitutions[name]!);
     expect(query).toBeDefined();
     const results = await db.batch<Record<string, unknown>>(query.split(';').filter(sql => sql.trim()).map(sql => db.prepare(sql)));
-    expect(results).toHaveLength(31);
+    expect(results).toHaveLength(32);
     for (const result of results) {
       for (const row of result.results) {
         if (typeof row.checks === 'string' && row.checks.length) expect(row.checks).toMatch(/^1(?:\|1)*$/u);

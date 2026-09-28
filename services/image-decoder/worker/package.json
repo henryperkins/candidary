@@ -1,0 +1,22 @@
+{
+  "name": "candidary-private-image-decoder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit",
+    "verify:bindings": "wrangler types --check --config wrangler.jsonc"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260923.1",
+    "@types/node": "24.10.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10",
+    "wrangler": "4.123.0"
+  }
+}

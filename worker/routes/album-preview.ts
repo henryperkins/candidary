@@ -46,6 +46,14 @@ albumPreviewRoutes.get('/manage/events/:eventId/album/media/:mediaId/preview', a
   }
 
   const object = await getOrCreatePreview(context.env, media);
+  try {
+    await requireManager(context);
+    const current=await new MediaRepository(context.env.DB).getById(mediaId);
+    if (!current || current.uploadState!=='stored' || current.deletedAt || current.trashedAt
+      || !await new PublicAlbumService(context.env.DB).includesPhoto(auth.event.id,mediaId)) {
+      throw new ApiError('RESOURCE_FORBIDDEN','This photo is not available.',403);
+    }
+  } catch (error) {await object.body.cancel(); throw error;}
   return new Response(object.body, {
     headers: {
       'Content-Type': object.httpMetadata?.contentType ?? 'image/webp',

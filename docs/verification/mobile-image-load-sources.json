@@ -1,0 +1,222 @@
+{
+  "kind": "candidary.mobile-image-load-source-catalog",
+  "version": 1,
+  "preparedDate": "2026-09-26",
+  "qualification": "Local input preparation only; no live or capacity qualification.",
+  "sources": [
+    {
+      "relativePath": "output/verification/mobile-image-research/candidates/b6-proraw-load/rpu-6625-galaxy-s22-ultra.dng",
+      "url": "https://raw.pixls.us/getfile.php/6625/nice/Samsung - Galaxy S22 Ultra - 4:3.dng",
+      "sha256": "13ddd4b117299d16d47b6404ad1981258a00b6bce60382524a51cab15a41334d",
+      "byteSize": 26798986,
+      "bucketBytes": 26214400,
+      "mimeType": "image/dng",
+      "extension": "dng",
+      "license": "CC0-1.0",
+      "sourceRecord": [
+        "Samsung",
+        "Galaxy S22 Ultra",
+        "4:3",
+        9.98,
+        "jpeg restart interval = 16",
+        "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+        "2023-06-07",
+        "<a href='https://raw.pixls.us/getfile.php/6625/nice/Samsung - Galaxy S22 Ultra - 4:3.dng'>Samsung - Galaxy S22 Ultra - 4:3.dng</a><div class='checksumdata'><span title='sha256 Checksum'>13ddd4b117299d16d47b6404ad1981258a00b6bce60382524a51cab15a41334d</span>&nbsp;(25.56MB)</div>",
+        "<a target='_blank' href='https://raw.pixls.us/getfile.php/6625/exif/20230531_111518.dng.exif.txt'>exifdata</a>"
+      ]
+    },
+    {
+      "relativePath": "tests/fixtures/mobile-images/originals/iphone-12-pro.dng",
+      "url": "https://raw.pixls.us/getfile.php/4264/nice/Apple - iPhone 12 Pro - 8bit (4:3).DNG",
+      "sha256": "e91e77a4533ed7cce551d83330676ea5c47dd5e55fb38adda7819366afdbdfc2",
+      "byteSize": 29195592,
+      "bucketBytes": 26214400,
+      "mimeType": "image/dng",
+      "extension": "dng",
+      "license": "CC0-1.0",
+      "sourceRecord": [
+        "Apple",
+        "iPhone 12 Pro",
+        "8bit (4:3)",
+        12.19,
+        "ljpeg predictor = 7",
+        "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+        "2020-12-31",
+        "<a href='https://raw.pixls.us/getfile.php/4264/nice/Apple - iPhone 12 Pro - 8bit (4:3).DNG'>Apple - iPhone 12 Pro - 8bit (4:3).DNG</a><div class='checksumdata'><span title='sha256 Checksum'>e91e77a4533ed7cce551d83330676ea5c47dd5e55fb38adda7819366afdbdfc2</span>&nbsp;(27.84MB)</div>",
+        "<a target='_blank' href='https://raw.pixls.us/getfile.php/4264/exif/IMG_1361.DNG.exif.txt'>exifdata</a>"
+      ]
+    },
+    {
+      "relativePath": "output/verification/mobile-image-research/candidates/b6-proraw-load/rpu-7150-galaxy-s23plus.dng",
+      "url": "https://raw.pixls.us/getfile.php/7150/nice/Samsung - Galaxy S23+ - 4:3.dng",
+      "sha256": "3c0436a269b7182079aead2d6eaf207efc95a35c3dd613a19a6d6514ab6bb012",
+      "byteSize": 52652755,
+      "bucketBytes": 52428800,
+      "mimeType": "image/dng",
+      "extension": "dng",
+      "license": "CC0-1.0",
+      "sourceRecord": [
+        "Samsung",
+        "Galaxy S23+",
+        "4:3",
+        49.94,
+        "jpeg restart interval = 1",
+        "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+        "2023-12-27",
+        "<a href='https://raw.pixls.us/getfile.php/7150/nice/Samsung - Galaxy S23+ - 4:3.dng'>Samsung - Galaxy S23+ - 4:3.dng</a><div class='checksumdata'><span title='sha256 Checksum'>3c0436a269b7182079aead2d6eaf207efc95a35c3dd613a19a6d6514ab6bb012</span>&nbsp;(50.21MB)</div>",
+        "<a target='_blank' href='https://raw.pixls.us/getfile.php/7150/exif/20231227_172938.dng.exif.txt'>exifdata</a>"
+      ]
+    },
+    {
+      "relativePath": "output/verification/mobile-image-research/candidates/b6-proraw-load/rpu-7104-galaxy-s23-ultra-50mp.dng",
+      "url": "https://raw.pixls.us/getfile.php/7104/nice/Samsung - Galaxy S23 Ultra - 4:3.dng",
+      "sha256": "e53a7b2afd6f2e298ca9343c2e7411f321e4329ae0132c4f615aa22b72d09986",
+      "byteSize": 79999280,
+      "bucketBytes": 78643200,
+      "mimeType": "image/dng",
+      "extension": "dng",
+      "license": "CC0-1.0",
+      "sourceRecord": [
+        "Samsung",
+        "Galaxy S23 Ultra",
+        "4:3",
+        49.94,
+        "jpeg restart interval = 1",
+        "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+        "2023-12-14",
+        "<a href='https://raw.pixls.us/getfile.php/7104/nice/Samsung - Galaxy S23 Ultra - 4:3.dng'>Samsung - Galaxy S23 Ultra - 4:3.dng</a><div class='checksumdata'><span title='sha256 Checksum'>e53a7b2afd6f2e298ca9343c2e7411f321e4329ae0132c4f615aa22b72d09986</span>&nbsp;(76.29MB)</div>",
+        "<a target='_blank' href='https://raw.pixls.us/getfile.php/7104/exif/20231214_130645.dng.exif.txt'>exifdata</a>"
+      ]
+    }
+  ],
+  "directControl": {
+    "relativePath": "tests/fixtures/mobile-images/originals/hopper.jpg",
+    "sha256": "ffe89a0ab0e94114e10777e7313d7fa83d634e34ebc2ea7479085cffa504c920",
+    "byteSize": 6412,
+    "mimeType": "image/jpeg",
+    "extension": "jpg",
+    "provenance": {
+      "url": "https://raw.githubusercontent.com/python-pillow/Pillow/bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d/Tests/images/hopper.jpg",
+      "license": "MIT-CMU / public-domain US Navy portrait",
+      "licenseFile": "licenses/pillow.txt",
+      "attribution": "Pillow contributors; Grace Hopper portrait by James S. Davis, US Navy (DN-SC-84-05971).",
+      "redistributable": true,
+      "consent": true
+    }
+  },
+  "regenerationSeed": {
+    "relativePath": "output/verification/mobile-image-research/b9-load-inputs/commons-mountains-with-sky.jpg",
+    "sha256": "6c82e113546ecabc61a49e4de79efd08676a950747b03c886b0d7ac15d3491fe",
+    "byteSize": 20949907,
+    "mimeType": "image/jpeg",
+    "extension": "jpg",
+    "provenance": {
+      "url": "https://upload.wikimedia.org/wikipedia/commons/2/22/Mountains_With_Sky.jpg",
+      "descriptionUrl": "https://commons.wikimedia.org/wiki/File:Mountains_With_Sky.jpg",
+      "license": "CC-BY-SA-4.0",
+      "attribution": "Mohsin ali44, Mountains With Sky, Wikimedia Commons; unchanged original.",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sourceRecord": {
+        "pageid": 59411455,
+        "ns": 6,
+        "title": "File:Mountains With Sky.jpg",
+        "imagerepository": "local",
+        "imageinfo": [
+          {
+            "size": 20949907,
+            "width": 6016,
+            "height": 4016,
+            "url": "https://upload.wikimedia.org/wikipedia/commons/2/22/Mountains_With_Sky.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Mountains_With_Sky.jpg",
+            "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=59411455",
+            "extmetadata": {
+              "DateTime": {
+                "value": "2017-05-30 16:11:32",
+                "source": "mediawiki-metadata",
+                "hidden": ""
+              },
+              "ObjectName": {
+                "value": "Mountains With Sky",
+                "source": "mediawiki-metadata"
+              },
+              "CommonsMetadataExtension": {
+                "value": 1.2,
+                "source": "extension",
+                "hidden": ""
+              },
+              "Categories": {
+                "value": "Mountains of Pakistan|Self-published work",
+                "source": "commons-categories",
+                "hidden": ""
+              },
+              "Assessments": {
+                "value": "",
+                "source": "commons-categories",
+                "hidden": ""
+              },
+              "ImageDescription": {
+                "value": "Mountains With Sky",
+                "source": "commons-desc-page"
+              },
+              "DateTimeOriginal": {
+                "value": "2016-11-02 17:21:08",
+                "source": "commons-desc-page"
+              },
+              "Credit": {
+                "value": "<span class=\"int-own-work\" lang=\"en\">Own work</span>",
+                "source": "commons-desc-page"
+              },
+              "Artist": {
+                "value": "<a href=\"//commons.wikimedia.org/w/index.php?title=User:Mohsin_ali44&amp;action=edit&amp;redlink=1\" class=\"new\" title=\"User:Mohsin ali44 (page does not exist)\">Mohsin ali44</a>",
+                "source": "commons-desc-page"
+              },
+              "LicenseShortName": {
+                "value": "CC BY-SA 4.0",
+                "source": "commons-desc-page",
+                "hidden": ""
+              },
+              "UsageTerms": {
+                "value": "Creative Commons Attribution-Share Alike 4.0",
+                "source": "commons-desc-page"
+              },
+              "AttributionRequired": {
+                "value": "true",
+                "source": "commons-desc-page",
+                "hidden": ""
+              },
+              "LicenseUrl": {
+                "value": "https://creativecommons.org/licenses/by-sa/4.0",
+                "source": "commons-desc-page"
+              },
+              "Copyrighted": {
+                "value": "True",
+                "source": "commons-desc-page",
+                "hidden": ""
+              },
+              "Restrictions": {
+                "value": "",
+                "source": "commons-desc-page",
+                "hidden": ""
+              },
+              "License": {
+                "value": "cc-by-sa-4.0",
+                "source": "commons-templates",
+                "hidden": ""
+              }
+            },
+            "mime": "image/jpeg"
+          }
+        ]
+      }
+    }
+  },
+  "localEvidence": [
+    "output/verification/mobile-image-research/b9-load-inputs/preflight.json",
+    "output/verification/mobile-image-research/b9-load-inputs/preflight-raw-restart-50mp.json"
+  ],
+  "notes": [
+    "The original 7150 warning from distribution LibRaw is retained. Adobe DNG Converter 18.6 decompression followed by distribution LibRaw provides an independent reference that matches the native preview. This is not a claim that the older reader no longer warns.",
+    "Regeneration seed is an unchanged licensed photograph, not byte padding or a generated substitute.",
+    "Per-case admission and authorization still gate all live use."
+  ]
+}

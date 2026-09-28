@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "families": {
+    "jpeg": { "still": ["jpeg-baseline", "jpeg-progressive", "jpeg-exif-orientation", "jpeg-hdr", "jpeg-ultra-hdr-gainmap", "jpeg-motion-photo-still"], "sequence": [] },
+    "png": { "still": ["png"], "sequence": ["apng"] },
+    "webp": { "still": ["webp-lossy", "webp-lossless"], "sequence": ["webp-animated"] },
+    "heic": { "still": ["heic-primary", "heic-grid", "heic-auxiliary"], "sequence": ["heic-sequence"] },
+    "heif": { "still": ["heif-generic"], "sequence": ["heic-sequence"] },
+    "dng": { "still": ["dng-bayer", "dng-linear", "dng-proraw", "dng-jpeg", "dng-proraw-jxl"], "sequence": [] },
+    "avif": { "still": ["avif-still"], "sequence": ["avif-sequence"] },
+    "gif": { "still": ["gif-still"], "sequence": ["gif-animated"] },
+    "tiff": { "still": ["tiff"], "sequence": [] },
+    "bmp": { "still": ["bmp"], "sequence": [] },
+    "jp2": { "still": ["jp2"], "sequence": [] },
+    "jxl": { "still": ["jxl-still"], "sequence": ["jxl-animated"] }
+  },
+  "paired": ["live-photo-camera", "live-photo-library"]
+}

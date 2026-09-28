@@ -1,7 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+vi.mock('@cloudflare/vite-plugin', () => ({ cloudflare: () => ({ name: 'cloudflare-test-stub' }) }));
+vi.mock('@vitejs/plugin-react', () => ({ default: () => ({ name: 'react-test-stub' }) }));
+import viteConfiguration from '../../vite.config';
+
+it('compiles test-only mobile admission out of every Vite environment', () => {
+  expect(viteConfiguration).toMatchObject({ define: { __CANDIDARY_TEST_MOBILE_IMAGE_RELEASE__: 'false' } });
+});
 
 import {
   assertDeploymentTreeClean,
@@ -43,12 +50,15 @@ function productionTopology(): Record<string, unknown> {
     ],
     images: { binding: 'IMAGES' },
     send_email: [{ name: 'EMAIL' }],
+    services: [{ binding:'IMAGE_DECODER',service:'candidary-image-decoder' }],
     ratelimits: [
       { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '1001', simple: { limit: 20, period: 60 } },
       { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '1002', simple: { limit: 30, period: 60 } },
       { name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '1003', simple: { limit: 120, period: 60 } },
     ],
     workflows: [
+      { name:'candidary-image-preview',binding:'IMAGE_PREVIEW_WORKFLOW',class_name:'ImagePreviewWorkflow' },
+      { name:'candidary-upload-completion',binding:'UPLOAD_COMPLETION_WORKFLOW',class_name:'UploadCompletionWorkflow' },
       { name: 'candidary-export', binding: 'EXPORT_WORKFLOW', class_name: 'ExportWorkflow' },
       {
         name: 'candidary-cover-render',
@@ -64,6 +74,7 @@ function productionTopology(): Record<string, unknown> {
     triggers: { crons: ['17 3 * * *', '47 * * * *'] },
     vars: {
       APP_ORIGIN: 'https://candidary.app',
+      IMAGE_DECODER_ENVIRONMENT:'production',
       ALTERNATE_ORIGINS: 'https://candidary.online',
       EMAIL_FROM: 'hello@candidary.app',
     },
@@ -89,12 +100,15 @@ function previewTopology(): Record<string, unknown> {
       { binding: 'CANONICAL_MEDIA_BUCKET', bucket_name: 'candidary-preview-media-canonical' },
     ],
     send_email: [],
+    services: [{ binding:'IMAGE_DECODER',service:'candidary-image-decoder-preview' }],
     ratelimits: [
       { name: 'HOST_AUTH_RATE_LIMIT', namespace_id: '2001', simple: { limit: 20, period: 60 } },
       { name: 'RSVP_LOOKUP_RATE_LIMIT', namespace_id: '2002', simple: { limit: 30, period: 60 } },
       { name: 'GUEST_MESSAGE_RATE_LIMIT', namespace_id: '2003', simple: { limit: 120, period: 60 } },
     ],
     workflows: [
+      { name:'candidary-image-preview-preview',binding:'IMAGE_PREVIEW_WORKFLOW',class_name:'ImagePreviewWorkflow' },
+      { name:'candidary-upload-completion-preview',binding:'UPLOAD_COMPLETION_WORKFLOW',class_name:'UploadCompletionWorkflow' },
       { name: 'candidary-preview-export', binding: 'EXPORT_WORKFLOW', class_name: 'ExportWorkflow' },
       {
         name: 'candidary-preview-cover-render',
@@ -110,6 +124,7 @@ function previewTopology(): Record<string, unknown> {
     triggers: { crons: [] },
     vars: {
       APP_ORIGIN: 'https://candidary-preview.lfd.workers.dev',
+      IMAGE_DECODER_ENVIRONMENT:'preview',
       ALTERNATE_ORIGINS: '',
       EMAIL_FROM: 'hello@candidary.app',
     },
@@ -117,6 +132,17 @@ function previewTopology(): Record<string, unknown> {
 }
 
 describe('built-artifact deployment', () => {
+  it.each(['production','preview'] as const)('admits the current %s main topology with isolated decoder service and both image Workflows',target => {
+    const root=JSON.parse(readFileSync(resolve(process.cwd(),'wrangler.jsonc'),'utf8'));
+    const config=target==='production' ? root : {...root,...root.env.preview,targetEnvironment:'preview'};
+    expect(() => assertGeneratedDeploymentTarget(config,target)).not.toThrow();
+    for (const patch of [{services:[{binding:'IMAGE_DECODER',service:'wrong-twin'}]},
+      {containers:[{class_name:'UploadImageDecoder',image:'private-image'}]},
+      {durable_objects:{bindings:[{name:'DECODER',class_name:'UploadImageDecoder'}]}},
+      {migrations:[{tag:'v1',new_sqlite_classes:['UploadImageDecoder']}]},
+      {workflows:config.workflows.filter((w:{binding:string}) => w.binding!=='IMAGE_PREVIEW_WORKFLOW')},
+      {name:'candidary-image-decoder'}]) expect(() => assertGeneratedDeploymentTarget({...config,...patch},target)).toThrow();
+  });
   it('exposes upload, cutover, and control-plane modes through the existing release script', () => {
     const packageJson = JSON.parse(
       readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'),

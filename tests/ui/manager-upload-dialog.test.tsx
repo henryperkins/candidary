@@ -103,6 +103,37 @@ afterEach(() => {
 });
 
 describe('ManagerUploadDialog', () => {
+  it.each(['creation', 'decode'] as const)('adds the same original after thumbnail %s failure and cleans up only created URLs', async (failure) => {
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, 'createObjectURL');
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+    const revoke = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: () => {
+      if (failure === 'creation') throw new Error('unavailable');
+      return 'blob:manager-original';
+    } });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revoke });
+    const queueTransport = deliveringTransport();
+    const view = render(<DialogHarness transport={queueTransport} />);
+    try {
+      const file = new File(['untouched original'], 'original.jpg', { type: 'image/jpeg' });
+      fireEvent.change(screen.getByLabelText('Choose recent photos from your library'), { target: { files: [file] } });
+      if (failure === 'decode') fireEvent.error(view.baseElement.querySelector('.selection-card__image img')!);
+      expect(view.baseElement.querySelector('.selection-card__image img')).toBeNull();
+      expect(screen.getByText('original.jpg')).toBeVisible();
+      await userEvent.click(screen.getByRole('button', { name: 'Send 1 photo' }));
+      expect(await screen.findByRole('heading', { name: '1 photo was added.' })).toBeVisible();
+      expect(vi.mocked(queueTransport.upload).mock.calls[0]?.[0].file).toBe(file);
+      view.unmount();
+      expect(revoke.mock.calls).toEqual(failure === 'creation' ? [] : [['blob:manager-original']]);
+    } finally {
+      view.unmount();
+      if (originalCreate) Object.defineProperty(URL, 'createObjectURL', originalCreate);
+      else Reflect.deleteProperty(URL, 'createObjectURL');
+      if (originalRevoke) Object.defineProperty(URL, 'revokeObjectURL', originalRevoke);
+      else Reflect.deleteProperty(URL, 'revokeObjectURL');
+    }
+  });
+
   it('keeps one Add photos label while the paused guest event completes through the shared flow', async () => {
     // Mutations caught: consulting event.uploadsEnabled, rendering guest identity/copy, or shifting the modal label.
     const transport = deliveringTransport();

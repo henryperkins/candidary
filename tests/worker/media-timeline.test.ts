@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SupportedImageType } from '../../shared/constants';
-import { resolveMediaTimeline } from '../../worker/media-timeline';
+import { resolveMediaTimeline, resolveMediaTimelineSource } from '../../worker/media-timeline';
 import { buildExifTiffSubIfd, jpegWithExif, jpegWithoutExif } from './jpeg-exif';
+import { withLeadingJpegApps } from '../fixtures/raster-builders';
 
 const DATE_TIME_ORIGINAL = 0x9003;
 const OFFSET_TIME_ORIGINAL = 0x9011;
@@ -34,6 +35,29 @@ function jpeg(capture: string, offset: string | null = null): Uint8Array {
 }
 
 describe('resolveMediaTimeline', () => {
+  it('uses bounded ranges for capture metadata in a large original', async () => {
+    const bytes = withLeadingJpegApps(jpeg('2026:09:19 17:42:30','-05:00'));
+    const reads:Array<{offset:number;length:number}> = [];
+    const input = {mimeType:'image/jpeg' as const,eventStartAt:'2026-09-19T22:00:00.000Z',eventTimezone:'America/Chicago',storedAt:'2026-09-19T22:50:00.000Z',
+      source:{size:256*1024**2,read:async (offset:number,length:number) => {
+        reads.push({offset,length});
+        if (length>4096 || offset>bytes.length) throw new Error('Original tail must not be buffered for EXIF.');
+        const range = new Uint8Array(length);
+        range.set(bytes.subarray(offset,Math.min(bytes.length,offset+length)));
+        return range;
+      }}};
+    expect((await resolveMediaTimelineSource(input)).capturedAt).toBe('2026-09-19T22:42:30.000Z');
+    expect(reads.reduce((sum,read) => sum+read.length,0)).toBeLessThan(128*1024);
+    expect(reads.some((read) => read.offset>65_536)).toBe(true);
+    expect(await resolveMediaTimelineSource({...input,mimeType:'image/dng'})).toMatchObject({capturedAt:null,timelineAt:input.storedAt});
+  });
+  it('applies the same event window to valid metadata beyond the old scan ceiling', () => {
+    expect(timeline({ bytes: withLeadingJpegApps(jpeg('2026:09:19 17:42:30', '-05:00')) })).toEqual({
+      capturedAt: '2026-09-19T22:42:30.000Z', timelineAt: '2026-09-19T22:42:30.000Z', timelineSource: 'capture',
+    });
+    expect(timeline({ bytes: withLeadingJpegApps(jpeg('2026:09:17 17:42:30', '-05:00')) }).timelineSource).toBe('received');
+  });
+
   it('honors an offset-bearing capture time and normalizes it to UTC', () => {
     expect(timeline({
       bytes: jpeg('2026:09:19 10:42:30', '+05:00'),

@@ -1,0 +1,1707 @@
+{
+  "kind": "native-service",
+  "harnessVersion": 1,
+  "group": "rendering",
+  "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+  "image": {
+    "source": "docker-inspect",
+    "id": "sha256:d014ac551e24b9ce74737a4aebdd9c2f7d0ba0d4e50a2a87bd5fa4c5d3b82f80",
+    "registryDigests": [
+      "registry.cloudflare.com/a77e479f6736120eadd99973dbeb705e/candidary-image-decoder@sha256:d014ac551e24b9ce74737a4aebdd9c2f7d0ba0d4e50a2a87bd5fa4c5d3b82f80"
+    ]
+  },
+  "complete": false,
+  "results": [
+    {
+      "caseId": "jpeg-baseline",
+      "fixtureId": "pillow-hopper-jpg",
+      "sourceSha256": "ffe89a0ab0e94114e10777e7313d7fa83d634e34ebc2ea7479085cffa504c920",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 146,
+        "peakRssBytes": 27770880,
+        "peakScratchBytes": 28655,
+        "sourceBytes": 6412
+      },
+      "decodeSeconds": 0.5050900520000141,
+      "inspection": {
+        "family": "jpeg",
+        "width": 128,
+        "height": 128,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "ffe89a0ab0e94114e10777e7313d7fa83d634e34ebc2ea7479085cffa504c920",
+        "byteSize": 6412,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "ed556cba0a772e671ffc869e12a5dd48a81ebd0324473de032b8a477d6d12e6f",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 128,
+        "height": 128,
+        "frames": 1,
+        "referenceSha256": "e45419b4c1e4d0153aa3f4f867daadb00b3ec6303a994fdff1cfe3fbe2ef4860",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jpeg-progressive",
+      "fixtureId": "libjxl-flower-progressive",
+      "sourceSha256": "376ea09db11fad472ea164e5920c1c31746136b0e9db46bc3d527ee192b855e9",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 2217,
+        "peakRssBytes": 103182336,
+        "peakScratchBytes": 2350640,
+        "sourceBytes": 522057
+      },
+      "decodeSeconds": 2.5621256539889146,
+      "inspection": {
+        "family": "jpeg",
+        "width": 2268,
+        "height": 1512,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "376ea09db11fad472ea164e5920c1c31746136b0e9db46bc3d527ee192b855e9",
+        "byteSize": 522057,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "829123ea666fb00423434b9a88240bd095c5f378c1fa28b792932ec8bcab30e8",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1067,
+        "frames": 1,
+        "referenceSha256": "de037cdfc5e953ca6582af25c84cfb1a3358222d43b701c9e84648a6bb03e317",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jpeg-exif-orientation",
+      "fixtureId": "pillow-hopper-orientation-6-jpg",
+      "sourceSha256": "2e78bb18895fa23eddbb2afa1228950700d97e4ef9d7bfae6935604d01eb1b61",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 84,
+        "peakRssBytes": 27901952,
+        "peakScratchBytes": 26677,
+        "sourceBytes": 4951
+      },
+      "decodeSeconds": 0.4046826670237351,
+      "inspection": {
+        "family": "jpeg",
+        "width": 128,
+        "height": 128,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "2e78bb18895fa23eddbb2afa1228950700d97e4ef9d7bfae6935604d01eb1b61",
+        "byteSize": 4951,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "024098d3f3f57f2e0211a67f0b360d480ee66dbdd0e12b5ba77c94756d336595",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 128,
+        "height": 128,
+        "frames": 1,
+        "referenceSha256": "0d1565a88246f43658b1b3dcd4f0e317a39e7ec118e864a33f8cb5f9cd8b6598",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jpeg-hdr",
+      "fixtureId": "libultrahdr-apple-gainmap-new",
+      "sourceSha256": "492a94bd0636bcf15b3f560c68142a7783936c1597e78b0d0461d8be7fddc078",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 246,
+        "peakRssBytes": 27901952,
+        "peakScratchBytes": 147333,
+        "sourceBytes": 50824
+      },
+      "decodeSeconds": 0.6058257510012481,
+      "inspection": {
+        "family": "jpeg",
+        "width": 384,
+        "height": 512,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "492a94bd0636bcf15b3f560c68142a7783936c1597e78b0d0461d8be7fddc078",
+        "byteSize": 50824,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "a0129d31b46885956deb8efeeae1cbc013dbb63ccd52a8aab7c5b9d4b120c9ee",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 384,
+        "height": 512,
+        "frames": 1,
+        "referenceSha256": "d1c9b85bd16c2e56035835cdf4f6dc3c199b69b1297d935dc47692e8b006d68e",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jpeg-hdr",
+      "fixtureId": "libultrahdr-apple-gainmap-old",
+      "sourceSha256": "2e4310a0dd37a98678e057e25d936bbc4f936bb6fe17380c0ce99e58ecaa603b",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 246,
+        "peakRssBytes": 27901952,
+        "peakScratchBytes": 147251,
+        "sourceBytes": 50742
+      },
+      "decodeSeconds": 0.5551599889877252,
+      "inspection": {
+        "family": "jpeg",
+        "width": 384,
+        "height": 512,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "2e4310a0dd37a98678e057e25d936bbc4f936bb6fe17380c0ce99e58ecaa603b",
+        "byteSize": 50742,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "a0129d31b46885956deb8efeeae1cbc013dbb63ccd52a8aab7c5b9d4b120c9ee",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 384,
+        "height": 512,
+        "frames": 1,
+        "referenceSha256": "d1c9b85bd16c2e56035835cdf4f6dc3c199b69b1297d935dc47692e8b006d68e",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jpeg-ultra-hdr-gainmap",
+      "fixtureId": "commons-montseny-pixel-8a-ultrahdr",
+      "sourceSha256": "135e61715bc37947f96d87a03f467f205dd1866daf29758563f379bf326bbff3",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 5031,
+        "peakRssBytes": 296148992,
+        "peakScratchBytes": 2790626,
+        "sourceBytes": 1560734
+      },
+      "decodeSeconds": 5.320069103996502,
+      "inspection": {
+        "family": "jpeg",
+        "width": 4624,
+        "height": 3472,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "135e61715bc37947f96d87a03f467f205dd1866daf29758563f379bf326bbff3",
+        "byteSize": 1560734,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "614402704033494f37e73eb9857691fa2f4937330f0e02763104682e43fd7fe1",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1201,
+        "frames": 1,
+        "referenceSha256": "f88ea97add525dbc0523f6eddebe55c63063f5d27c3f68b193692b98016108d6",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jpeg-ultra-hdr-gainmap",
+      "fixtureId": "commons-mtmurone-pixel-9-ultrahdr",
+      "sourceSha256": "052e851958e72ec4c54ef05baf942e34bdf1a350bd920d351b3cc55d10c45c58",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 4055,
+        "peakRssBytes": 244940800,
+        "peakScratchBytes": 3314497,
+        "sourceBytes": 1847813
+      },
+      "decodeSeconds": 4.3666661079914775,
+      "inspection": {
+        "family": "jpeg",
+        "width": 4080,
+        "height": 3072,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "052e851958e72ec4c54ef05baf942e34bdf1a350bd920d351b3cc55d10c45c58",
+        "byteSize": 1847813,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "c083dc9cce2ad63ad98225ac921f6d2ab10a07e3763038cfc4e8361e00e12d8f",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1205,
+        "frames": 1,
+        "referenceSha256": "ba702b8e5a8a9f3244647561d198029cd3ffef60d7806bb3c0dd9f1c8fe146f0",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jpeg-motion-photo-still",
+      "fixtureId": "commons-pxl-pixel-6a-motion-photo",
+      "sourceSha256": "cc9143e66707145b905bc7098430e14ef26826026277107693510d1d48412ca0",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 4055,
+        "peakRssBytes": 240058368,
+        "peakScratchBytes": 8005492,
+        "sourceBytes": 6317260
+      },
+      "decodeSeconds": 4.417393178999191,
+      "inspection": {
+        "family": "jpeg",
+        "width": 3024,
+        "height": 4032,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "cc9143e66707145b905bc7098430e14ef26826026277107693510d1d48412ca0",
+        "byteSize": 6317260,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "c92799b1448c8ecc6b70d0be9ce90cf9db84440ccb833a31f11d993778d45587",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1200,
+        "height": 1600,
+        "frames": 1,
+        "referenceSha256": "8a07b0b72594c4d53fc48404e77cc39dbf2ee956198c0da8803aa8a05194fcf8",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jpeg-motion-photo-still",
+      "fixtureId": "commons-mvimg-pixel-2-microvideo",
+      "sourceSha256": "ee86bb8de724a2e6f8a88027fc74ca3f79f4b51ea94fe4313917545c4dd1c100",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 4036,
+        "peakRssBytes": 239915008,
+        "peakScratchBytes": 7809842,
+        "sourceBytes": 6109198
+      },
+      "decodeSeconds": 4.366915569989942,
+      "inspection": {
+        "family": "jpeg",
+        "width": 4032,
+        "height": 3024,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "ee86bb8de724a2e6f8a88027fc74ca3f79f4b51ea94fe4313917545c4dd1c100",
+        "byteSize": 6109198,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "3b6a1c120632a5a86ecb9e4781fa5c8ab1864cdd8a21f1a43d82ee2e56d18889",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1200,
+        "frames": 1,
+        "referenceSha256": "3df0170b66d1cbc79178423b965742490a2415362505adc33d584e82530ae246",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "png",
+      "fixtureId": "pillow-hopper-png",
+      "sourceSha256": "dbdcb9a9f8ec2c54ff99e99636059bbd57194ed84e2cca5e53853aef293faf42",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 185,
+        "peakRssBytes": 28033024,
+        "peakScratchBytes": 52880,
+        "sourceBytes": 30605
+      },
+      "decodeSeconds": 0.45433471401338466,
+      "inspection": {
+        "family": "png",
+        "width": 128,
+        "height": 128,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "dbdcb9a9f8ec2c54ff99e99636059bbd57194ed84e2cca5e53853aef293faf42",
+        "byteSize": 30605,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "17655eecd569b270cda3abb19486c430ff42526523571531689eeffce60550c3",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 128,
+        "height": 128,
+        "frames": 1,
+        "referenceSha256": "8793a7d6a0bbe7848f30728cd325905eaa88a1f828d1fe2ee70c21c57e4f20a9",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "apng",
+      "fixtureId": "libjxl-icos4d-apng",
+      "sourceSha256": "74fbb1d322930af5353c5d79daeda4b0a25f6168accfdfcf7cbd6486ae879c7a",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 1348,
+        "peakRssBytes": 49348608,
+        "peakScratchBytes": 2670029,
+        "sourceBytes": 991744
+      },
+      "decodeSeconds": 1.65837680597906,
+      "inspection": {
+        "family": "png",
+        "width": 128,
+        "height": 128,
+        "frameCount": 48,
+        "primaryIndex": 0,
+        "isSequence": true,
+        "sourceSha256": "74fbb1d322930af5353c5d79daeda4b0a25f6168accfdfcf7cbd6486ae879c7a",
+        "byteSize": 991744,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "c04f7bcdcedc185f3238404495299a9c1c30281de4c3310c78346e6ae019039a",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 128,
+        "height": 128,
+        "frames": 48,
+        "referenceSha256": "9314dd931fb5f5a795cdef71487ef7424e210c64c3f9cfe6d15ff51f0cf4d045",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "webp-lossy",
+      "fixtureId": "pillow-hopper-webp",
+      "sourceSha256": "3ad1cd060bff97c8090ca68efe9e25724e830bf5383397ffe7f448d5b825c6ad",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 104,
+        "peakRssBytes": 28033024,
+        "peakScratchBytes": 22817,
+        "sourceBytes": 3282
+      },
+      "decodeSeconds": 0.4043018789961934,
+      "inspection": {
+        "family": "webp",
+        "width": 128,
+        "height": 128,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "3ad1cd060bff97c8090ca68efe9e25724e830bf5383397ffe7f448d5b825c6ad",
+        "byteSize": 3282,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "1084ac73f8b9038e42cadc273e41543ce8cdf3c7861a834006cf3fe776683990",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 128,
+        "height": 128,
+        "frames": 1,
+        "referenceSha256": "8b4cff0fd7e1e9f021500d5d0987cb46fa3427744a05813878b15b2550f4b63b",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "webp-lossless",
+      "fixtureId": "google-yellow-rose-webp-lossless",
+      "sourceSha256": "49a902b9c35bd2031bf26234c59ff369dd3ae18a3b58247285104a23346ba2d4",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 307,
+        "peakRssBytes": 32972800,
+        "peakScratchBytes": 164453,
+        "sourceBytes": 81836
+      },
+      "decodeSeconds": 0.6052442360087298,
+      "inspection": {
+        "family": "webp",
+        "width": 400,
+        "height": 301,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "49a902b9c35bd2031bf26234c59ff369dd3ae18a3b58247285104a23346ba2d4",
+        "byteSize": 81836,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "315ddad716e110519758694a02a01c57441dce7b34e1d826cbddaa84a4c31559",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 400,
+        "height": 301,
+        "frames": 1,
+        "referenceSha256": "1e7307f53482e66ebc012d5632dad061acb1eadc2e70612dc4debdb6456fadb4",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "webp-animated",
+      "fixtureId": "commons-poznan-neon-webp-animated",
+      "sourceSha256": "a9bef3616f8deec6b558760ed98d9054b10ac452a896ae88987918bd7179485a",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 4848,
+        "peakRssBytes": 103124992,
+        "peakScratchBytes": 2284920,
+        "sourceBytes": 371854
+      },
+      "decodeSeconds": 5.119656631984981,
+      "inspection": {
+        "family": "webp",
+        "width": 480,
+        "height": 270,
+        "frameCount": 24,
+        "primaryIndex": 0,
+        "isSequence": true,
+        "sourceSha256": "a9bef3616f8deec6b558760ed98d9054b10ac452a896ae88987918bd7179485a",
+        "byteSize": 371854,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "f866e899d7d07d0de10f0b6b94559580e8f46294d05943b3459c62e52e657d06",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 480,
+        "height": 270,
+        "frames": 24,
+        "referenceSha256": "f4cfc086632be4d343e492816b9214ed94b9189eb24edb659c046fda580afc0e",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "webp-animated",
+      "fixtureId": "commons-socorro-vortices-webp-animated",
+      "sourceSha256": "cd192233b998f3b23bf9c80e918bd63f53c7e369c241fdba1dfa77fb4a6f7bb1",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 26773,
+        "peakRssBytes": 1112838144,
+        "peakScratchBytes": 42578459,
+        "sourceBytes": 3367212
+      },
+      "decodeSeconds": 27.146072005998576,
+      "inspection": {
+        "family": "webp",
+        "width": 750,
+        "height": 560,
+        "frameCount": 98,
+        "primaryIndex": 0,
+        "isSequence": true,
+        "sourceSha256": "cd192233b998f3b23bf9c80e918bd63f53c7e369c241fdba1dfa77fb4a6f7bb1",
+        "byteSize": 3367212,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "325c1909e94c59647b3a92ebf5247b29aef05489e32f23945317d9bf41952a78",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 750,
+        "height": 560,
+        "frames": 98,
+        "referenceSha256": "49b3fb4c2ca02646be15c22298265262f2806ab9e64b200979900228d2fec660",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "heic-primary",
+      "fixtureId": "libheif-heic-primary",
+      "sourceSha256": "7f8b363e4936c0666a25f64f3a92fda10bd8e5453be4592530b65a55dd98f3f2",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 712,
+        "peakRssBytes": 64737280,
+        "peakScratchBytes": 2031584,
+        "sourceBytes": 718114
+      },
+      "decodeSeconds": 1.0081708939978853,
+      "inspection": {
+        "family": "heic",
+        "width": 1280,
+        "height": 854,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "7f8b363e4936c0666a25f64f3a92fda10bd8e5453be4592530b65a55dd98f3f2",
+        "byteSize": 718114,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "9eb6ec18b6b235a6dceef0eb4fbfa3ab2e58582c311160e4c0225daa87806743",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1280,
+        "height": 854,
+        "frames": 1,
+        "referenceSha256": "30d1c2177e31347c4082724d14e1791f832195663610dbb6b3393208d5267bc3",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "heic-grid",
+      "fixtureId": "zenodo-14227327-img-2622-grid",
+      "sourceSha256": "95966c80c8539a3335e66c6c02300d5f25fd5bfa85e150bdb08f24a4d879e213",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 3507,
+        "peakRssBytes": 243220480,
+        "peakScratchBytes": 5564534,
+        "sourceBytes": 2953301
+      },
+      "decodeSeconds": 3.816229182004463,
+      "inspection": {
+        "family": "heic",
+        "width": 4032,
+        "height": 3024,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "95966c80c8539a3335e66c6c02300d5f25fd5bfa85e150bdb08f24a4d879e213",
+        "byteSize": 2953301,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "6da8172b5bf7b445b35e06468254734c62098e37951a73368dfb639c069d0dc7",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1200,
+        "frames": 1,
+        "referenceSha256": "277ccae194872698b6cd650df98ebf917d33fb809bef6b841b111e4c50e60135",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "heic-grid",
+      "fixtureId": "zenodo-17195716-img-007-grid-irot",
+      "sourceSha256": "8a8cef63104dd3c8ea91c59e64f5a9dd1118264cc2182ad83b249d7dffc90e53",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 3813,
+        "peakRssBytes": 241516544,
+        "peakScratchBytes": 2590539,
+        "sourceBytes": 1073534
+      },
+      "decodeSeconds": 4.11594857100863,
+      "inspection": {
+        "family": "heic",
+        "width": 3024,
+        "height": 4032,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "8a8cef63104dd3c8ea91c59e64f5a9dd1118264cc2182ad83b249d7dffc90e53",
+        "byteSize": 1073534,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "96d4bd145a9baaf16e3066963e571a250f9633d4de750a27e79f5bb5c1450278",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1200,
+        "height": 1600,
+        "frames": 1,
+        "referenceSha256": "c2606fe36b38f01d4843351251d6f9f2161f0626da6a85015f780938e68568d2",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "heic-grid",
+      "fixtureId": "zenodo-19469154-galaxy-a16-grid",
+      "sourceSha256": "1b2ec2b2f7a09e3755e6f8c9eb85bf332cc654a7f5ed4421516d0b004383e1ab",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 4727,
+        "peakRssBytes": 764620800,
+        "peakScratchBytes": 5114271,
+        "sourceBytes": 2954350
+      },
+      "decodeSeconds": 5.019214500993257,
+      "inspection": {
+        "family": "heic",
+        "width": 6120,
+        "height": 8160,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "1b2ec2b2f7a09e3755e6f8c9eb85bf332cc654a7f5ed4421516d0b004383e1ab",
+        "byteSize": 2954350,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "1161b8cf70ea6f7f2f04384608ee7c4180d2f099b8a64a645bacd71c4a05d1e5",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1200,
+        "height": 1600,
+        "frames": 1,
+        "referenceSha256": "38a54d8a89cc10ead047bfa932a1d4c43ab68e29d96161d61f9916d88a5b0459",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "heic-auxiliary",
+      "fixtureId": "zenodo-14227327-img-2622-hdrgainmap",
+      "sourceSha256": "95966c80c8539a3335e66c6c02300d5f25fd5bfa85e150bdb08f24a4d879e213",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 3525,
+        "peakRssBytes": 243077120,
+        "peakScratchBytes": 5564534,
+        "sourceBytes": 2953301
+      },
+      "decodeSeconds": 3.815278088004561,
+      "inspection": {
+        "family": "heic",
+        "width": 4032,
+        "height": 3024,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "95966c80c8539a3335e66c6c02300d5f25fd5bfa85e150bdb08f24a4d879e213",
+        "byteSize": 2953301,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "6da8172b5bf7b445b35e06468254734c62098e37951a73368dfb639c069d0dc7",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1200,
+        "frames": 1,
+        "referenceSha256": "277ccae194872698b6cd650df98ebf917d33fb809bef6b841b111e4c50e60135",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "heic-auxiliary",
+      "fixtureId": "zenodo-13623651-depth-auxiliary",
+      "sourceSha256": "15aa1095c4cae3953e959eefbeda4f5334647678beea98d392966ce48618d324",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 3282,
+        "peakRssBytes": 242446336,
+        "peakScratchBytes": 3405514,
+        "sourceBytes": 1287198
+      },
+      "decodeSeconds": 3.5651409060228616,
+      "inspection": {
+        "family": "heic",
+        "width": 3024,
+        "height": 4032,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "15aa1095c4cae3953e959eefbeda4f5334647678beea98d392966ce48618d324",
+        "byteSize": 1287198,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "a7dae931bdce6aedc9f415d7855be5f58b47fd9f301705d9ab46b299d1ac5567",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1200,
+        "height": 1600,
+        "frames": 1,
+        "referenceSha256": "d6f394240f33f8d356a176982f2dc9d07f567adaaad0813bc807ed8475ecfc50",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "heic-auxiliary",
+      "fixtureId": "zenodo-17114909-img-8685-apple-auxiliaries",
+      "sourceSha256": "3750704f0f0192e32e2cf7ee6856ee45770d358319e590f42062cd6a7c971d05",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 5981,
+        "peakRssBytes": 413782016,
+        "peakScratchBytes": 4393933,
+        "sourceBytes": 2215584
+      },
+      "decodeSeconds": 6.272269156994298,
+      "inspection": {
+        "family": "heic",
+        "width": 5712,
+        "height": 4284,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "3750704f0f0192e32e2cf7ee6856ee45770d358319e590f42062cd6a7c971d05",
+        "byteSize": 2215584,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "07bd4198a048819e0e712dd989d04bf7d089c298b6806c8e80ca7718299f2c1f",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1200,
+        "frames": 1,
+        "referenceSha256": "a9c73d2ecd6771dd1d97c4f7c264826b5473814429d5c6c9401b45ebd1a3b3e1",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "heic-sequence",
+      "status": "missing",
+      "reason": "Missing real-file fixture."
+    },
+    {
+      "caseId": "heif-generic",
+      "fixtureId": "libheif-heif-generic",
+      "sourceSha256": "7f8b363e4936c0666a25f64f3a92fda10bd8e5453be4592530b65a55dd98f3f2",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 713,
+        "peakRssBytes": 64815104,
+        "peakScratchBytes": 2031584,
+        "sourceBytes": 718114
+      },
+      "decodeSeconds": 1.0069533629866783,
+      "inspection": {
+        "family": "heic",
+        "width": 1280,
+        "height": 854,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "7f8b363e4936c0666a25f64f3a92fda10bd8e5453be4592530b65a55dd98f3f2",
+        "byteSize": 718114,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "9eb6ec18b6b235a6dceef0eb4fbfa3ab2e58582c311160e4c0225daa87806743",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1280,
+        "height": 854,
+        "frames": 1,
+        "referenceSha256": "30d1c2177e31347c4082724d14e1791f832195663610dbb6b3393208d5267bc3",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "dng-bayer",
+      "fixtureId": "raw-pixls-pixel-2-xl",
+      "sourceSha256": "5541093a369f0487fef92bcd1f5fef1be6e4e3cec2aa4d52ad38d2211f3309d7",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 2151,
+        "peakRssBytes": 239099904,
+        "peakScratchBytes": 63752285,
+        "sourceBytes": 24479668
+      },
+      "decodeSeconds": 2.662595426023472,
+      "inspection": {
+        "family": "dng",
+        "width": 4032,
+        "height": 3024,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "5541093a369f0487fef92bcd1f5fef1be6e4e3cec2aa4d52ad38d2211f3309d7",
+        "byteSize": 24479668,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "cbe70bed97cf33e769dee60de7b1595179e5ea255a37a7c6b5c8fb34dde2510a",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1200,
+        "frames": 1,
+        "referenceSha256": "95ac9ee41aaadc3e53024d4ca83b99ba29d24e0bc6e9a5a39723a5e84265056a",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "dng-linear",
+      "fixtureId": "raw-pixls-galaxy-s23-ultra",
+      "sourceSha256": "4f9d1b085b328b6c7ae21437c4106889cb38d52fab604a786091bf5fe5ef3da4",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 1623,
+        "peakRssBytes": 206442496,
+        "peakScratchBytes": 64752449,
+        "sourceBytes": 31311854
+      },
+      "decodeSeconds": 2.2112359839957207,
+      "inspection": {
+        "family": "dng",
+        "width": 3648,
+        "height": 2736,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "4f9d1b085b328b6c7ae21437c4106889cb38d52fab604a786091bf5fe5ef3da4",
+        "byteSize": 31311854,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "d30de6a8b554850d27c49682ceeadea9d9c6744dca1494651de74be9784fee07",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1200,
+        "frames": 1,
+        "referenceSha256": "3315dad8c75636f04dc7564c90b3995deae2a0baf4ab123367787bacf39982cf",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "dng-proraw",
+      "fixtureId": "raw-pixls-iphone-12-pro",
+      "sourceSha256": "e91e77a4533ed7cce551d83330676ea5c47dd5e55fb38adda7819366afdbdfc2",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 2312,
+        "peakRssBytes": 239112192,
+        "peakScratchBytes": 67809957,
+        "sourceBytes": 29195592
+      },
+      "decodeSeconds": 2.8628529230190907,
+      "inspection": {
+        "family": "dng",
+        "width": 3024,
+        "height": 4032,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "e91e77a4533ed7cce551d83330676ea5c47dd5e55fb38adda7819366afdbdfc2",
+        "byteSize": 29195592,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "f3755f1ca6d610fd9b1192c4e0d57d38fe21c68a205ace8e5e4f9c0e2da7cba8",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1200,
+        "height": 1600,
+        "frames": 1,
+        "referenceSha256": "a715f77003bc0ce00f353d4fb18e0b7d36869ffe37cc102136040af23d2e6602",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "dng-jpeg",
+      "fixtureId": "raw-pixls-iphone-8",
+      "sourceSha256": "75cc053e427c3ca2dfa8526dc6c9c77fdb265bc5d005af1fd408b5084250a9fc",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 2333,
+        "peakRssBytes": 238755840,
+        "peakScratchBytes": 49253719,
+        "sourceBytes": 10533870
+      },
+      "decodeSeconds": 2.713559166993946,
+      "inspection": {
+        "family": "dng",
+        "width": 4032,
+        "height": 3024,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "75cc053e427c3ca2dfa8526dc6c9c77fdb265bc5d005af1fd408b5084250a9fc",
+        "byteSize": 10533870,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "f52c796daf3d0cb2662270d2a6a6e11355fda8c327dfe2554c92d3aaf0692b0d",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1600,
+        "height": 1200,
+        "frames": 1,
+        "referenceSha256": "2bd7ad7c4bf2a46d0afccdcd35b811483d4c46266d5c51eabf245e8267bc34ad",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "dng-proraw-jxl",
+      "fixtureId": "raw-pixls-galaxy-s22-jxl",
+      "sourceSha256": "8f0ddc0a672503a840995a6901b16d3650f4c41b8c775e66a553b30222a69864",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 2113,
+        "peakRssBytes": 236253184,
+        "peakScratchBytes": 81676726,
+        "sourceBytes": 42970855
+      },
+      "decodeSeconds": 2.813221805001376,
+      "inspection": {
+        "family": "dng",
+        "width": 3000,
+        "height": 4000,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "8f0ddc0a672503a840995a6901b16d3650f4c41b8c775e66a553b30222a69864",
+        "byteSize": 42970855,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "47831138b2e4f4fb015cb5b6926547ad364c9daece5fc355b7cf8d83d981f8e9",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1200,
+        "height": 1600,
+        "frames": 1,
+        "referenceSha256": "5292d3b03cffd1bc54f63f26fb73ad22a7e53c39ba2b394efa3fa07667c567fa",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "avif-still",
+      "fixtureId": "libheif-avif-still",
+      "sourceSha256": "54a0dc31d02b6f5d9d4b66027d4787861b7af15ffd8fab8eab963d10c5411469",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 449,
+        "peakRssBytes": 46129152,
+        "peakScratchBytes": 698379,
+        "sourceBytes": 113604
+      },
+      "decodeSeconds": 0.7056972039863467,
+      "inspection": {
+        "family": "avif",
+        "width": 800,
+        "height": 533,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "54a0dc31d02b6f5d9d4b66027d4787861b7af15ffd8fab8eab963d10c5411469",
+        "byteSize": 113604,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "7a00b179a495c49842e7356f503ad01e453135c86981ddbfd6678d20fab08d83",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 800,
+        "height": 533,
+        "frames": 1,
+        "referenceSha256": "682d70bb5cc45812b3dc653ffbb015b1d1689297234fe42380da5609acd7ab4b",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "avif-sequence",
+      "fixtureId": "linku-star-8bpc-avifs",
+      "sourceSha256": "ae35b161de67a5afeb195ee401f369c34990f0ff8662f70ab4065bc6931f0a66",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 226,
+        "peakRssBytes": 28033024,
+        "peakScratchBytes": 27542,
+        "sourceBytes": 15679
+      },
+      "decodeSeconds": 0.5048558510025032,
+      "inspection": {
+        "family": "avif",
+        "width": 159,
+        "height": 159,
+        "frameCount": 5,
+        "primaryIndex": 0,
+        "isSequence": true,
+        "sourceSha256": "ae35b161de67a5afeb195ee401f369c34990f0ff8662f70ab4065bc6931f0a66",
+        "byteSize": 15679,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "35c64c5adc5a2d7e795f102efae8325e6807ab2e2f72432a9905d0552b2b9eba",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 159,
+        "height": 159,
+        "frames": 5,
+        "referenceSha256": "08b11290fb2af28a741367536b725efc5ce671b89f67e720b44bcfd8d268225a",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "avif-sequence",
+      "fixtureId": "lsf-beach-ball-avifs",
+      "sourceSha256": "c99384caf966d13864b50c957f4f50cd4a64480389555555c4437afa28ef9357",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 428,
+        "peakRssBytes": 28033024,
+        "peakScratchBytes": 80360,
+        "sourceBytes": 7668
+      },
+      "decodeSeconds": 0.7053510900004767,
+      "inspection": {
+        "family": "avif",
+        "width": 100,
+        "height": 100,
+        "frameCount": 20,
+        "primaryIndex": 0,
+        "isSequence": true,
+        "sourceSha256": "c99384caf966d13864b50c957f4f50cd4a64480389555555c4437afa28ef9357",
+        "byteSize": 7668,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "ca7af4eed4edef5a41886f7b7d7068fbfef9c2704ac2cab21b781e18ff9465e8",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 100,
+        "height": 100,
+        "frames": 20,
+        "referenceSha256": "251267aa87abc67578842bd679d6e261fafbfbc8ed3a2eb6bf1d1da6838e26e7",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "gif-still",
+      "fixtureId": "pillow-hopper-gif",
+      "sourceSha256": "19b8e092eee2eab632a36ee5644e362cb751cecaadb40bf4615334f3ffc6f1a5",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 84,
+        "peakRssBytes": 28033024,
+        "peakScratchBytes": 28373,
+        "sourceBytes": 15305
+      },
+      "decodeSeconds": 0.354762523988029,
+      "inspection": {
+        "family": "gif",
+        "width": 128,
+        "height": 128,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "19b8e092eee2eab632a36ee5644e362cb751cecaadb40bf4615334f3ffc6f1a5",
+        "byteSize": 15305,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "400efc6e18f5073165d4dc6909a852504a47a87f62f49eb4c9939f8788ea19de",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 128,
+        "height": 128,
+        "frames": 1,
+        "referenceSha256": "48b0bd32c438fee00b98e1713b2d9204c8904fc0788150b20f1c8ec1765086f2",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "gif-animated",
+      "fixtureId": "libjxl-newtons-cradle-gif",
+      "sourceSha256": "47f6bcd67d0fdff8074e256a034ae7cd2693613df16ccf529e48d93b62b424f0",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 1623,
+        "peakRssBytes": 149143552,
+        "peakScratchBytes": 701749,
+        "sourceBytes": 308156
+      },
+      "decodeSeconds": 1.9090006699843798,
+      "inspection": {
+        "family": "gif",
+        "width": 480,
+        "height": 360,
+        "frameCount": 36,
+        "primaryIndex": 0,
+        "isSequence": true,
+        "sourceSha256": "47f6bcd67d0fdff8074e256a034ae7cd2693613df16ccf529e48d93b62b424f0",
+        "byteSize": 308156,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "9e331014704be6f2d781546436afdee2bdcc72e32696b244518234d7445cd733",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 480,
+        "height": 360,
+        "frames": 36,
+        "referenceSha256": "222d4677ade72d098c39044dac9d8551dba53183f947303c90778933e097eb07",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "tiff",
+      "fixtureId": "pillow-hopper-tif",
+      "sourceSha256": "eec7740ad708ec31de3f64e9106de1123508d801ee96056eed30b0900d5ee1e1",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 84,
+        "peakRssBytes": 28033024,
+        "peakScratchBytes": 71852,
+        "sourceBytes": 49597
+      },
+      "decodeSeconds": 0.35405059199547395,
+      "inspection": {
+        "family": "tiff",
+        "width": 128,
+        "height": 128,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "eec7740ad708ec31de3f64e9106de1123508d801ee96056eed30b0900d5ee1e1",
+        "byteSize": 49597,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "17655eecd569b270cda3abb19486c430ff42526523571531689eeffce60550c3",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 128,
+        "height": 128,
+        "frames": 1,
+        "referenceSha256": "8793a7d6a0bbe7848f30728cd325905eaa88a1f828d1fe2ee70c21c57e4f20a9",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "bmp",
+      "fixtureId": "pillow-hopper-bmp",
+      "sourceSha256": "f1a94f3add0a2e54365dc94b51da099bd0de8289b955fc8304a8627b7b0d6aea",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 83,
+        "peakRssBytes": 28033024,
+        "peakScratchBytes": 71546,
+        "sourceBytes": 49290
+      },
+      "decodeSeconds": 0.3541392959887162,
+      "inspection": {
+        "family": "bmp",
+        "width": 128,
+        "height": 128,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "f1a94f3add0a2e54365dc94b51da099bd0de8289b955fc8304a8627b7b0d6aea",
+        "byteSize": 49290,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "17655eecd569b270cda3abb19486c430ff42526523571531689eeffce60550c3",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 128,
+        "height": 128,
+        "frames": 1,
+        "referenceSha256": "8793a7d6a0bbe7848f30728cd325905eaa88a1f828d1fe2ee70c21c57e4f20a9",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jp2",
+      "fixtureId": "openpreserve-balloon-jp2",
+      "sourceSha256": "3fe64d400739ac15e380331aed942c4a3a8754b7473bd30a77bd837cbb8a8e10",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 2213,
+        "peakRssBytes": 256618496,
+        "peakScratchBytes": 2555170,
+        "sourceBytes": 670372
+      },
+      "decodeSeconds": 2.562024229002418,
+      "inspection": {
+        "family": "jp2",
+        "width": 2717,
+        "height": 3701,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "3fe64d400739ac15e380331aed942c4a3a8754b7473bd30a77bd837cbb8a8e10",
+        "byteSize": 670372,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "58019d98b2af24355fce5c92635bb9af5d855217bf4d60c8ade54f37f9a4f9d5",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 1175,
+        "height": 1600,
+        "frames": 1,
+        "referenceSha256": "7ac3b93027485b71cd52e7c572fa699abff53cbf4e3650f16a03e191117b67ae",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jxl-still",
+      "fixtureId": "jxl-flower-jxl",
+      "sourceSha256": "41046f0de4dd36177aefa9b53fe6c3cd35a8e2c215a8d41ca89a6a9bc7f27541",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 286,
+        "peakRssBytes": 29204480,
+        "peakScratchBytes": 351906,
+        "sourceBytes": 103540
+      },
+      "decodeSeconds": 0.5551630489935633,
+      "inspection": {
+        "family": "jxl",
+        "width": 834,
+        "height": 244,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "41046f0de4dd36177aefa9b53fe6c3cd35a8e2c215a8d41ca89a6a9bc7f27541",
+        "byteSize": 103540,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "cd20bf392063dccfa90733ae89e3b6e8ca444eec281232d72f5043b254de4b83",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 834,
+        "height": 244,
+        "frames": 1,
+        "referenceSha256": "08db8af25efd857b5e3e44fdbef50ff1c6385a8ccaa4711b862f98d4e6b79845",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jxl-still",
+      "fixtureId": "jxl-bench-orient5-jxl",
+      "sourceSha256": "e223fed907c6238622b2b6ec1c80609050c9d2db4d759cf3ca6f0db304cbb82a",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 347,
+        "peakRssBytes": 40013824,
+        "peakScratchBytes": 744963,
+        "sourceBytes": 184341
+      },
+      "decodeSeconds": 0.6554347579949535,
+      "inspection": {
+        "family": "jxl",
+        "width": 606,
+        "height": 500,
+        "frameCount": 1,
+        "primaryIndex": 0,
+        "isSequence": false,
+        "sourceSha256": "e223fed907c6238622b2b6ec1c80609050c9d2db4d759cf3ca6f0db304cbb82a",
+        "byteSize": 184341,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "6b2a79d6f12bd2606351511ac43491d96f8204e2830061cfff70818b0866ba8f",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 606,
+        "height": 500,
+        "frames": 1,
+        "referenceSha256": "1e07d11f92963e495c46933d7bfb7257be480bbbadd633180b3cd37876ff1241",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    },
+    {
+      "caseId": "jxl-animated",
+      "fixtureId": "jxl-newtons-cradle-jxl",
+      "sourceSha256": "35a13d365f5eb88c3249afe073b7d8b0174d74e38f7edaa8805ca8ab46a59ab4",
+      "status": "pass",
+      "metrics": {
+        "nativeMs": 2901,
+        "peakRssBytes": 222216192,
+        "peakScratchBytes": 630835,
+        "sourceBytes": 238305
+      },
+      "decodeSeconds": 3.263662700977875,
+      "inspection": {
+        "family": "jxl",
+        "width": 480,
+        "height": 360,
+        "frameCount": 36,
+        "primaryIndex": 0,
+        "isSequence": true,
+        "sourceSha256": "35a13d365f5eb88c3249afe073b7d8b0174d74e38f7edaa8805ca8ab46a59ab4",
+        "byteSize": 238305,
+        "buildFingerprint": "a4c238603f67f9c7ebfd9796fe4c722b773f75611b19d6c5b403db7fd8418651",
+        "decoderVersion": "candidary-native-1",
+        "previewProfile": "mobile-preview-v1"
+      },
+      "preview": {
+        "sha256": "a425f15a2d1c4c2c5da3703401e39425e2f50b9d0eeeffcbbd1bc4f8c5f7f22a",
+        "independentlyDecoded": true,
+        "pixelsCompared": true,
+        "comparison": "full-alpha-and-rgb-at-nonzero-alpha",
+        "decoder": "Pillow",
+        "decoderVersion": "12.1.1",
+        "width": 480,
+        "height": 360,
+        "frames": 36,
+        "referenceSha256": "e1888c485922b0896b5d3a392a08d071996632e0a1fb26c7e7746f0cd218425e",
+        "metadataStripped": true,
+        "orientationVerified": true,
+        "colorVerified": true
+      },
+      "sourceUnchanged": true
+    }
+  ],
+  "runtime": {
+    "pillow": "12.1.1",
+    "python": "3.14.4",
+    "isolation": {
+      "network": "none",
+      "readOnlyRoot": true,
+      "user": "10001:10001",
+      "memoryBytes": 4294967296,
+      "pidsLimit": 64,
+      "capDrop": [
+        "ALL"
+      ],
+      "securityOptions": [
+        "no-new-privileges"
+      ],
+      "tmpfs": {
+        "/tmp": "rw,size=2147483648,uid=10001,gid=10001"
+      }
+    },
+    "boundary": {
+      "malformedSanitized": true,
+      "oversizeRefused": true,
+      "busyIsolated": true,
+      "uploadCancelCleaned": true,
+      "decodeCancelKilled": true,
+      "runtimeEgressDenied": true,
+      "rootWriteDenied": true,
+      "kernelLimits": [
+        [
+          3221225472,
+          3221225472
+        ],
+        [
+          2147483648,
+          2147483648
+        ],
+        [
+          120,
+          120
+        ]
+      ],
+      "deadlineKillsProcessGroup": true,
+      "scratchEmpty": true,
+      "peakResourceLoadQualified": false
+    },
+    "privateLogsEmpty": true
+  },
+  "decoderVersion": "candidary-native-1"
+}

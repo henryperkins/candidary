@@ -86,6 +86,12 @@ albumShareRoutes.get('/album-share/media/:mediaId/preview', async (context) => {
 
   const object = await getOrCreatePreview(context.env, media)
     .catch(() => { throw albumShareUnavailable(); });
+  try {
+    const currentSession=await new AlbumShareService(context.env).authorizeSession(getAlbumShareCookie(context) ?? '');
+    const current=await new MediaRepository(context.env.DB).getById(media.id);
+    if (!current || current.eventId!==currentSession.eventId || current.uploadState!=='stored'
+      || current.deletedAt || current.trashedAt || !current.favoritedAt) throw albumShareUnavailable();
+  } catch (error) {await object.body.cancel(); throw error;}
   return new Response(object.body, {
     headers: {
       'Content-Type': object.httpMetadata?.contentType ?? 'image/webp',

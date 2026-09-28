@@ -43,6 +43,25 @@ function acceptingTransport(overrides: Partial<UploadTransport> = {}): UploadTra
 }
 
 describe('photo upload queue', () => {
+  it('keeps native processing in confirming and retries without claiming delivery', async () => {
+    const original = item('processing');
+    const states: string[] = [];
+    const finalized = vi.fn();
+    const transport = acceptingTransport({
+      upload: async (_item, _reservation, _progress, _signal, processing) => {
+        processing?.();
+        throw new ClientApiError('IMAGE_PROCESSING_UNAVAILABLE', 'Try confirming again.', undefined, undefined, 503);
+      },
+    });
+    const result = await runUploadQueue([original], transport, {
+      onChange: items => states.push(items[0]!.state), onFinalized: finalized,
+    });
+    expect(states).toContain('finalizing');
+    expect(result[0]).toMatchObject({state:'failed',retryStage:'finalize',failure:{stage:'finalize'}});
+    expect(result[0]!.file).toBe(original.file);
+    expect(getReceiptCount(result)).toBeNull();
+    expect(finalized).not.toHaveBeenCalled();
+  });
   it('transfers at most two photos concurrently and reports every lifecycle state', async () => {
     let active = 0;
     let maximum = 0;

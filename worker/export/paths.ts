@@ -1,4 +1,5 @@
 import type { ExportableMediaRecord } from '../db/types';
+import { KNOWN_IMAGE_FORMATS,resolveImageDeclaration } from '../../shared/image-formats';
 
 function safeBasename(filename: string): string {
   const dot = filename.lastIndexOf('.');
@@ -29,7 +30,16 @@ export function exportPathWidth(mediaCount: number): number {
  * into one folder must not collide and silently drop photos.
  */
 export function exportPath(media: ExportableMediaRecord, globalIndex: number, width = 3): string {
-  return `photos/${String(globalIndex + 1).padStart(width, '0')}-${safeBasename(media.originalFilename)}`;
+  let filename=media.originalFilename;
+  const declaration=resolveImageDeclaration('',media.mimeType);
+  if (declaration) {
+    const extensions=KNOWN_IMAGE_FORMATS[declaration.family].extensions;
+    const dot=filename.lastIndexOf('.');
+    if (dot <= 0 || !extensions.includes(filename.slice(dot+1).toLowerCase())) {
+      filename=`${dot > 0 ? filename.slice(0,dot) : filename}.${extensions[0]}`;
+    }
+  }
+  return `photos/${String(globalIndex + 1).padStart(width, '0')}-${safeBasename(filename)}`;
 }
 
 /**

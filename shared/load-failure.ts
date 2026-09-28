@@ -30,6 +30,8 @@ const LOAD_FAILURE_DECISION = {
   EVENT_MEDIA_LIMIT: decision('retry'),
   EVENT_STORAGE_LIMIT: decision('retry'),
   UPLOAD_RESERVATION_EXPIRED: decision('retry'),
+  UPLOAD_TRANSFER_EXPIRED: decision('retry'),
+  UPLOAD_PART_CONFLICT: decision('retry'),
   UPLOAD_RESERVATION_CANCELED: decision('retry'),
   UPLOAD_OBJECT_MISSING: decision('retry'),
   UPLOAD_FINALIZE_CONFLICT: decision('retry'),
@@ -52,6 +54,9 @@ const LOAD_FAILURE_DECISION = {
   // surface, so this stays in the retryable family rather than escalating.
   EXPORT_SOURCE_REMOVED: decision('retry'),
   VALIDATION_FAILED: decision('retry'),
+  IMAGE_RESOURCE_LIMIT: decision('retry'),
+  IMAGE_PROCESSING_UNAVAILABLE: decision('retry'),
+  IMAGE_PREVIEW_UNAVAILABLE: decision('retry'),
   CSRF_INVALID: decision('retry'),
   ORIGIN_FORBIDDEN: decision('retry'),
   HOST_SESSION_REQUIRED: decision('sign-in', true),

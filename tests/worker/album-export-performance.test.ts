@@ -9,7 +9,7 @@ import { eventAccess, png, resetDatabase, testEnv, uploadPending } from './helpe
 const PHOTO_BYTES = 2_334_146;
 const FRAGMENT_BYTES = 16 * 1024;
 
-async function albumFixture(photoBytes = PHOTO_BYTES) {
+async function exportFixture(kind: 'album' | 'complete' = 'album', photoBytes = PHOTO_BYTES) {
   const access = await eventAccess();
   const photos = [];
   const bytes = png(800, 600, photoBytes);
@@ -27,8 +27,9 @@ async function albumFixture(photoBytes = PHOTO_BYTES) {
     .bind(access.event.id, JSON.stringify(photos.map(photo => ({ kind: 'photo', mediaId: photo.id }))),
       now.toISOString(), now.toISOString(), now.toISOString()).run();
   const repository = new ExportsRepository(testEnv.DB);
-  const job = await repository.createAlbumActive({ id: crypto.randomUUID(), eventId: access.event.id,
-    snapshotAt: now.toISOString(), createdAt: now.toISOString() });
+  const input = { id: crypto.randomUUID(), eventId: access.event.id,
+    snapshotAt: now.toISOString(), createdAt: now.toISOString() };
+  const job = kind === 'album' ? await repository.createAlbumActive(input) : await repository.createActive(input);
   return { access, photos, bytes, now, job, repository };
 }
 
@@ -82,7 +83,7 @@ describe('Album ZIP preparation performance', () => {
   afterEach(() => vi.useRealTimers());
 
   it('prepares two original photos without a database round trip for every transport fragment', async () => {
-    const { job, bytes, now, repository } = await albumFixture();
+    const { job, bytes, now, repository } = await exportFixture();
     const source = fragmentedBucket(bytes);
     const checks = vi.spyOn(ExportsRepository.prototype, 'assertOwnedRunActive');
     const result = await processExport(source.env, { jobId: job.id, attempt: 1 }, now);
@@ -103,7 +104,7 @@ describe('Album ZIP preparation performance', () => {
 
   it.each(['first fragment', 'completion'] as const)(
     'stops an Album deleted during the %s before publishing the ZIP', async phase => {
-      const { access, job, bytes, now, repository } = await albumFixture();
+      const { access, job, bytes, now, repository } = await exportFixture();
       let deleted = false;
       const source = fragmentedBucket(bytes, async offset => {
         if (deleted || offset !== (phase === 'completion' ? bytes.length : 0)) return;
@@ -114,6 +115,45 @@ describe('Album ZIP preparation performance', () => {
       const result = await processExport(source.env, { jobId: job.id, attempt: 1 }, now);
       expect(result).toMatchObject({ state: 'failed', errorCode: 'EXPORT_EVENT_DELETED' });
       expect(await repository.listParts(job.id)).toEqual([]);
+      expect(source.pulls()).toBeLessThanOrEqual(phase === 'completion' ? 144 : 64);
+    },
+  );
+
+  it('prepares a complete ZIP from fragmented originals with bounded database checks and unchanged bytes', async () => {
+    const { job, bytes, now, repository } = await exportFixture('complete');
+    const source = fragmentedBucket(bytes);
+    const checks = vi.spyOn(ExportsRepository.prototype, 'assertOwnedRunActive');
+    const result = await processExport(source.env, { jobId: job.id, attempt: 1 }, now);
+    expect(result).toMatchObject({ state: 'ready', kind: 'complete', mediaCount: 2, totalBytes: PHOTO_BYTES * 2 });
+    const [part] = await repository.listParts(job.id);
+    const object = await testEnv.MEDIA_BUCKET.get(part!.objectKey);
+    const files = unzipSync(new Uint8Array(await object!.arrayBuffer()));
+    const names = Object.keys(files);
+    expect(names).toHaveLength(3);
+    expect(names[2]).toBe('media.csv');
+    for (const name of names.slice(0, 2)) {
+      expect(await crypto.subtle.digest('SHA-256', Uint8Array.from(files[name]!).buffer))
+        .toEqual(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer));
+    }
+    expect(source.pulls()).toBeGreaterThan(280);
+    expect(checks.mock.calls.length).toBeLessThanOrEqual(40);
+  });
+
+  it.each(['first fragment', 'completion'] as const)(
+    'stops a complete export deleted during the %s before Ready and removes its parts', async phase => {
+      const { access, job, bytes, now, repository } = await exportFixture('complete');
+      let deleted = false;
+      const source = fragmentedBucket(bytes, async offset => {
+        if (deleted || offset !== (phase === 'completion' ? bytes.length : 0)) return;
+        deleted = true;
+        await testEnv.DB.prepare('UPDATE events SET deleted_at=? WHERE id=?')
+          .bind(now.toISOString(), access.event.id).run();
+      });
+      const result = await processExport(source.env, { jobId: job.id, attempt: 1 }, now);
+      expect(result).toMatchObject({ state: 'failed', errorCode: 'EXPORT_EVENT_DELETED' });
+      expect(await repository.listParts(job.id)).toEqual([]);
+      const objects = await testEnv.MEDIA_BUCKET.list({ prefix: `events/${job.eventId}/exports/${job.id}/attempt-1/` });
+      expect(objects.objects).toEqual([]);
       expect(source.pulls()).toBeLessThanOrEqual(phase === 'completion' ? 144 : 64);
     },
   );

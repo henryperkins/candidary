@@ -96,10 +96,14 @@ export function createManagerUploadCleanup(deps: CleanupDeps): {
   ): Promise<ItemOutcome> {
     const replay = await reserveOnce(item, signal);
     if ('kind' in replay) return replay;
+    if (replay.id !== item.idempotencyKey) return { kind: 'retry' };
     const reason = terminalResultReason(replay);
     if (reason) return { kind: 'terminal', reason };
     if (replay.status === 'delivered') {
       return { kind: 'settled', deliveredId: replay.mediaId };
+    }
+    if (replay.status === 'accepted' && replay.serverDelivered) {
+      return { kind: 'settled', deliveredId: replay.reservation.mediaId };
     }
     if (replay.status === 'canceled') return { kind: 'settled' };
     if (signal?.aborted) return { kind: 'retry' };
@@ -123,10 +127,14 @@ export function createManagerUploadCleanup(deps: CleanupDeps): {
   ): Promise<ItemOutcome> {
     const replay = await reserveOnce(item, signal);
     if ('kind' in replay) return replay;
+    if (replay.id !== item.idempotencyKey) return { kind: 'retry' };
     const reason = terminalResultReason(replay);
     if (reason) return { kind: 'terminal', reason };
     if (replay.status === 'delivered') {
       return { kind: 'settled', deliveredId: replay.mediaId };
+    }
+    if (replay.status === 'accepted' && replay.serverDelivered) {
+      return { kind: 'settled', deliveredId: replay.reservation.mediaId };
     }
     if (replay.status === 'canceled') return { kind: 'settled' };
     if (replay.status === 'rejected') return { kind: 'settled' };

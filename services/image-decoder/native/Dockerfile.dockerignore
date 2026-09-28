@@ -1,0 +1,25 @@
+# Only reviewed build/fingerprint inputs may enter this decoder's build context.
+**
+!services/
+services/**
+!services/image-decoder/
+services/image-decoder/**
+!services/image-decoder/native/
+services/image-decoder/native/**
+!services/image-decoder/native/Dockerfile
+!services/image-decoder/native/build.py
+!services/image-decoder/native/server.py
+!services/image-decoder/native/inspect_heif.py
+!services/image-decoder/native/inspect_png.py
+!services/image-decoder/native/CMakeLists.txt
+!services/image-decoder/native/decode_raw.cpp
+!services/image-decoder/native/patch_dng.py
+!services/image-decoder/native/verify_service.py
+!services/image-decoder/native/test_boundary.py
+!services/image-decoder/native/policy.xml
+!services/image-decoder/native/dependencies.lock.json
+!shared/
+shared/**
+!shared/image-decoder-contract.ts
+!shared/image-formats.ts
+!shared/mobile-image-cases.json

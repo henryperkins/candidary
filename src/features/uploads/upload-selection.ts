@@ -1,38 +1,23 @@
 import { MAX_IMAGE_BYTES } from '../../../shared/constants';
+import { canPreviewInBrowser, LEGACY_UPLOAD_MIME_TYPES, resolveImageDeclaration } from '../../../shared/image-formats';
 import type { UploadQueueItem } from './upload-queue';
+import { MOBILE_IMAGE_PART_BYTES, type UploadCapabilityView } from '../../../shared/mobile-image-contract';
 
-export const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,image/heic-sequence,image/heif-sequence,.heic,.heif';
+export const IMAGE_ACCEPT = [...LEGACY_UPLOAD_MIME_TYPES, '.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif'].join(',');
+export const BASELINE_UPLOAD_CAPABILITIES: UploadCapabilityView = {
+  mimeTypes:[...LEGACY_UPLOAD_MIME_TYPES],extensions:['.jpg','.jpeg','.png','.webp','.heic','.heif'],
+  directMaxBytes:MAX_IMAGE_BYTES,maxOriginalBytes:MAX_IMAGE_BYTES,partBytes:MOBILE_IMAGE_PART_BYTES,
+};
+export function imageAccept(capabilities:UploadCapabilityView):string {
+  return [...capabilities.mimeTypes,...capabilities.extensions.map(ext => ext.startsWith('.') ? ext : `.${ext}`)].join(',');
+}
 
-const CLIENT_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const ALLOWED_IMAGE_TYPES = new Set([
-  ...CLIENT_IMAGE_TYPES,
-  'image/jpg',
-  'image/heic',
-  'image/heif',
-  'image/heic-sequence',
-  'image/heif-sequence',
-]);
-const PROVISIONAL_HEIF_TYPES = new Map([
-  ['', null],
-  ['application/octet-stream', null],
-  ['binary/octet-stream', null],
-  ['image/x-heic', 'heic'],
-  ['image/x-heic-sequence', 'heic'],
-  ['image/x-heif', 'heif'],
-  ['image/x-heif-sequence', 'heif'],
-]);
-
-function validationMessage(file: File): string | null {
+function validationMessage(file: File, capabilities:UploadCapabilityView): string | null {
   if (file.size < 1) return 'This photo is empty. Choose it again.';
-  if (file.size > MAX_IMAGE_BYTES) return 'This photo is larger than 20 MB.';
-  const extension = file.name.toLowerCase().split('.').pop();
-  const normalizedType = file.type.toLowerCase();
-  const expectedExtension = PROVISIONAL_HEIF_TYPES.get(normalizedType);
-  const provisionalHeif = PROVISIONAL_HEIF_TYPES.has(normalizedType)
-    && (extension === 'heic' || extension === 'heif')
-    && (!expectedExtension || extension === expectedExtension);
-  if (!ALLOWED_IMAGE_TYPES.has(normalizedType) && !provisionalHeif) {
-    return 'Choose a JPG, PNG, WebP, HEIC, or HEIF photo.';
+  if (file.size > capabilities.maxOriginalBytes) return `This photo is larger than ${Math.floor(capabilities.maxOriginalBytes/1024**2)} MiB.`;
+  const declaration = resolveImageDeclaration(file.name, file.type);
+  if (!declaration || !capabilities.mimeTypes.includes(declaration.mimeType)) {
+    return 'This photo format is not available for this event. Choose another original.';
   }
   return null;
 }
@@ -40,13 +25,20 @@ function validationMessage(file: File): string | null {
 export function createUploadSelection(
   files: FileList,
   isNewCapture: boolean,
+  capabilities: UploadCapabilityView = BASELINE_UPLOAD_CAPABILITIES,
 ): UploadQueueItem[] {
   return Array.from(files).map((file): UploadQueueItem => {
-    const error = validationMessage(file);
-    const previewUrl = CLIENT_IMAGE_TYPES.has(file.type)
-      && typeof URL.createObjectURL === 'function'
-      ? URL.createObjectURL(file)
-      : undefined;
+    const error = validationMessage(file,capabilities);
+    const declaration = resolveImageDeclaration(file.name, file.type);
+    let previewUrl: string | undefined;
+    if (!error && declaration && canPreviewInBrowser(declaration.family)
+      && typeof URL.createObjectURL === 'function') {
+      try {
+        previewUrl = URL.createObjectURL(file);
+      } catch {
+        // A local thumbnail is optional; the original File remains the upload source.
+      }
+    }
     return {
       id: crypto.randomUUID(),
       file,

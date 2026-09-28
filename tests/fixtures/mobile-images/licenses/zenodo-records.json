@@ -1,0 +1,134 @@
+{
+  "source": "https://zenodo.org/api/records/<record>",
+  "accessed": "2026-09-25",
+  "note": "Zenodo record identifiers are version-specific. Each pinned original matches the record file MD5 checksum and is otherwise identified by the SHA-256 in manifest.json. CC BY 4.0 requires the attribution recorded in the manifest; reference renderings are adaptations kept in ignored storage.",
+  "records": [
+    {
+      "record": 14227327,
+      "doi": "10.5281/zenodo.14227327",
+      "conceptRecord": 14227326,
+      "recordUrl": "https://zenodo.org/records/14227327",
+      "title": "アカボシゴマダラの轢死体, 福島県南相馬市小高区本町2丁目, 浮舟橋南側. 31. July. 2024. 柳丈陽撮影.",
+      "creators": [
+        {
+          "name": "YANAGI, Takeharu",
+          "orcid": "0000-0002-3399-7316"
+        }
+      ],
+      "publicationDate": "2024-12-01",
+      "resourceType": "Photo",
+      "license": "cc-by-4.0",
+      "legalcode": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "onlyVersion": true,
+      "file": {
+        "key": "IMG_2622.HEIC",
+        "size": 2953301,
+        "checksum": "md5:7310df2a50edc4eefe5c9310c2788234",
+        "url": "https://zenodo.org/records/14227327/files/IMG_2622.HEIC?download=1"
+      }
+    },
+    {
+      "record": 17195716,
+      "doi": "10.5281/zenodo.17195716",
+      "conceptRecord": 17195715,
+      "recordUrl": "https://zenodo.org/records/17195716",
+      "title": "Dataset on the four dominant marine bivalve species from the Western Algerian coast (Mostaganem to Tlemcen)",
+      "creators": [
+        {
+          "name": "Boukli Hacene, Mohammed Salah Eddine",
+          "affiliation": "University of Abou Bekr Belkaïd",
+          "orcid": "0009-0009-8064-6525"
+        },
+        {
+          "name": "DAMERDJI, Amina",
+          "affiliation": "University of Abou Bekr Belkaïd",
+          "orcid": "0000-0001-7603-9137"
+        }
+      ],
+      "publicationDate": "2025-09-24",
+      "resourceType": "Dataset",
+      "license": "cc-by-4.0",
+      "legalcode": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "onlyVersion": true,
+      "file": {
+        "key": "IMG_007.HEIC",
+        "size": 1073534,
+        "checksum": "md5:16bbefdc19a251bc6e105c7787695996",
+        "url": "https://zenodo.org/records/17195716/files/IMG_007.HEIC?download=1"
+      }
+    },
+    {
+      "record": 19469154,
+      "doi": "10.5281/zenodo.19469154",
+      "conceptRecord": 19469153,
+      "recordUrl": "https://zenodo.org/records/19469154",
+      "title": "Motifs and Freize reliefs of the Narasimhaswamy Temple, Namakkal",
+      "creators": [
+        {
+          "name": "Murugesan, Libish",
+          "orcid": "0009-0004-3238-4202"
+        }
+      ],
+      "publicationDate": "2026-04-08",
+      "resourceType": "Photo",
+      "license": "cc-by-4.0",
+      "legalcode": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "onlyVersion": true,
+      "file": {
+        "key": "20260322_104419.heic",
+        "size": 2954350,
+        "checksum": "md5:2fc214c9b1e18360abbebcbad9b8bd38",
+        "url": "https://zenodo.org/records/19469154/files/20260322_104419.heic?download=1"
+      }
+    },
+    {
+      "record": 13623651,
+      "doi": "10.5281/zenodo.13623651",
+      "conceptRecord": 13623650,
+      "recordUrl": "https://zenodo.org/records/13623651",
+      "title": "LEUKOS' dataset: A selection of sixteenth and seventeenth century Stambøger from the Royal Danish Library (Copenhagen)",
+      "creators": [
+        {
+          "name": "Taglialatela, Sara",
+          "affiliation": "University of Copenhagen",
+          "orcid": "0000-0001-7022-4964"
+        }
+      ],
+      "publicationDate": "2024-08-31",
+      "resourceType": "Dataset",
+      "license": "cc-by-4.0",
+      "legalcode": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "onlyVersion": true,
+      "file": {
+        "key": "Beck_Stambog_KB_NKS360oktav_Image3_2024-08-21.heic",
+        "size": 1287198,
+        "checksum": "md5:f42d5afecc00c0c66abf65c26a4dbd0c",
+        "url": "https://zenodo.org/records/13623651/files/Beck_Stambog_KB_NKS360oktav_Image3_2024-08-21.heic?download=1"
+      }
+    },
+    {
+      "record": 17114909,
+      "doi": "10.5281/zenodo.17114909",
+      "conceptRecord": 17114908,
+      "recordUrl": "https://zenodo.org/records/17114909",
+      "title": "OSU_Prosser_Field_Trials_2025",
+      "creators": [
+        {
+          "name": "Strohbehn, Luke",
+          "affiliation": "Oregon State University"
+        }
+      ],
+      "publicationDate": "2025-09-14",
+      "resourceType": "Photo",
+      "license": "cc-by-4.0",
+      "legalcode": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "onlyVersion": true,
+      "file": {
+        "key": "IMG_8685.HEIC",
+        "size": 2215584,
+        "checksum": "md5:d5559825bcf5b971033a88ef5efbb8d2",
+        "url": "https://zenodo.org/records/17114909/files/IMG_8685.HEIC?download=1"
+      }
+    }
+  ]
+}

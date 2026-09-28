@@ -1,6 +1,7 @@
 import type { SupportedImageType } from './constants';
 import type { EventCoverView, GuestEventCoverView } from './event-cover';
 import type { ApiErrorBody, ApiErrorCode } from './errors';
+import type { UploadTransferView } from './mobile-image-contract';
 
 // Access links only ever grant these two. Keeping `Role` narrow is what stops a
 // host account from being mistaken for something an event token can mint.
@@ -404,6 +405,8 @@ export type UploadBatchItemView =
       media: UploadMediaView;
       uploadUrl?: string;
       uploadUrlExpiresAt?: string;
+      transport?: 'parts-v1';
+      transfer?: UploadTransferView;
     }
   | {
       idempotencyKey: string;

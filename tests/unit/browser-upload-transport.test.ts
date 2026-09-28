@@ -113,6 +113,143 @@ afterEach(() => {
 });
 
 describe('browser upload transport cancellation', () => {
+  const deliveredTransfer = {
+    id: 'transfer-a', mediaId: 'media-a', state: 'delivered' as const,
+    partBytes: 8 * 1024 ** 2, partCount: 1, acceptedParts: [0],
+    expiresAt: '2026-08-20T13:00:00.000Z', hardExpiresAt: '2026-08-20T18:00:00.000Z',
+    previewState: 'ready' as const,
+  };
+
+  it('settles cancellation when transfer status proves delivery won the DELETE race', async () => {
+    const prior = { ...reservation, uploadUrl: '', transfer: { ...deliveredTransfer, state: 'processing' as const } };
+    const selected = { ...item(), reservation: prior };
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(`${init?.method ?? 'GET'} ${input}`);
+      return init?.method === 'DELETE'
+        ? response({ code: 'UPLOAD_FINALIZE_CONFLICT', message: 'This upload can no longer be canceled.', requestId: 'request-a' }, 409)
+        : response({ transfer: deliveredTransfer, media: { id: 'media-a', mimeType: 'image/jpeg', uploadState: 'stored' } });
+    }));
+    const transport = createBrowserTransport({ kind: 'manager', eventId: 'event-a' });
+    const cleanup = createManagerUploadCleanup({
+      reserve: async () => (await transport.reserve([selected]))[0]!,
+      cancel: async () => transport.cancelReservation!(selected, prior),
+    });
+
+    await expect(cleanup.run([{
+      itemId: selected.id, idempotencyKey: selected.id, queueItem: selected,
+      reservation: prior, disposition: 'reserved',
+    }])).resolves.toEqual({ kind: 'settled', deliveredIds: ['media-a'] });
+    expect(requests.map(request => request.split(' ')[0])).toEqual(['DELETE', 'GET']);
+  });
+
+  it('settles ambiguous cancellation from a delivered resumable batch replay', async () => {
+    const selected = item();
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(`${init?.method ?? 'GET'} ${input}`);
+      return response({ items: [{ idempotencyKey: selected.id, status: 'accepted',
+        alreadyDelivered: true, transport: 'parts-v1', transfer: deliveredTransfer,
+        media: { id: 'media-a', mimeType: 'image/jpeg', uploadState: 'stored' } }] });
+    }));
+    const transport = createBrowserTransport({ kind: 'manager', eventId: 'event-a' });
+    const cleanup = createManagerUploadCleanup({
+      reserve: async () => (await transport.reserve([selected]))[0]!,
+      cancel: async () => transport.cancelReservation!(selected, reservation),
+    });
+
+    await expect(cleanup.run([{
+      itemId: selected.id, idempotencyKey: selected.id, queueItem: selected,
+      reservation: null, disposition: 'ambiguous',
+    }])).resolves.toEqual({ kind: 'settled', deliveredIds: ['media-a'] });
+    expect(requests.map(request => request.split(' ')[0])).toEqual(['POST']);
+  });
+
+  it.each([
+    ['missing transfer', undefined],
+    ['different media in transfer', { ...deliveredTransfer, mediaId: 'media-other' }],
+  ])('rejects a stored parts-v1 replay with %s without a receipt or cleanup delivery', async (_label, transfer) => {
+    const selected = item();
+    vi.stubGlobal('fetch', vi.fn(() => response({ items: [{
+      idempotencyKey: selected.id, status: 'accepted', alreadyDelivered: true,
+      transport: 'parts-v1', transfer,
+      media: { id: 'media-a', mimeType: 'image/jpeg', uploadState: 'stored' },
+    }] })));
+    const transport = createBrowserTransport({ kind: 'manager', eventId: 'event-a' });
+    const replay = await transport.reserve([selected]);
+    const cancel = vi.fn(async () => undefined);
+    const cleanup = createManagerUploadCleanup({ reserve: async () => replay[0]!, cancel });
+
+    expect(replay).toEqual([{ id: selected.id, status: 'rejected', error: 'This photo could not be reserved.' }]);
+    await expect(cleanup.run([{
+      itemId: selected.id, idempotencyKey: selected.id, queueItem: selected,
+      reservation: null, disposition: 'ambiguous',
+    }])).resolves.toEqual({ kind: 'settled', deliveredIds: [] });
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('cancels an incomplete resumable batch replay without claiming delivery', async () => {
+    const selected = item();
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(`${init?.method ?? 'GET'} ${input}`);
+      return init?.method === 'DELETE'
+        ? response({})
+        : response({ items: [{ idempotencyKey: selected.id, status: 'accepted',
+          alreadyDelivered: false, transport: 'parts-v1',
+          transfer: { ...deliveredTransfer, state: 'receiving' },
+          media: { id: 'media-a', mimeType: 'image/jpeg', uploadState: 'reserved' } }] });
+    }));
+    const transport = createBrowserTransport({ kind: 'manager', eventId: 'event-a' });
+    const cleanup = createManagerUploadCleanup({
+      reserve: async () => (await transport.reserve([selected]))[0]!,
+      cancel: async (_item, prior) => transport.cancelReservation!(selected, prior),
+    });
+
+    await expect(cleanup.run([{
+      itemId: selected.id, idempotencyKey: selected.id, queueItem: selected,
+      reservation: null, disposition: 'ambiguous',
+    }])).resolves.toEqual({ kind: 'settled', deliveredIds: [] });
+    expect(requests.map(request => request.split(' ')[0])).toEqual(['POST', 'DELETE']);
+  });
+
+  it.each([
+    ['incomplete transfer', { ...deliveredTransfer, state: 'processing' as const }, 'media-a', ['DELETE', 'GET', 'DELETE']],
+    ['different stored media', deliveredTransfer, 'media-other', ['DELETE', 'GET']],
+    ['different transfer', { ...deliveredTransfer, id: 'transfer-other' }, 'media-a', ['DELETE', 'GET']],
+  ])('does not settle a %s as delivered', async (_label, transfer, mediaId, methods) => {
+    const prior = { ...reservation, uploadUrl: '', transfer: { ...deliveredTransfer, state: 'processing' as const } };
+    const selected = { ...item(), reservation: prior };
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(`${init?.method ?? 'GET'} ${input}`);
+      return init?.method === 'DELETE'
+        ? response({ code: 'UPLOAD_FINALIZE_CONFLICT', message: 'This upload can no longer be canceled.', requestId: 'request-a' }, 409)
+        : response({ transfer, media: { id: mediaId, mimeType: 'image/jpeg', uploadState: 'stored' } });
+    }));
+    const transport = createBrowserTransport({ kind: 'manager', eventId: 'event-a' });
+    const cleanup = createManagerUploadCleanup({
+      reserve: async () => (await transport.reserve([selected]))[0]!,
+      cancel: async () => transport.cancelReservation!(selected, prior),
+    });
+
+    await expect(cleanup.run([{
+      itemId: selected.id, idempotencyKey: selected.id, queueItem: selected,
+      reservation: prior, disposition: 'reserved',
+    }])).resolves.toEqual({ kind: 'retry', unresolvedCount: 1, deliveredIds: [] });
+    expect(requests.map(request => request.split(' ')[0])).toEqual(methods);
+  });
+
+  it('accepts a negotiated resumable reservation without a direct upload URL', async () => {
+    const transfer={id:'transfer-a',mediaId:'media-a',state:'receiving',partBytes:8*1024**2,partCount:1,acceptedParts:[],expiresAt:'2026-08-20T13:00:00.000Z',hardExpiresAt:'2026-08-20T18:00:00.000Z',previewState:'pending'};
+    const respond: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = () =>
+      response({items:[{idempotencyKey:'item-a',status:'accepted',alreadyDelivered:false,transport:'parts-v1',media:{id:'media-a',mimeType:'image/dng',uploadState:'reserved'},transfer}]});
+    const fetch=vi.fn(respond);
+    vi.stubGlobal('fetch',fetch);
+    const results=await createBrowserTransport({kind:'guest',slug:'example',guestName:'Avery'}).reserve([item()]);
+    expect(results[0]).toMatchObject({status:'accepted',reservation:{transfer,mediaId:'media-a'}});
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string).files[0].transport).toBe('parts-v1');
+  });
   it('sends same-origin ingress with both event and host credential pairs', async () => {
     Object.defineProperty(document, 'cookie', {
       configurable: true,
@@ -465,6 +602,7 @@ describe('browser upload transport cancellation', () => {
             byteSize: 5,
             idempotencyKey: 'item-a',
             caption: null,
+            transport: 'parts-v1',
           }],
         }),
       }),
@@ -549,6 +687,7 @@ describe('browser upload transport cancellation', () => {
             byteSize: 5,
             idempotencyKey: 'item-a',
             caption: null,
+            transport: 'parts-v1',
           }],
         }),
       }),

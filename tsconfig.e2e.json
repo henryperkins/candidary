@@ -7,6 +7,7 @@
     "tests/e2e/**/*.ts",
     "shared/**/*.ts",
     "playwright.config.ts",
-    "playwright.smoke.config.ts"
+    "playwright.smoke.config.ts",
+    "playwright.mobile-images.config.ts"
   ]
 }

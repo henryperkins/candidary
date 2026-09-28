@@ -2,3 +2,16 @@ worker-configuration.d.ts text eol=lf
 migrations/*.sql text eol=lf
 config/*.json text eol=lf
 config/*.json.sha256 text eol=lf
+# Upstream license copies are SHA-256 pinned byte for byte; never normalize their line endings.
+tests/fixtures/mobile-images/licenses/* -text
+# Decoder build-fingerprint inputs are hashed as raw bytes (scripts/lock-image-decoder.mjs); never normalize them.
+services/image-decoder/native/** -text
+shared/image-decoder-contract.ts -text
+shared/image-formats.ts -text
+# Qualification records pin the corpus manifest by SHA-256; keep its bytes identical on every checkout.
+tests/fixtures/mobile-images/manifest.json -text
+# Reviewed evidence filenames are their raw-byte SHA-256; preserve them across operating systems.
+tests/fixtures/mobile-images/evidence/*.json -text
+# Portable practical-acceptance observations retain their reviewed raw bytes.
+docs/verification/evidence/mobile-image-preview-recovery-20260927.json -text
+docs/verification/evidence/mobile-image-practical-20260927/device-smoke.json -text whitespace=cr-at-eol

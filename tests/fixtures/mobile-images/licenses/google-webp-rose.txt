@@ -1,0 +1,5 @@
+Yellow Rose, Jon Sullivan. Public-domain source image.
+Google WebP Lossless and Alpha Gallery identifies its source rights and provides this encoded WebP.
+Source: https://developers.google.com/speed/webp/gallery2#image_credits
+Asset: https://www.gstatic.com/webp/gallery3/1_webp_ll.webp
+Verified 2026-09-24.

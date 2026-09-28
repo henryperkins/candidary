@@ -22,6 +22,22 @@ function fixture(options: { paused?: boolean; ackFails?: boolean; retired?: bool
 const props = () => ({ eventId: 'event-a', source: { ...source, mediaIds: ['photo-a'] }, onClose: vi.fn(), onJobChanged: vi.fn() });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); sessionStorage.clear(); Reflect.deleteProperty(navigator, 'share'); Reflect.deleteProperty(navigator, 'canShare'); });
 describe('photo export chooser', () => {
+  it('offers ZIP when canShare refuses the actual original Files and never records a device handoff',async () => {
+    const fallback=fixture();
+    const fetcher=vi.fn<typeof fetch>((input,init) => String(input).endsWith('/archive')
+      ? ok({export:{...job,id:'archive-b',destination:'archive'}}) : fallback(input,init));
+    vi.stubGlobal('fetch',fetcher);
+    const share=vi.fn(); const canShare=vi.fn(({files}:{files:File[]}) => {expect(files[0]).toBeInstanceOf(File); return false;});
+    Object.defineProperties(navigator,{share:{configurable:true,value:share},canShare:{configurable:true,value:canShare}});
+    render(<PhotoExportChooser {...props()} />);
+    fireEvent.click(await screen.findByRole('button',{name:'Prepare for this device'}));
+    fireEvent.click(await screen.findByRole('button',{name:'Confirm and prepare photos'}));
+    fireEvent.click(await screen.findByRole('button',{name:'Share 1 photo'}));
+    expect(await screen.findByText(/cannot share these original files/)).toBeVisible();
+    expect(share).not.toHaveBeenCalled(); expect(fetcher.mock.calls.some(([path]) => String(path).endsWith('/handoff'))).toBe(false);
+    fireEvent.click(screen.getByRole('button',{name:'Use ZIP instead'}));
+    expect(await screen.findByRole('button',{name:'Confirm photo ZIP'})).toBeEnabled();
+  });
   it('freezes and confirms before a fresh actual-File Share gesture, then retries only the ACK', async () => {
     const fetcher = fixture({ ackFails: true }); vi.stubGlobal('fetch', fetcher);
     const share = vi.fn().mockResolvedValue(undefined); const canShare = vi.fn().mockReturnValue(true);

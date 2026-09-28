@@ -38,6 +38,24 @@ import {
   assertWorkerIngressEnabled,
 } from '../media-upload-release';
 import type { UploadAuthority } from '../services/upload-authority';
+import { isLegacyUploadMimeType } from '../../shared/image-formats';
+
+export interface AssemblyIngressProof {
+  transferId:string;assemblyId:string;generation:number;attempt:number;completionToken:string;
+}
+
+function assemblyIngressGuard(proof:AssemblyIngressProof, at:string, sha:string, bytes:number, width:number, height:number) {
+  return {sql:`EXISTS (SELECT 1 FROM media_upload_transfers t
+    JOIN media_upload_assemblies a ON a.transfer_id=t.id AND a.attempt=t.attempt AND a.generation=t.generation
+    JOIN media_processing i ON i.transfer_id=t.id AND i.generation=t.generation AND i.attempt=t.attempt
+    JOIN media_image_previews v ON v.media_id=t.media_id AND v.source_sha256=i.source_sha256 AND v.profile=i.preview_profile AND v.state='ready'
+    WHERE t.id=? AND a.id=? AND t.generation=? AND t.attempt=? AND t.completion_token=?
+      AND t.state='processing' AND t.expires_at>? AND t.hard_expires_at>? AND t.completion_lease_expires_at>?
+      AND a.completion_token=t.completion_token AND a.state='completing' AND a.completed_etag IS NOT NULL
+      AND a.expected_sha256=? AND a.expected_byte_size=? AND i.state='ready' AND i.source_sha256=a.expected_sha256
+      AND i.byte_size=a.expected_byte_size AND i.width=? AND i.height=? AND i.build_fingerprint=t.build_fingerprint)`,
+    bindings:[proof.transferId,proof.assemblyId,proof.generation,proof.attempt,proof.completionToken,at,at,at,sha,bytes,width,height]};
+}
 
 export interface MediaRow {
   id: string;
@@ -368,6 +386,15 @@ export interface ReserveMediaRecord {
   idempotencyKey: string;
   reservationExpiresAt: string;
   createdAt: string;
+  mobileAdmission?: {caseIds: readonly string[]};
+}
+
+function mobileAdmissionCondition(input: ReserveMediaRecord): {sql:string;bindings:unknown[]} {
+  const ids = input.mobileAdmission?.caseIds;
+  if (!ids) return {sql:'1',bindings:[]};
+  if (!ids.length || ids.length > 64 || new Set(ids).size !== ids.length) throw new Error('Invalid mobile image case scope.');
+  return {sql:`(SELECT count(*) FROM mobile_image_admission WHERE case_id IN (${ids.map(() => '?').join(',')}) AND enabled = 1 AND max_original_bytes >= ?) = ?`,
+    bindings:[...ids,input.declaredByteSize,ids.length]};
 }
 
 export type UploadIngressOutcome<T> =
@@ -1502,8 +1529,13 @@ export class MediaRepository {
     claimToken: string;
     claimedAt: string;
     leaseExpiresAt: string;
+    assemblyProof?: AssemblyIngressProof;
   }): Promise<UploadIngressOutcome<ClaimedMediaIngress>> {
     assertWorkerIngressEnabled();
+    if (!input.assemblyProof && (!isLegacyUploadMimeType(input.mimeType) || input.byteSize > 20 * 1024 ** 2)) return {ok:false,reason:'conflict'};
+    const transferTable = await this.hasTransferTable();
+    const native = input.assemblyProof ? assemblyIngressGuard(input.assemblyProof,input.claimedAt,input.sha256,input.byteSize,input.width,input.height) : null;
+    const marker = input.assemblyProof ? `assembly:${input.assemblyProof.assemblyId}:${input.sha256}` : `buffer:${input.sha256}`;
     const row = await this.db.prepare(`
       UPDATE media_object_promotions
       SET state = 'copying', final_pointer_committed = 0,
@@ -1535,11 +1567,13 @@ export class MediaRepository {
           WHERE e.id = ? AND e.deleted_at IS NULL AND ${intakePredicateSql(input.authority)}
         )
         AND ${authorityLivenessSql(input.authority)}
+        ${native ? `AND ${native.sql} AND EXISTS (SELECT 1 FROM media_upload_transfers t WHERE t.id=? AND t.media_id=media_object_promotions.media_id)`
+          : transferTable ? 'AND NOT EXISTS (SELECT 1 FROM media_upload_transfers t WHERE t.media_id = media_object_promotions.media_id)' : ''}
       RETURNING *
     `).bind(...[
       input.claimToken,
       input.leaseExpiresAt,
-      `buffer:${input.sha256}`,
+      marker,
       input.mimeType,
       input.byteSize,
       input.sha256,
@@ -1548,7 +1582,7 @@ export class MediaRepository {
       input.claimedAt,
       input.mediaId,
       input.eventId,
-      `buffer:${input.sha256}`,
+      marker,
       input.mimeType,
       input.byteSize,
       input.sha256,
@@ -1565,6 +1599,7 @@ export class MediaRepository {
       input.eventId,
       input.claimedAt,
       ...authorityLivenessBindings(input.authority, input.eventId, input.claimedAt),
+      ...(native ? [...native.bindings,input.assemblyProof!.transferId] : []),
     ]).first<MediaObjectPromotionRow>();
     if (!row) {
       return {
@@ -1595,12 +1630,17 @@ export class MediaRepository {
     committedAt: string;
     capturedAt: string | null;
     timelineAt: string;
+    assemblyProof?: AssemblyIngressProof;
+    sourceSha256?: string;
   }): Promise<UploadIngressOutcome<null>> {
     if (input.timelineAt === MEDIA_TIMELINE_SENTINEL) {
       throw new Error('A stored photo requires a non-sentinel timeline instant.');
     }
     assertWorkerIngressEnabled();
     const current = await this.getById(input.mediaId);
+    if (input.assemblyProof && !input.sourceSha256) return {ok:false,reason:'conflict'};
+    const keepDirectIdentity=!input.assemblyProof && await this.hasTransferTable();
+    const native = input.assemblyProof ? assemblyIngressGuard(input.assemblyProof,input.committedAt,input.sourceSha256!,input.byteSize,input.width,input.height) : null;
     const results = await this.db.batch([
       this.db.prepare(`
         UPDATE media
@@ -1629,6 +1669,8 @@ export class MediaRepository {
               AND p.final_pointer_committed = 0 AND p.claim_token = ?
               AND p.lease_expires_at > ? AND p.final_object_key = ?
               AND p.source_sha256 IS NOT NULL
+              ${native ? `AND p.source_etag=? AND p.source_sha256=? AND ${native.sql}
+                AND EXISTS (SELECT 1 FROM media_upload_transfers t WHERE t.id=? AND t.media_id=media.id)` : "AND p.source_etag = 'buffer:' || p.source_sha256"}
           )
           AND EXISTS (
             SELECT 1 FROM events AS e
@@ -1657,6 +1699,7 @@ export class MediaRepository {
         input.claimToken,
         input.committedAt,
         input.finalObjectKey,
+        ...(native ? [`assembly:${input.assemblyProof!.assemblyId}:${input.sourceSha256}`,input.sourceSha256!,...native.bindings,input.assemblyProof!.transferId] : []),
         input.committedAt,
         ...authorityLivenessBindings(input.authority, input.eventId, input.committedAt),
       ]),
@@ -1682,10 +1725,23 @@ export class MediaRepository {
         input.mediaId,
         input.claimToken,
       ),
+      ...(input.assemblyProof ? [this.db.prepare(`UPDATE media_upload_transfers SET state='delivered',updated_at=?
+        WHERE id=? AND media_id=? AND generation=? AND attempt=? AND completion_token=? AND state='processing'
+          AND EXISTS (SELECT 1 FROM media m JOIN media_object_promotions p ON p.media_id=m.id WHERE m.id=media_upload_transfers.media_id
+            AND m.upload_state='stored' AND m.deleted_at IS NULL AND m.object_key=p.final_object_key
+            AND p.final_pointer_committed=1 AND p.claim_token=? AND p.source_sha256=?) RETURNING id`)
+        .bind(input.committedAt,input.assemblyProof.transferId,input.mediaId,input.assemblyProof.generation,input.assemblyProof.attempt,input.assemblyProof.completionToken,input.claimToken,input.sourceSha256!)] : []),
+      ...(keepDirectIdentity ? [this.db.prepare(`INSERT INTO media_processing
+        (media_id,generation,attempt,state,source_sha256,byte_size,updated_at)
+        SELECT m.id,1,1,'pending',p.source_sha256,m.byte_size,? FROM media m JOIN media_object_promotions p ON p.media_id=m.id
+        WHERE m.id=? AND m.upload_state='stored' AND m.deleted_at IS NULL AND p.final_pointer_committed=1
+          AND p.claim_token=? AND p.source_etag='buffer:' || p.source_sha256
+        ON CONFLICT (media_id) DO NOTHING`).bind(input.committedAt,input.mediaId,input.claimToken)] : []),
     ]);
     const committed = (results[0]?.results?.length ?? 0) === 1
       && (results[1]?.meta.changes ?? 0) === 1
-      && (results[2]?.meta.changes ?? 0) === 1;
+      && (results[2]?.meta.changes ?? 0) === 1
+      && (!input.assemblyProof || results[3]?.results.length === 1);
     if (committed) return { ok: true, value: null };
     return {
       ok: false,
@@ -2380,6 +2436,16 @@ export class MediaRepository {
     return row === 1;
   }
 
+  private async hasTransferTable(): Promise<boolean> {
+    // Check presence explicitly; do not turn arbitrary D1 faults into permission.
+    return await this.db.prepare("SELECT 1 AS present FROM sqlite_schema WHERE type = 'table' AND name = 'media_upload_transfers'").first<number>('present') === 1;
+  }
+
+  async isTransferOwned(mediaId: string): Promise<boolean> {
+    if (!await this.hasTransferTable()) return false;
+    return await this.db.prepare('SELECT 1 AS present FROM media_upload_transfers WHERE media_id = ?').bind(mediaId).first<number>('present') === 1;
+  }
+
   async listContributions(eventId: string, sessionId: string): Promise<MediaRecord[]> {
     const result = await this.db.prepare(`
       SELECT * FROM media
@@ -2390,7 +2456,7 @@ export class MediaRepository {
     return result.results.map(mapMedia);
   }
 
-  private async getIdempotent(input: ReserveMediaRecord): Promise<MediaRecord | null> {
+  async getIdempotent(input: ReserveMediaRecord): Promise<MediaRecord | null> {
     const row = await this.db.prepare(`
       SELECT * FROM media WHERE event_id = ? AND uploader_session_id = ? AND idempotency_key = ?
     `).bind(input.eventId, input.uploaderSessionId, input.idempotencyKey).first<MediaRow>();
@@ -2573,6 +2639,7 @@ export class MediaRepository {
     const existing = await this.getIdempotent(input);
     if (existing) return this.refreshIdempotent(input, existing);
 
+    const admission = mobileAdmissionCondition(input);
     let results: D1Result[];
     try {
       results = await this.db.batch([
@@ -2586,6 +2653,7 @@ export class MediaRepository {
             AND ${authorityLivenessSql(input.authority)}
             AND reserved_media_count + stored_media_count + recoverable_media_count < ?
             AND reserved_bytes + stored_bytes + recoverable_bytes + ? <= ?
+            AND ${admission.sql}
         `).bind(...[
           input.declaredByteSize,
           input.eventId,
@@ -2594,6 +2662,7 @@ export class MediaRepository {
           MAX_EVENT_MEDIA,
           input.declaredByteSize,
           MAX_EVENT_BYTES,
+          ...admission.bindings,
         ]),
         this.db.prepare(`
           INSERT INTO media (
@@ -2632,6 +2701,8 @@ export class MediaRepository {
         input.createdAt,
       );
       if (authorityFailure.code === 'RESOURCE_FORBIDDEN') throw authorityFailure;
+      if (input.mobileAdmission && await this.db.prepare(`SELECT ${admission.sql} AS admitted`).bind(...admission.bindings).first<number>('admitted') !== 1)
+        throw new ApiError('FILE_TYPE_UNSUPPORTED','This photo format or size is not available for this event yet.',415);
       throw await this.capacityError(input.eventId);
     }
 

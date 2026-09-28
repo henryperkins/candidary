@@ -1,0 +1,22 @@
+{
+  "kind": "candidary.image-load-authorization.example",
+  "notice": "TEMPLATE ONLY. This file authorizes nothing. Copy it outside the repository (or into ignored output/), replace every placeholder, set kind to candidary.image-load-authorization and obtain the release owner's explicit approval for exactly one scenario run.",
+  "environment": "preview",
+  "target": "https://<preview-alias>-candidary-preview.lfd.workers.dev/",
+  "scenario": "<cold|warm|mixed>",
+  "authorizedBy": "<release owner who approved this run>",
+  "dedicatedRehearsalEvent": false,
+  "eventIds": ["<gallery-event-1>", "<gallery-event-2>", "<gallery-event-3>", "<gallery-event-4>", "<gallery-event-5>", "<gallery-event-6>"],
+  "uploadEventIds": [],
+  "isolationEventId": "<isolation-event>",
+  "expiresAt": "<ISO-8601 instant within 72 hours of approval>",
+  "credentialsPath": "<absolute path outside git or under ignored output/>",
+  "sourcesPath": "<absolute path outside git or under ignored output/>",
+  "previewEnvironmentIdle": {
+    "idle": false,
+    "windowStart": "<ISO-8601 instant at or before the run>",
+    "windowEnd": "<ISO-8601 instant at or after expiresAt>",
+    "statement": "<who confirmed no other preview upload, decoder, deployment or test traffic will run in this window>"
+  },
+  "approvedRequests": 0
+}

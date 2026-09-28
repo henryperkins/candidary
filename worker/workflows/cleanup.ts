@@ -11,6 +11,10 @@ import {
   coverWorkflowFenceTerminalExpiry,
 } from '../../shared/constants';
 import type { AppEnv } from '../env';
+import { cleanupUploadTransfers, eventHasUploadInventory, purgeUploadInventory } from './upload-transfer-cleanup';
+import { cleanupImagePreviews, reconcileImagePreviews, eventHasImagePreviewInventory, purgeImagePreviewInventory } from './image-preview';
+import { mobileImageSchemaReady } from '../mobile-image-release';
+import { reconcileUploadCompletions } from './upload-completion';
 import { PhotoExportsRepository } from '../db/photo-exports';
 import {
   assertLegacyMediaCopyEnabled,
@@ -32,7 +36,9 @@ import {
 import { MediaRepository } from '../db/media';
 import { MediaObjectWriteTombstoneRepository } from '../db/media-write-tombstones';
 import { AUTH_RATE_LIMIT_WINDOW_MS } from '../db/auth-rate-limits';
-import { inspectImageHeader } from '../security/image-metadata';
+import { inspectImageSource } from '../security/image-range-reader';
+import { r2ImageReader } from '../storage/image-source';
+import { imageDeclarationMatches, resolveImageDeclaration } from '../../shared/image-formats';
 import { releaseCoverRawBytes } from '../db/event-covers';
 import { RSVP_LOOKUP_RATE_WINDOW_MS } from '../db/rsvp-rate-limits';
 import { STALE_DISPATCH_CLAIM_MS } from '../services/event-cover-publication';
@@ -458,6 +464,8 @@ export async function cleanupMediaObjectWriteTombstones(
   now = new Date(),
   limit = MEDIA_WRITE_TOMBSTONE_LIMIT,
 ): Promise<MediaWriteTombstoneSummary> {
+  const previewSchema=await mobileImageSchemaReady(env.DB);
+  if (previewSchema) await cleanupImagePreviews(env,now);
   const repository = new MediaObjectWriteTombstoneRepository(env.DB);
   const timestamp = now.toISOString();
   const nextCheckAt = new Date(now.getTime() + MEDIA_WRITE_TOMBSTONE_RECHECK_MS).toISOString();
@@ -481,6 +489,14 @@ export async function cleanupMediaObjectWriteTombstones(
   let failed = 0;
 
   for (const candidate of candidates) {
+    if (previewSchema && candidate.bucketGeneration==='canonical' && candidate.objectKind==='preview'
+      && await env.DB.prepare('SELECT 1 FROM media_image_previews WHERE object_key=?').bind(candidate.objectKey).first()) {
+      // This writer has its own settlement/absence protocol. Generic tombstone
+      // age or a prefix sweep must never retire a still-running preview PUT.
+      protectedCount++;
+      await repository.defer(candidate.objectKey,timestamp,nextCheckAt,candidate.bucketGeneration);
+      continue;
+    }
     let suppressionCommitted = candidate.suppressionStartedAt !== null;
     if (!suppressionCommitted) {
       try {
@@ -647,13 +663,11 @@ export async function promoteLegacyStoredMedia(
             if (workerIngressEnabled()
               && media?.uploadState === 'reserved'
               && media.deletedAt === null) {
-              const header = await env.CANONICAL_MEDIA_BUCKET.get(candidate.finalObjectKey, {
-                range: { offset: 0, length: Math.min(final.size, 65_536) },
-              });
-              if (header?.body) {
-                const metadata = inspectImageHeader(new Uint8Array(
-                  await new Response(header.body).arrayBuffer(),
-                ));
+              const metadata = await inspectImageSource(r2ImageReader(
+                env.CANONICAL_MEDIA_BUCKET, candidate.finalObjectKey, final.etag, final.size,
+              ));
+              const declaration = resolveImageDeclaration('', media.mimeType);
+              if (declaration && imageDeclarationMatches(declaration, metadata)) {
                 if (await repository.adoptPresentIngressFinal(
                   candidate.mediaId,
                   actual,
@@ -678,6 +692,20 @@ export async function promoteLegacyStoredMedia(
         } else {
           await repository.touchPromotion(candidate.mediaId, clock().toISOString());
         }
+        continue;
+      }
+      if (candidate.state==='copying' && candidate.sourceEtag?.startsWith('assembly:')) {
+        // Only the transfer Workflow may adopt this native proof, with current
+        // authority and a ready private derivative. The legacy buffer recovery
+        // path must never turn it into an unqualified receipt.
+        const unsettled = await env.DB.prepare(`SELECT 1 FROM media_upload_assemblies a JOIN media_upload_transfers t ON t.id=a.transfer_id
+          WHERE t.media_id=? AND a.state<>'absent' LIMIT 1`).bind(candidate.mediaId).first();
+        const current = await repository.getById(candidate.mediaId);
+        const active = current?.uploadState==='reserved' && current.deletedAt===null;
+        if (!active && !unsettled && candidate.claimToken
+          && await repository.parkInactivePromotionCleanup(candidate.mediaId,candidate.claimToken,clock().toISOString())) {
+          await repository.handoffPromotionToPermanentSuppression(candidate.mediaId,candidate.claimToken,clock().toISOString());
+        } else await repository.touchPromotion(candidate.mediaId,clock().toISOString());
         continue;
       }
       if (candidate.state === 'cleanup_pending') {
@@ -2397,9 +2425,13 @@ export async function reconcileEventCoverPurge(
     if (!settled) return { ...summary, phase: 'fences', remainder: true };
   }
 
+  await cleanupUploadTransfers(env,now,eventId);
+  await cleanupImagePreviews(env,now,eventId);
   const mediaRepository = new MediaRepository(env.DB);
   if (
-    await mediaRepository.eventHasPromotionFence(eventId)
+    await eventHasUploadInventory(env,eventId)
+    || await eventHasImagePreviewInventory(env,eventId)
+    || await mediaRepository.eventHasPromotionFence(eventId)
     || await mediaRepository.eventHasWritableMediaAlias(eventId, timestamp)
   ) {
     // This fresh guard runs even if an older pass had already recorded r2 or
@@ -2558,6 +2590,8 @@ async function purgeEventRelationalRows(
   eventId: string,
   timestamp: string,
 ): Promise<void> {
+  await purgeImagePreviewInventory(env,eventId);
+  await purgeUploadInventory(env,eventId);
   // Read before the jobs go, so their run counters can be recomputed from what
   // actually remains rather than decremented by hand.
   const runs = await env.DB.prepare(
@@ -2671,6 +2705,9 @@ export async function scheduledCleanup(
   await cleanupRsvpScratch(env, now);
   await cleanupGuestMessageRateEvents(env, now);
   await cleanupExpiredAlbumShareSessions(env, now);
+  await cleanupUploadTransfers(env,now);
+  await reconcileUploadCompletions(env,now);
+  await reconcileImagePreviews(env);
   await cleanupExpiredReservations(env, now);
   // Retire bounded expired selections before physical original deletion work.
   await cleanupExpiredExports(env, now);

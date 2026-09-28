@@ -91,8 +91,11 @@ describe('markdown content negotiation', () => {
     expect(body.startsWith(`# ${CREATE_INTRO.title}\n`)).toBe(true);
     expect(body).toContain(CREATE_INTRO.lede);
     expect(body).toContain(`Up to ${MAX_EVENT_MEDIA.toLocaleString('en-US')} photos or 100 GiB per event`);
-    expect(body).toContain('Up to 20 MB per photo');
+    expect(body).toContain('Up to 20 MiB per photo');
     expect(body).toContain('image/heic');
+    for (const disabledType of ['image/dng', 'image/avif', 'image/gif', 'image/tiff', 'image/bmp', 'image/jp2', 'image/jxl']) {
+      expect(body).not.toContain(disabledType);
+    }
     // The cover ceiling is decimal and the media ceilings are binary; the markdown
     // must not quietly convert one into the other.
     expect(body).toContain('An optional cover photo up to 19 MB');

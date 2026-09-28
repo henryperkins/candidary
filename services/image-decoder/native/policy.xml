@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<policymap>
+  <policy domain="delegate" rights="none" pattern="*" />
+  <policy domain="filter" rights="none" pattern="*" />
+  <policy domain="coder" rights="none" pattern="*" />
+  <policy domain="coder" rights="read" pattern="{PNG,APNG,GIF,BMP,BMP2,BMP3,TIFF,ICC}" />
+  <!-- Matching rights replace earlier rights: output formats also need reading. -->
+  <policy domain="coder" rights="read|write" pattern="{JPEG,WEBP}" />
+  <policy domain="coder" rights="read" pattern="{HEIC,HEIF,AVIF}" />
+  <policy domain="coder" rights="read" pattern="{JXL,JP2,J2K,JPC}" />
+  <!-- PPM is only the fixed-path, SDK-verified RAW helper's internal output. -->
+  <policy domain="coder" rights="read" pattern="PPM" />
+  <policy domain="coder" rights="write" pattern="INFO" />
+  <policy domain="path" rights="none" pattern="@*" />
+  <policy domain="path" rights="none" pattern="-" />
+  <policy domain="resource" name="thread" value="2" />
+  <policy domain="resource" name="memory" value="1GiB" />
+  <policy domain="resource" name="map" value="1GiB" />
+  <policy domain="resource" name="disk" value="1535MiB" />
+  <policy domain="resource" name="width" value="300MP" />
+  <policy domain="resource" name="height" value="300MP" />
+  <policy domain="resource" name="list-length" value="1024" />
+  <policy domain="resource" name="time" value="120" />
+</policymap>
