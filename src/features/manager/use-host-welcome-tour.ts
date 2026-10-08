@@ -11,20 +11,81 @@ interface TourLookup {
   account: HostTourStateView | null;
 }
 const seenInMemory = new Set<string>();
+interface Preference { confirmed: Outcome | null; pending: Outcome | null }
+const preferencesInMemory = new Map<string, Preference>();
+const inFlight = new Map<string, { preference: Preference; promise: Promise<void> }>();
 function sessionKey(accountId: string) { return `candidary:tour:${HOST_EVENT_WELCOME_TOUR_VERSION}:${accountId}`; }
+function strongest(a: Outcome | null, b: Outcome | null): Outcome | null {
+  return a === 'completed' || b === 'completed' ? 'completed' : a ?? b;
+}
+function terminal(value: unknown): Outcome | null { return value === 'dismissed' || value === 'completed' ? value : null; }
+function preference(accountId: string): Preference {
+  const local = inFlight.get(accountId)?.preference ?? preferencesInMemory.get(accountId);
+  if (local) return local;
+  try {
+    // The old :outcome cache was written before PATCH succeeded, so it cannot
+    // prove confirmation. The new record keeps the two states distinct.
+    const stored = JSON.parse(sessionStorage.getItem(`${sessionKey(accountId)}:preference`) ?? 'null') as Preference | null;
+    return { confirmed: terminal(stored?.confirmed), pending: terminal(stored?.pending) };
+  } catch { return { confirmed: null, pending: null }; }
+}
+function rememberPreference(accountId: string, value: Preference) {
+  if (value.confirmed === 'completed' || value.confirmed === value.pending) value.pending = null;
+  try {
+    sessionStorage.setItem(`${sessionKey(accountId)}:preference`, JSON.stringify(value));
+    preferencesInMemory.delete(accountId);
+  } catch {
+    // Reads may still succeed when writes are blocked or the quota is full.
+    // Retain the latest full record, including cleared pending state.
+    preferencesInMemory.set(accountId, value);
+  }
+}
 function seen(accountId: string) {
+  const value = preference(accountId);
+  if (seenInMemory.has(accountId) || value.confirmed || value.pending) return true;
   try { return sessionStorage.getItem(sessionKey(accountId)) === 'seen'; }
-  catch { return seenInMemory.has(accountId); }
-}
-function savedOutcome(accountId: string): string | null {
-  try { return sessionStorage.getItem(`${sessionKey(accountId)}:outcome`); } catch { return null; }
-}
-function rememberOutcome(accountId: string, status: Outcome) {
-  try { sessionStorage.setItem(`${sessionKey(accountId)}:outcome`, status); } catch { /* In-memory write keys also suppress duplicate writes. */ }
+  catch { return false; }
 }
 function remember(accountId: string) {
-  seenInMemory.add(accountId);
-  try { sessionStorage.setItem(sessionKey(accountId), 'seen'); } catch { /* Private storage: retain suppression in this document. */ }
+  try { sessionStorage.setItem(sessionKey(accountId), 'seen'); seenInMemory.delete(accountId); }
+  catch { seenInMemory.add(accountId); }
+}
+function confirmAccount(value: HostTourStateView) {
+  const status = terminal(value.status);
+  if (!status) return;
+  const current = preference(value.accountId);
+  current.confirmed = strongest(current.confirmed, status);
+  rememberPreference(value.accountId, current);
+}
+function savePreference(accountId: string, status?: Outcome): Promise<void> | null {
+  const current = preference(accountId);
+  if (status) current.pending = strongest(current.pending, status);
+  rememberPreference(accountId, current);
+  const existing = inFlight.get(accountId);
+  if (existing) return existing.promise;
+  if (!current.pending) return null;
+
+  const write = { preference: current, promise: Promise.resolve() };
+  inFlight.set(accountId, write);
+  write.promise = (async () => {
+    while (current.pending) {
+      const attempted = current.pending;
+      try {
+        const saved = await api<HostTourStateView>(path, {
+          method: 'PATCH', headers: { 'x-candidary-tour-account-id': accountId },
+          body: JSON.stringify({ status: attempted }),
+        });
+        if (saved.accountId !== accountId) throw new Error('Tour account changed');
+        current.confirmed = strongest(current.confirmed, strongest(attempted, terminal(saved.status)));
+        rememberPreference(accountId, current);
+      } catch (error) {
+        // A newer completion remains the requested outcome even if an older
+        // dismissal fails. Try it once; ordinary failure stays recoverable.
+        if (current.pending && current.pending === attempted) throw error;
+      }
+    }
+  })().finally(() => { if (inFlight.get(accountId) === write) inFlight.delete(accountId); });
+  return write.promise;
 }
 
 export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eligible: boolean }) {
@@ -35,8 +96,6 @@ export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eli
   const observedEvent = useRef<string | null>(null);
   const manualVisit = useRef(false);
   const lookup = useRef<TourLookup | null>(null);
-  const retry = useRef<{ accountId: string; status: Outcome } | null>(null);
-  const written = useRef(new Set<string>());
   if (owner.current.eventId !== eventId) owner.current = { eventId, generation: owner.current.generation + 1 };
 
   useEffect(() => {
@@ -45,7 +104,7 @@ export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eli
     const read: TourLookup = { owner: scope, pending: true, outcome: null, account: null };
     lookup.current = read;
     observedEvent.current = null; manualVisit.current = false;
-    setAccount(null); setOpen(false); setSaveFailed(false); retry.current = null;
+    setAccount(null); setOpen(false); setSaveFailed(false);
     const abort = new AbortController();
     void api<HostTourStateView>(path, { signal: abort.signal }).then(value => {
       if (!live || owner.current !== scope || lookup.current !== read) return;
@@ -55,8 +114,10 @@ export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eli
       read.outcome = null;
       observedEvent.current = scope.eventId;
       if (manualVisit.current) remember(value.accountId);
+      confirmAccount(value);
       setAccount(value);
-      if (outcome) persistOutcome(value, outcome);
+      if (outcome) persistOutcome(read, outcome);
+      else observeSave(read);
     }).catch(() => {
       if (!live || owner.current !== scope || lookup.current !== read) return;
       read.pending = false;
@@ -77,29 +138,22 @@ export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eli
     setOpen(true);
   }, [account, eligible, eventId]);
 
-  async function persist(value: { accountId: string; status: Outcome }, explicitRetry = false) {
-    const scope = owner.current;
-    const key = `${value.accountId}:${value.status}`;
-    const outcome = savedOutcome(value.accountId);
-    if (!explicitRetry && (written.current.has(key) || outcome === 'completed' || outcome === value.status)) return;
-    written.current.add(key);
-    rememberOutcome(value.accountId, value.status);
-    setSaveFailed(false);
-    try {
-      await api<HostTourStateView>(path, {
-        method: 'PATCH', headers: { 'x-candidary-tour-account-id': value.accountId },
-        body: JSON.stringify({ status: value.status }),
-      });
-      if (owner.current === scope) retry.current = null;
-    } catch {
-      if (owner.current !== scope) return;
-      retry.current = value; setSaveFailed(true);
-    }
+  function observeSave(read: TourLookup) {
+    if (!read.account) return;
+    const accountId = read.account.accountId;
+    const sync = () => {
+      if (lookup.current !== read || owner.current !== read.owner) return;
+      setSaveFailed(!!preference(accountId).pending && !inFlight.has(accountId));
+    };
+    sync();
+    const write = inFlight.get(accountId);
+    if (write) void write.promise.then(sync, sync);
   }
-  function persistOutcome(observedAccount: HostTourStateView, status: Outcome) {
-    remember(observedAccount.accountId);
-    if (observedAccount.status === 'completed' || observedAccount.status === status) return;
-    void persist({ accountId: observedAccount.accountId, status });
+  function persistOutcome(read: TourLookup, status?: Outcome) {
+    if (!read.account || read.owner !== owner.current || lookup.current !== read) return;
+    remember(read.account.accountId);
+    savePreference(read.account.accountId, status);
+    observeSave(read);
   }
   return {
     open, saveFailed,
@@ -113,8 +167,8 @@ export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eli
         // A manual exit can precede account identity. Keep only this read's
         // terminal outcome, with completion surviving later replay dismissal.
         read.outcome = read.outcome === 'completed' || status === 'completed' ? 'completed' : 'dismissed';
-      } else if (read.account) persistOutcome(read.account, status);
+      } else if (read.account) persistOutcome(read, status);
     },
-    retrySave() { if (retry.current) void persist(retry.current, true); },
+    retrySave() { const read = lookup.current; if (read && !read.pending) persistOutcome(read); },
   };
 }

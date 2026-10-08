@@ -43,6 +43,7 @@ import {
   MAX_EVENT_BYTES,
   MAX_EVENT_MEDIA,
 } from '../../shared/constants';
+import { EVENT_START_MIGRATION_SENTINEL } from '../../shared/rsvp';
 import type { LegacyArchiveExportKind, GalleryAudienceSummaryView, HostEventLifecycleView, RsvpSummary, PhotoIntakeState } from '../../shared/contracts';
 import type {
   EventView,
@@ -2774,6 +2775,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   const heldCount = photoCount + recoverableCount;
   const heldBytes = (event.storedBytes ?? 0) + (event.recoverableBytes ?? 0);
   const managerEventDate = formatEventDate(event.eventDate) ?? DATE_UNAVAILABLE;
+  const eventStartDisplay = event.eventStartAt === EVENT_START_MIGRATION_SENTINEL
+    ? null
+    : formatEventDateTime(event.eventStartAt, event.eventTimezone);
   const purgeAfterDisplay = formatRetentionDate(event.purgeAfter, event.eventTimezone);
   const uploadChip = UPLOAD_CHIP[event.photoIntakeState];
   const entryActionDetails = entryAction === null ? null : ENTRY_ACTION_DETAILS[entryAction];
@@ -2858,7 +2862,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           <summary>Event details</summary>
           <div className="library-event-details__body"><p>{managerEventDate}</p>{uploadStatus}{lifecycle}</div>
         </details>
-      </header> : <header className="manager-title"><div><p>{section === 'overview' ? formatEventDateTime(event.eventStartAt, event.eventTimezone) ?? `${managerEventDate} · ${event.eventTimezone}` : managerEventDate}</p><h1>{event.name}</h1></div>{uploadStatus}</header>}
+      </header> : <header className="manager-title"><div><p>{section === 'overview' ? eventStartDisplay ?? `${managerEventDate} · ${event.eventTimezone}` : managerEventDate}</p><h1>{event.name}</h1></div>{uploadStatus}</header>}
       {eventResource.state.failure && <ErrorState
         message={eventResource.state.failure.message}
         recoveryHint={eventResource.state.failure.recoveryHint}

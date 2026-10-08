@@ -191,3 +191,49 @@ it.each([401, 503])('retires queued manual outcomes after a %s account lookup wi
   expect(result.current.saveFailed).toBe(false);
   expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === 'PATCH')).toHaveLength(0);
 });
+
+
+it.each(['Escape', 'Skip tour', 'Close tour'])('restores current destination focus on later-step %s when the invoker has gone', async control => {
+  anchors(); const user = userEvent.setup(); const navigate = vi.fn();
+  const invoker = document.createElement('button'); document.body.append(invoker); invoker.focus();
+  const close = vi.fn(() => view.unmount());
+  const view = render(<HostWelcomeTour location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: 'Next' }));
+  invoker.remove();
+  const destination = document.querySelector<HTMLElement>('[data-host-tour-anchor="rsvp"]')!;
+  destination.tabIndex = -1;
+  view.rerender(<HostWelcomeTour location="rsvp" blocked={false} onNavigate={navigate} onClose={close} />);
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Your guest list' })).toHaveFocus());
+  if (control === 'Escape') await user.keyboard('{Escape}');
+  else await user.click(screen.getByRole('button', { name: control }));
+  expect(close).toHaveBeenCalledWith('dismissed');
+  await waitFor(() => expect(destination).toHaveFocus());
+});
+
+it.each([false, true])('dismisses a pending tour when another destination commits (blocked=%s)', async blocked => {
+  anchors(); const user = userEvent.setup(); const navigate = vi.fn(); const close = vi.fn();
+  const props = { blocked: false, onNavigate: navigate, onClose: close };
+  const view = render(<HostWelcomeTour {...props} location="overview" />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: 'Next' }));
+  expect(navigate).toHaveBeenCalledWith('rsvp');
+  view.rerender(<HostWelcomeTour {...props} blocked={blocked} location="share" />);
+  await waitFor(() => expect(close).toHaveBeenCalledWith('dismissed'));
+  expect(navigate).toHaveBeenCalledTimes(1);
+});
+
+
+it('restores the visible Exports control when exiting its later Library step', async () => {
+  anchors(); const user = userEvent.setup(); const navigate = vi.fn();
+  const close = vi.fn(() => view.unmount());
+  const view = render(<HostWelcomeTour location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
+  for (const destination of ['rsvp', 'share', 'library', 'library']) {
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    view.rerender(<HostWelcomeTour location={destination} blocked={false} onNavigate={navigate} onClose={close} />);
+  }
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Keep your originals' })).toHaveFocus());
+  await user.keyboard('{Escape}');
+  await waitFor(() => expect(document.querySelector('[data-host-tour-anchor="exports"]')).toHaveFocus());
+});

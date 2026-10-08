@@ -4,6 +4,7 @@ import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EventView, HostEventLifecycleView } from '../../shared/contracts';
 import { DEFAULT_GUESTBOOK_PROMPT } from '../../shared/constants';
+import { EVENT_START_MIGRATION_SENTINEL } from '../../shared/rsvp';
 import { resolveEventTheme } from '../../shared/event-theme';
 import { ManagerOverview } from '../../src/features/manager/ManagerOverview';
 import type { ResourceState } from '../../src/features/manager/resources';
@@ -89,6 +90,12 @@ describe('Manager Overview', () => {
     expect(await screen.findByRole('button', { name: 'Review RSVPs' })).toBeVisible();
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/rsvp/households'))).toBe(false);
     expect(screen.queryByRole('heading', { level: 2, name: 'Guest list and RSVPs' })).not.toBeInTheDocument();
+  });
+  it('uses the trusted event date for a legacy migration sentinel start', async () => {
+    setup({ event: () => json({ event: { ...EVENT, eventStartAt: EVENT_START_MIGRATION_SENTINEL } }) });
+    await screen.findByRole('heading', { name: EVENT.name });
+    expect(screen.getByText(/September 19, 2026 · America\/Chicago/)).toBeVisible();
+    expect(screen.queryByText(/December 31, 1969|January 1, 1970/)).not.toBeInTheDocument();
   });
   it('retries phase independently while summary remains confirmed', async () => {
     let calls = 0;

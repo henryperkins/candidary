@@ -33,6 +33,7 @@ export function HostWelcomeTour({ location, blocked, onNavigate, onClose }: {
   const [retry, setRetry] = useState(0);
   const [geometry, setGeometry] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
   const [unavailable, setUnavailable] = useState(false);
+  const [mobileReserve, setMobileReserve] = useState<number | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const invoker = useRef<HTMLElement | null>(document.activeElement as HTMLElement);
@@ -77,30 +78,48 @@ export function HostWelcomeTour({ location, blocked, onNavigate, onClose }: {
   }, [pending, location, blocked, otherModal]);
 
   useEffect(() => {
-    if (previousLocation.current !== location && pending === null && location !== step.destination) close.current('dismissed');
+    const expected = pending === 'finish' ? 'overview' : pending === null ? step.destination : steps[pending]!.destination;
+    // A refused guard keeps the same committed location. A different committed
+    // destination supersedes this request even while another modal owns focus.
+    if (previousLocation.current !== location && location !== expected) close.current('dismissed');
     previousLocation.current = location;
   }, [location, pending, step.destination]);
 
   useLayoutEffect(() => {
     if (suspended) return;
     let frame = 0; let timeout = 0; let lastBounds = ''; let stableFrames = 0; let didScroll = false; let found = false;
-    setGeometry(null); setUnavailable(false);
+    setGeometry(null); setUnavailable(false); setMobileReserve(null);
+    let scrolledAnchor: HTMLElement | null = null;
     const update = () => {
-      const anchor = document.querySelector<HTMLElement>(`[data-host-tour-anchor="${step.anchor}"]`);
+      let anchor = document.querySelector<HTMLElement>(`[data-host-tour-anchor="${step.anchor}"]`);
+      const mobile = window.innerWidth <= 760;
+      const headerBottom = Math.max(0, document.querySelector('.manager-nav')?.getBoundingClientRect().bottom ?? 52);
+      const targetTop = headerBottom + 12;
+      // On a short phone the whole task section cannot share the viewport with
+      // guidance. Highlight its real action, preserving the panel's readable copy.
+      if (mobile && step.destination === 'overview' && visible(anchor)) {
+        const action = document.querySelector<HTMLElement>('[data-host-tour-recommended-action]');
+        const naturalPanelHeight = panel.current?.scrollHeight ?? 340;
+        if (visible(action) && anchor.getBoundingClientRect().height + naturalPanelHeight + targetTop + 32 > window.innerHeight) anchor = action;
+      }
       if (!visible(anchor) || location !== step.destination) {
         if (found) { setGeometry(null); setUnavailable(true); }
         else frame = requestAnimationFrame(update);
         return;
       }
-      if (!didScroll) {
+      if (!didScroll || scrolledAnchor !== anchor) {
         anchor.scrollIntoView?.({ block: 'center', behavior: 'instant' });
-        if (window.innerWidth <= 760) {
-          const headerHeight = document.querySelector('.manager-nav')?.getBoundingClientRect().height ?? 52;
-          window.scrollBy?.({ top: anchor.getBoundingClientRect().top - headerHeight - 12, behavior: 'instant' });
-        }
-        didScroll = true;
+        if (mobile) window.scrollBy?.({ top: anchor.getBoundingClientRect().top - targetTop, behavior: 'instant' });
+        didScroll = true; scrolledAnchor = anchor;
       }
       const rect = anchor.getBoundingClientRect();
+      if (mobile) {
+        // The sheet's bottom remains fixed; this measured ceiling leaves room
+        // for the complete target and its focus outline above the sheet.
+        const bottomGap = Math.max(8, window.innerHeight - (panel.current?.getBoundingClientRect().bottom ?? window.innerHeight - 8));
+        const reserve = Math.max(44, window.innerHeight - rect.bottom - 16 - bottomGap);
+        setMobileReserve(current => current === reserve ? current : reserve);
+      }
       const bounds = `${rect.top},${rect.left},${rect.width},${rect.height}`;
       stableFrames = bounds === lastBounds ? stableFrames + 1 : 0; lastBounds = bounds;
       if (stableFrames >= 2) {
@@ -116,6 +135,8 @@ export function HostWelcomeTour({ location, blocked, onNavigate, onClose }: {
     const observer = new ResizeObserver(refresh);
     const anchor = document.querySelector<HTMLElement>(`[data-host-tour-anchor="${step.anchor}"]`);
     if (anchor) observer.observe(anchor);
+    const action = document.querySelector<HTMLElement>('[data-host-tour-recommended-action]');
+    if (action) observer.observe(action);
     if (panel.current) observer.observe(panel.current);
     const mutations = new MutationObserver(refresh);
     mutations.observe(document.querySelector('main') ?? document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class'] });
@@ -127,7 +148,20 @@ export function HostWelcomeTour({ location, blocked, onNavigate, onClose }: {
   function exit() {
     const target = invoker.current;
     close.current('dismissed');
-    requestAnimationFrame(() => { if (visible(target) && !target.closest('[inert]')) target.focus({ preventScroll: true }); });
+    requestAnimationFrame(() => {
+      if (visible(target) && target.matches('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]') && !target.closest('[inert]')) { target.focus({ preventScroll: true }); return; }
+      const destination = location === step.destination ? step : steps.find(candidate => candidate.destination === location);
+      const anchor = destination ? document.querySelector<HTMLElement>(`[data-host-tour-anchor="${destination.anchor}"]`) : null;
+      const fallback = location === 'overview'
+        ? document.querySelector<HTMLElement>('[data-host-tour-recommended-action]')
+        : anchor;
+      if (visible(fallback) && !fallback.closest('[inert]')) {
+        const focusTarget = fallback.matches('button, a[href], summary, [tabindex]') ? fallback
+          : fallback.querySelector<HTMLElement>('h1, h2, h3, button, a[href]') ?? fallback;
+        if (!focusTarget.matches('button, a[href], summary, [tabindex]')) focusTarget.tabIndex = -1;
+        focusTarget.focus({ preventScroll: true });
+      }
+    });
   }
   function move(next: number | 'finish') {
     if (suspended || !geometry) return;
@@ -144,7 +178,8 @@ export function HostWelcomeTour({ location, blocked, onNavigate, onClose }: {
       ? geometry.top - panelHeight - 24 : preferredTop));
   const panelLeft = geometry ? Math.max(16, Math.min(window.innerWidth - panelWidth - 16,
     fitsRight ? geometry.left + geometry.width + 20 : geometry.left + geometry.width - panelWidth)) : 16;
-  const style: CSSProperties = desktop && geometry ? { left: panelLeft, top: panelTop } : {};
+  const style: CSSProperties = desktop && geometry ? { left: panelLeft, top: panelTop }
+    : !desktop && mobileReserve !== null ? { maxHeight: mobileReserve } : {};
   return <ModalSurface labelledBy="host-welcome-title" initialFocusRef={heading} returnFocusRef={noReturnFocus}
     onRequestClose={exit} closePolicy={{ escape: true, backdrop: false }}>
     <div className="host-welcome" data-host-welcome-tour>

@@ -2346,13 +2346,13 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 /* Overview keeps the next decision ahead of its explained workflow rows. */
 .manager-overview { max-width: 880px; min-width: 0; }
 .manager-overview__task { margin: 24px 0 32px; padding-bottom: 28px; border-bottom: 1px solid var(--border); }
-.manager-overview h2 { margin: 0 0 16px; font-size: clamp(1.6rem, 5vw, 2rem); overflow-wrap: anywhere; }
+.manager-overview h2 { margin: 0 0 16px; font-size: 1.6rem; overflow-wrap: anywhere; }
 .manager-overview__task p { max-width: 65ch; margin: 12px 0 20px; }
 .manager-overview__task .manager-overview__phase { color: var(--denim); font-weight: 600; margin: 12px 0 8px; }
 .manager-overview__task > .button { width: 100%; }
 .manager-overview__workflows ul { list-style: none; margin: 0; padding: 0; }
 .manager-overview__workflows li { display: grid; min-width: 0; gap: 12px; padding: 20px 0; border-bottom: 1px solid var(--border); }
-.manager-overview__workflows h3 { margin: 0 0 8px; font-size: 1.15rem; }
+.manager-overview__workflows h3 { margin: 0 0 8px; font-size: 1rem; }
 .manager-overview__workflows p { margin: 0; max-width: 65ch; }
 .manager-overview__workflows .button { justify-self: start; }
 .manager-overview__confirmed { margin-top: 28px; }
@@ -2392,7 +2392,7 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   top: 16px;
 }
 .host-welcome__heading { display: flex; align-items: flex-start; gap: 12px; }
-.host-welcome__heading h2 { margin: 0; font-size: 1.4rem; line-height: 1.2; overflow-wrap: anywhere; flex: 1; }
+.host-welcome__heading h2 { margin: 0; font-size: 1.6rem; line-height: 1.2; overflow-wrap: anywhere; flex: 1; }
 .host-welcome__heading button { flex-shrink: 0; min-width: 44px; min-height: 44px; margin-top: -8px; margin-right: -8px; }
 .host-welcome__count { margin: 8px 0 16px; font-size: 0.875rem; color: var(--muted); }
 .host-welcome__panel > p { line-height: 1.55; }
