@@ -935,7 +935,7 @@ ManagerGalleryWorkspaceProps
 
   return <section className="manager-gallery" data-mode={mode} ref={rootRef} aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading" hidden={librarySuspended}>
-      <h2 id="gallery-workspace-title" tabIndex={-1}>{mode === 'library' ? 'Library' : 'Gallery'}</h2>
+      <h2 data-host-tour-anchor={mode === 'library' ? 'library' : undefined} id="gallery-workspace-title" tabIndex={-1}>{mode === 'library' ? 'Library' : 'Gallery'}</h2>
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} {event.storedMediaCount === 1 ? 'photo' : 'photos'}</p>
       <div className="library-heading-actions">
         {mode === 'library' && <div className="library-add-photos">{libraryActions}</div>}
@@ -944,7 +944,7 @@ ManagerGalleryWorkspaceProps
           open={mode !== 'library' || libraryToolsOpen || photoExportTarget?.mode === 'library' || !!exports.failure}
           onToggle={event => { if (mode === 'library') setLibraryToolsOpen(event.currentTarget.open); }}
         >
-          <summary hidden={mode !== 'library'}>Exports</summary>
+          <summary data-host-tour-anchor="exports" hidden={mode !== 'library'}>Exports</summary>
           <div className="gallery-export-tools__body">
             <div className="gallery-action" ref={setActionDock} />
             {libraryExportContent}

@@ -19,6 +19,8 @@ describe('manager location parser and serializer', () => {
     ['?section=gallery&view=trash', { section: 'gallery', mode: 'library', view: 'trash' }, '?section=gallery&view=trash'],
     ['?section=gallery&mode=album&view=trash', { section: 'gallery', mode: 'album' }, '?section=gallery&mode=album'],
     ['?section=gallery&view=wrong', { section: 'gallery', mode: 'library' }, ''],
+    ['?section=overview', { section: 'overview' }, '?section=overview'],
+    ['?section=overview&mode=album', { section: 'overview' }, '?section=overview'],
     ['?section=rsvp', { section: 'rsvp' }, '?section=rsvp'],
     ['?section=guestbook', { section: 'guestbook' }, '?section=guestbook'],
     ['?section=share', { section: 'share' }, '?section=share'],

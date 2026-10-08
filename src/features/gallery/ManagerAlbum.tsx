@@ -1,3 +1,4 @@
+import { acquireModalOwnership } from '../../components/ModalSurface';
 import {
   ChevronDown,
   Check,
@@ -1426,20 +1427,10 @@ export const ManagerAlbum = forwardRef<ManagerAlbumHandle, ManagerAlbumProps>(fu
   useLayoutEffect(() => {
     if (!confirmingStopShare && createShareSnapshot === null) return;
     document.body.append(confirmHost);
-    const inerted: HTMLElement[] = [];
-    for (const sibling of Array.from(document.body.children)) {
-      if (sibling === confirmHost || !(sibling instanceof HTMLElement)) continue;
-      if (sibling.dataset.galleryLiveHost === 'true') continue;
-      if (sibling.hasAttribute('inert')) continue;
-      sibling.setAttribute('inert', '');
-      inerted.push(sibling);
-    }
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    const releaseModal = acquireModalOwnership(confirmHost, document.querySelector<HTMLElement>('[data-gallery-live-host="true"]'));
     return () => {
-      for (const sibling of inerted) sibling.removeAttribute('inert');
-      document.body.style.overflow = previousOverflow;
       confirmHost.remove();
+      releaseModal();
     };
   }, [confirmHost, confirmingStopShare, createShareSnapshot]);
 

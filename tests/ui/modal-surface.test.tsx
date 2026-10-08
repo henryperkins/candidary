@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { useRef, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ModalSurface } from '../../src/components/ModalSurface';
+import { acquireModalOwnership, ModalSurface } from '../../src/components/ModalSurface';
 
 afterEach(() => cleanup());
 
@@ -117,4 +117,33 @@ describe('ModalSurface', () => {
     expect(liveHost).not.toHaveAttribute('inert');
     liveHost.remove();
   });
+});
+
+it('keeps inert and scroll ownership when an underlying modal suspends', () => {
+  const background = document.createElement('main'); document.body.append(background);
+  const first = render(<ModalHarness />);
+  const second = render(<ModalHarness />);
+  first.unmount();
+  expect(background).toHaveAttribute('inert');
+  expect(document.body.style.overflow).toBe('hidden');
+  second.unmount();
+  expect(background).not.toHaveAttribute('inert');
+  expect(document.body.style.overflow).toBe('');
+  background.remove();
+});
+
+
+it('hands ownership to a custom portal dialog while the tour suspends', () => {
+  const background = document.createElement('main'); document.body.append(background);
+  const tour = render(<ModalHarness />);
+  const custom = document.createElement('div'); custom.setAttribute('role', 'dialog'); document.body.append(custom);
+  const release = acquireModalOwnership(custom);
+  tour.unmount();
+  expect(background).toHaveAttribute('inert');
+  expect(custom).not.toHaveAttribute('inert');
+  expect(document.body.style.overflow).toBe('hidden');
+  custom.remove(); release();
+  expect(background).not.toHaveAttribute('inert');
+  expect(document.body.style.overflow).toBe('');
+  background.remove();
 });

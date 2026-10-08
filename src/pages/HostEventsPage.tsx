@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import type { HostSessionResponse } from '../../shared/contracts';
+import { managerHref } from '../app/manager-location';
 import { api, ClientApiError } from '../app/api';
 import {
   DATE_UNAVAILABLE,
@@ -164,7 +165,7 @@ export function HostEventsPage() {
                   event.eventTimezone,
                 );
                 return <li key={event.id}>
-                  <Link to={`/manage/event/${event.id}`}>
+                  <Link to={managerHref(event.id, { section: 'overview' })}>
                     <strong>{event.name}</strong>
                     <span><CalendarDays aria-hidden="true" /> {eventDate === null
                       ? DATE_UNAVAILABLE

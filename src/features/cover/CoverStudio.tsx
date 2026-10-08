@@ -1,3 +1,4 @@
+import { acquireModalOwnership } from '../../components/ModalSurface';
 import {
   useCallback,
   useEffect,
@@ -281,21 +282,12 @@ export function CoverStudio({
     returnFocusRef.current = document.activeElement;
     operation.attach();
     const host = hostRef.current;
-    const inerted: HTMLElement[] = [];
-    for (const sibling of Array.from(document.body.children)) {
-      if (sibling === host || !(sibling instanceof HTMLElement)) continue;
-      if (sibling.hasAttribute('inert')) continue;
-      sibling.setAttribute('inert', '');
-      inerted.push(sibling);
-    }
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    const releaseModal = host ? acquireModalOwnership(host) : () => false;
     return () => {
       operation.detach();
-      for (const sibling of inerted) sibling.removeAttribute('inert');
-      document.body.style.overflow = previousOverflow;
+      releaseModal();
       const target = returnFocusRef.current;
-      if (target instanceof HTMLElement) target.focus();
+      if (target instanceof HTMLElement && target.isConnected && !target.closest('[inert], [hidden]')) target.focus();
     };
   }, [open, operation]);
 

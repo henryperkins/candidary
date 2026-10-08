@@ -419,7 +419,7 @@ export function ManagerRsvpPanel({
 
   return <section className="rsvp-manager" aria-labelledby="rsvp-manager-title">
     <p className="section-label">Guest list</p>
-    <h2 id="rsvp-manager-title" ref={dashboardHeading} tabIndex={-1}>Guest list and RSVPs</h2>
+    <h2 data-host-tour-anchor="rsvp" id="rsvp-manager-title" ref={dashboardHeading} tabIndex={-1}>Guest list and RSVPs</h2>
 
     {announcement && <p className="rsvp-manager__status" role="status">{announcement}</p>}
     {notice && <p className="rsvp-manager__notice" role="alert">{notice}</p>}

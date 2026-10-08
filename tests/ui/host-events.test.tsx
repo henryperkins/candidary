@@ -84,6 +84,11 @@ afterEach(() => {
 });
 
 describe('Host Events dashboard', () => {
+  it('opens chosen events at explicit Overview', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => json(session())));
+    render(<RouterProvider router={createAppRouter(['/host/events'])} />);
+    expect(await screen.findByRole('link', { name: /River Dinner/ })).toHaveAttribute('href', '/manage/event/event-later?section=overview');
+  });
   it('uses the date-only formatter and each event zone for its management-expiry instant', async () => {
     const chicagoBoundary = {
       ...EVENTS[1]!,

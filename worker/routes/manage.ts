@@ -13,6 +13,7 @@ import {
 import { requireManager } from '../auth/manager';
 import { AccountsRepository } from '../db/accounts';
 import { EventsRepository } from '../db/events';
+import { EventEntriesRepository } from '../db/event-entries';
 import {
   managerGalleryMediaView,
   managerMediaView,
@@ -60,6 +61,7 @@ import { eventStartTime, selectManagerEventView } from '../http/event-view';
 import { fieldErrors } from '../http/validation';
 import { deleteEventData } from '../workflows/cleanup';
 import { privateJson } from '../http/private-json';
+import { selectHostEventLifecycle } from '../http/host-event-lifecycle';
 import { managerUploadBatchSchema } from '../http/upload-schemas';
 import { ManagerUploadActorService } from '../services/manager-upload-actor';
 import { UploadService } from '../services/uploads';
@@ -270,6 +272,7 @@ manageRoutes.use('/manage/events/:eventId/media/trash', privateJson);
 manageRoutes.use('/manage/events/:eventId/media/:mediaId/trash', privateJson);
 manageRoutes.use('/manage/events/:eventId/media/:mediaId/restore', privateJson);
 manageRoutes.use('/manage/events/:eventId/media/:mediaId/cancel-reservation', privateJson);
+manageRoutes.use('/manage/events/:eventId/lifecycle', privateJson);
 manageRoutes.use('/manage/events/:eventId/gallery/summary', privateJson);
 manageRoutes.use('/manage/events/:eventId/gallery/arrivals', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/batch', privateJson);
@@ -280,6 +283,16 @@ manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/transfers', privateJs
 manageRoutes.use('/manage/events/:eventId/uploads/:mediaId/transfers/*', privateJson);
 manageRoutes.use('/manage/events/:eventId/uploads/:mediaId', privateJson);
 manageRoutes.use('/manage/events/:eventId/links/manager/rotate', privateJson);
+
+manageRoutes.get('/manage/events/:eventId/lifecycle', async (context) => {
+  const auth = await requireManager(context);
+  const entry = await new EventEntriesRepository(context.env.DB).getForEvent(auth.event.id);
+  const now = new Date();
+  return context.json({
+    data: selectHostEventLifecycle(auth.event, now, entry?.disabledAt ?? null),
+    requestId: context.get('requestId'),
+  });
+});
 
 // Re-displays the printed credential for a host who lost the card. There is no
 // replacement action beside it on purpose: a new link would not be on the signs

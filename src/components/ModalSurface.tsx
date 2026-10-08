@@ -40,6 +40,44 @@ function focusableElements(dialog: HTMLElement | null): HTMLElement[] {
   )].filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
 }
 
+// Shared ownership matters when a tour yields while a second dialog opens.
+// Recompute from the top surface; an earlier cleanup must never unlock it.
+const surfaces: { host: HTMLElement; exception?: HTMLElement | null }[] = [];
+const originalInert = new Map<HTMLElement, boolean>();
+let originalOverflow = '';
+function reconcileModalOwnership() {
+  const top = surfaces.at(-1);
+  if (!top) {
+    for (const [element, inert] of originalInert) {
+      if (inert) element.setAttribute('inert', ''); else element.removeAttribute('inert');
+    }
+    originalInert.clear();
+    document.body.style.overflow = originalOverflow;
+    return;
+  }
+  for (const element of Array.from(document.body.children)) {
+    if (!(element instanceof HTMLElement)) continue;
+    if (!originalInert.has(element)) originalInert.set(element, element.hasAttribute('inert'));
+    if (element === top.host || element === top.exception) element.removeAttribute('inert');
+    else element.setAttribute('inert', '');
+  }
+  document.body.style.overflow = 'hidden';
+}
+
+/** Register custom portal dialogs in the same inert/scroll ownership boundary. */
+export function acquireModalOwnership(host: HTMLElement, exception?: HTMLElement | null) {
+  if (surfaces.length === 0) originalOverflow = document.body.style.overflow;
+  const surface = { host, exception };
+  surfaces.push(surface);
+  reconcileModalOwnership();
+  return () => {
+    const wasTop = surfaces.at(-1) === surface;
+    surfaces.splice(surfaces.indexOf(surface), 1);
+    reconcileModalOwnership();
+    return wasTop;
+  };
+}
+
 export function ModalSurface({
   labelledBy,
   initialFocusRef,
@@ -59,27 +97,19 @@ export function ModalSurface({
 
   useLayoutEffect(() => {
     document.body.append(host);
-    const inerted: HTMLElement[] = [];
-    for (const sibling of Array.from(document.body.children)) {
-      if (sibling === host || !(sibling instanceof HTMLElement)) continue;
-      if (sibling === inertExceptionRef?.current) continue;
-      if (sibling.hasAttribute('inert')) continue;
-      sibling.setAttribute('inert', '');
-      inerted.push(sibling);
-    }
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    initialFocusRef.current?.focus();
+    const release = acquireModalOwnership(host, inertExceptionRef?.current);
+    initialFocusRef.current?.focus({ preventScroll: true });
     return () => {
-      for (const sibling of inerted) sibling.removeAttribute('inert');
-      document.body.style.overflow = previousOverflow;
       host.remove();
-      returnFocusRef.current?.focus();
+      const wasTop = release();
+      const target = returnFocusRef.current;
+      if (wasTop && target?.isConnected && !target.closest('[inert], [hidden]')) target.focus();
     };
   }, [host, inertExceptionRef, initialFocusRef, returnFocusRef]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (surfaces.at(-1)?.host !== host) return;
       if (event.key === 'Escape') {
         if (!closePolicy.escape) return;
         event.preventDefault();
@@ -110,7 +140,7 @@ export function ModalSurface({
       const last = focusable.at(-1);
       if (!first || !last) {
         event.preventDefault();
-        initialFocusRef.current?.focus();
+        initialFocusRef.current?.focus({ preventScroll: true });
         return;
       }
       const active = document.activeElement;

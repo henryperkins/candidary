@@ -1,12 +1,19 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 
-import type { HostSessionEventView, HostSessionResponse } from '../../shared/contracts';
+import {
+  HOST_EVENT_WELCOME_TOUR_KEY,
+  HOST_EVENT_WELCOME_TOUR_VERSION,
+  type HostSessionEventView,
+  type HostSessionResponse,
+} from '../../shared/contracts';
 import { ApiError } from '../../shared/errors';
 import { AuthService } from '../auth/service';
 import { AccountsRepository } from '../db/accounts';
 import { NotificationOutboxRepository } from '../db/notification-outbox';
 import { HostSessionsRepository } from '../db/sessions';
+import { HostToursRepository } from '../db/host-tours';
+import { privateJson } from '../http/private-json';
 import type { AppBindings, AuthenticatedAccount } from '../env';
 import {
   clearSessionCookies,
@@ -89,6 +96,41 @@ async function startSession(context: Context<AppBindings>, account: Authenticate
 }
 
 export const hostAuthRoutes = new Hono<AppBindings>();
+
+const welcomeTourPath = `/host/tours/${HOST_EVENT_WELCOME_TOUR_KEY}/:version`;
+const tourStatusSchema = z.object({ status: z.enum(['dismissed', 'completed']) }).strict();
+
+function requireWelcomeTourVersion(context: Context<AppBindings>): void {
+  if (context.req.param('version') !== String(HOST_EVENT_WELCOME_TOUR_VERSION)) {
+    throw new ApiError('VALIDATION_FAILED', 'This tour version is not supported.', 422);
+  }
+}
+
+hostAuthRoutes.use(welcomeTourPath, privateJson);
+hostAuthRoutes.get(welcomeTourPath, async (context) => {
+  const principal = await requireHost(context);
+  requireWelcomeTourVersion(context);
+  const state = await new HostToursRepository(context.env.DB).get(
+    principal.account.id, HOST_EVENT_WELCOME_TOUR_VERSION,
+  );
+  return context.json({ data: state, requestId: context.get('requestId') });
+});
+
+hostAuthRoutes.patch(welcomeTourPath, async (context) => {
+  const principal = await requireHost(context, true);
+  requireWelcomeTourVersion(context);
+  // An older tab may still be showing another account's tour after a sign-in switch.
+  // This assertion never selects the account to persist; the session remains authoritative.
+  const expectedAccountId = context.req.header('x-candidary-tour-account-id');
+  if (expectedAccountId !== undefined && expectedAccountId !== principal.account.id) {
+    throw new ApiError('ROLE_FORBIDDEN', 'Your signed-in account changed. Reload and try again.', 409);
+  }
+  const body = await parse(context, tourStatusSchema);
+  const state = await new HostToursRepository(context.env.DB).setStatus(
+    principal.account.id, HOST_EVENT_WELCOME_TOUR_VERSION, body.status, new Date().toISOString(),
+  );
+  return context.json({ data: state, requestId: context.get('requestId') });
+});
 
 type HostAuthBoundaryAction =
   | 'registration_start'

@@ -1,4 +1,5 @@
 export type ManagerSection =
+  | 'overview'
   | 'rsvp'
   | 'gallery'
   | 'guestbook'
@@ -23,6 +24,7 @@ export interface ParsedManagerLocation {
 const MANAGER_EVENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const MANAGER_PATH = /^\/manage\/event\/([^/]+)$/u;
 const NON_GALLERY_SECTIONS = new Set<Exclude<ManagerSection, 'gallery'>>([
+  'overview',
   'rsvp',
   'guestbook',
   'share',

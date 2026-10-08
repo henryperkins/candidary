@@ -59,6 +59,16 @@ export interface RegistrationCompleteResponse {
   boundEvent: boolean;
 }
 
+export const HOST_EVENT_WELCOME_TOUR_KEY = 'host-event-welcome';
+export const HOST_EVENT_WELCOME_TOUR_VERSION = 1;
+
+export interface HostTourStateView {
+  accountId: string;
+  tourKey: typeof HOST_EVENT_WELCOME_TOUR_KEY;
+  version: number;
+  status: 'unseen' | 'dismissed' | 'completed';
+}
+
 export interface HostSessionAccountView {
   id: string;
   email: string;
@@ -622,6 +632,16 @@ export type GuestReadSurfaces =
 // first, so an event whose capability is withheld never reports itself as
 // scheduled to open.
 export type PhotoIntakeState = 'scheduled' | 'open-early' | 'open' | 'paused';
+
+/** Manager-safe server lifecycle; no guest credentials or roster data. */
+export interface HostEventLifecycleView {
+  phase: GuestEventPhase;
+  rsvpState: RsvpState;
+  photoIntakeState: PhotoIntakeState;
+  guestAccessEnded: boolean;
+  entryDisabled: boolean;
+  lifecycleRecheckAfterMs: number | null;
+}
 
 export interface GuestPhaseView {
   phase: GuestEventPhase;

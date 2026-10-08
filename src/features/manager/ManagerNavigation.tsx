@@ -5,7 +5,7 @@ import { Brand } from '../../components/Brand';
 import { GALLERY_WIDE_MIN_WIDTH } from '../gallery/viewport';
 
 const SECTION_LABELS: Record<ManagerSection, string> = {
-  gallery: 'Gallery', rsvp: 'RSVP', guestbook: 'Guestbook', share: 'Share', settings: 'Settings',
+  overview: 'Overview', gallery: 'Gallery', rsvp: 'RSVP', guestbook: 'Guestbook', share: 'Share', settings: 'Settings',
 };
 
 export function ManagerNavigation({ section, navigationKey, mobile, reviewCount, liveHost, children }: {

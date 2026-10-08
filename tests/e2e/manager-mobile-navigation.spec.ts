@@ -16,8 +16,8 @@ test('mobile section disclosure exposes all destinations without moving the Libr
   await expect(page.getByRole('navigation', { name: 'Manager sections' })).toBeHidden();
   await toggle.click();
   const navigation = page.getByRole('navigation', { name: 'Manager sections' });
-  await expect(navigation.getByRole('button')).toHaveCount(5);
-  for (const name of ['Gallery', 'RSVP', 'Guestbook', 'Share', 'Settings']) {
+  await expect(navigation.getByRole('button')).toHaveCount(6);
+  for (const name of ['Overview', 'Gallery', 'RSVP', 'Guestbook', 'Share', 'Settings']) {
     const button = navigation.getByRole('button', { name: new RegExp(`^${name}`) });
     await expect(button).toBeInViewport();
     const box = (await button.boundingBox())!;
@@ -26,13 +26,13 @@ test('mobile section disclosure exposes all destinations without moving the Libr
   }
   expect((await firstPhoto.boundingBox())!.y).toBe(before!.y);
   await page.keyboard.press('Tab');
-  await expect(navigation.getByRole('button', { name: 'Gallery', exact: true })).toBeFocused();
+  await expect(navigation.getByRole('button', { name: 'Overview', exact: true })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(toggle).toBeFocused();
   await expect(navigation).toBeHidden();
 });
 
-for (const width of [320, 390]) test(`mobile header serves all five sections at ${width}`, async ({ page }, testInfo) => {
+for (const width of [320, 390]) test(`mobile header serves all six sections at ${width}`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: width === 320 ? 568 : 844 });
   await stubLibraryRoutes(page, 96);
   await page.goto(managerUrl);
@@ -45,7 +45,7 @@ for (const width of [320, 390]) test(`mobile header serves all five sections at 
   const menuBounds = (await page.locator('.manager-nav nav').boundingBox())!;
   await page.mouse.click(menuBounds.x / 2, menuBounds.y + 20);
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-  for (const name of ['RSVP', 'Guestbook', 'Share', 'Settings']) {
+  for (const name of ['Overview', 'RSVP', 'Guestbook', 'Share', 'Settings']) {
     await chooseManagerSection(page, name);
     await expect(toggle).toContainText(name);
     await expect(page.getByRole('navigation', { name: 'Manager sections' })).toBeHidden();
@@ -98,7 +98,7 @@ test('menu retains review counts, enlarged text and focus through the rail break
   await page.setViewportSize({ width: 761, height: 900 });
   await expect(toggle).toBeHidden();
   await expect(nav.getByRole('button', { name: 'Gallery', exact: true })).toBeFocused();
-  await expect(nav.getByRole('button')).toHaveCount(5);
+  await expect(nav.getByRole('button')).toHaveCount(6);
   await page.screenshot({ path: testInfo.outputPath('tablet-rail.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await expect(nav).toBeVisible();
