@@ -1,6 +1,8 @@
 # Host event welcome and guided tour — shape brief
 
-Status: Approved by the user on 2026-10-08. Composition, primary outcome, automatic first-visit launch, tour coverage, account-level replay behavior, and entry boundary are confirmed. Implemented and verified locally on feat/host-event-welcome while preserving the existing design system. See the implementation plan for focused evidence and limitations; no production release is claimed.
+Status: Approved by the user on 2026-10-08. Composition, primary outcome, automatic first-visit launch, tour coverage, account-level replay behavior, and entry boundary are confirmed. Implemented and remediated while preserving the existing design system, then pushed to main in commit `39f16cc`. See the implementation and remediation plans for focused evidence and limitations.
+
+Release checkpoint: Migration `0027_host_tours.sql` is applied in preview and production. Production application deployment has not been verified.
 
 ## Job and audience
 

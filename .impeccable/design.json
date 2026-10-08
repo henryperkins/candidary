@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-12T20:25:40.305Z",
+  "generatedAt": "2026-10-08T15:26:18.115123Z",
   "title": "Design System: Candidary",
   "extensions": {
     "colorMeta": {
@@ -468,6 +468,21 @@
           "oklch(82% 0.137 29.9)",
           "oklch(94% 0.137 29.9)"
         ]
+      },
+      "danger-chip": {
+        "role": "tertiary",
+        "displayName": "Danger Chip",
+        "canonical": "#fbe0dc",
+        "tonalRamp": [
+          "oklch(15% 0.0304 27.76)",
+          "oklch(26% 0.0304 27.76)",
+          "oklch(38% 0.0304 27.76)",
+          "oklch(49% 0.0304 27.76)",
+          "oklch(61% 0.0304 27.76)",
+          "oklch(72% 0.0304 27.76)",
+          "oklch(84% 0.0304 27.76)",
+          "oklch(95% 0.0304 27.76)"
+        ]
       }
     },
     "typographyMeta": {
@@ -489,11 +504,31 @@
       },
       "label": {
         "displayName": "Label",
-        "purpose": "Controls, fields, compact navigation, and action copy."
+        "purpose": "Compact controls and phone navigation; surrounding forms and standard buttons can use 16px."
       },
       "eyebrow": {
         "displayName": "Eyebrow",
-        "purpose": "Rare category labels and compact textual statuses."
+        "purpose": "Rare uppercase category labels; separate from ordinary status pills."
+      },
+      "control": {
+        "displayName": "Control",
+        "purpose": "Standard global button text, inherited at 16px."
+      },
+      "field": {
+        "displayName": "Field",
+        "purpose": "Standard 16px text input; weight and line-height remain inherited rather than adopting paragraph leading."
+      },
+      "nav-label": {
+        "displayName": "Navigation Label",
+        "purpose": "14px desktop Manager destination text with its inherited line-height."
+      },
+      "status": {
+        "displayName": "Status",
+        "purpose": "Ordinary compact status pills, without eyebrow tracking or uppercase styling."
+      },
+      "credential": {
+        "displayName": "Credential",
+        "purpose": "System monospace for access-link values only."
       }
     },
     "shadows": [
@@ -540,7 +575,7 @@
       {
         "name": "active-tab-underline",
         "value": "inset 0 -3px 0 var(--chestnut)",
-        "purpose": "The inset rule under the Manager shell tab band and the selected host auth tab."
+        "purpose": "Selected host authentication tabs. The current Manager phone disclosure does not use this underline."
       },
       {
         "name": "cover-studio-dialog",
@@ -561,13 +596,18 @@
         "name": "new-badge",
         "value": "0 2px 8px rgb(42 25 19 / 16%)",
         "purpose": "Separates the Manager new-media marker from the media it sits on."
+      },
+      {
+        "name": "modal-dialog",
+        "value": "0 20px 50px rgb(43 29 23 / 35%)",
+        "purpose": "General bounded confirmation dialog above the dimmed backdrop."
       }
     ],
     "motion": [
       {
         "name": "control-standard",
         "value": "180ms",
-        "purpose": "The one control duration: background, color, border, and the 1px transform lift on buttons, links, and headers. No easing is declared, so the CSS default (ease) applies."
+        "purpose": "Standard 180ms button, link, and header state transitions. Other components declare their own durations. The default CSS easing is ease."
       },
       {
         "name": "field-settle",
@@ -618,6 +658,14 @@
       {
         "name": "guest-framed",
         "value": "min-width: 700px and min-height: 760px"
+      },
+      {
+        "name": "manager-phone",
+        "value": "max-width: 760px"
+      },
+      {
+        "name": "cover-short-lookup",
+        "value": "max-width: 360px and max-height: 600px"
       }
     ]
   },
@@ -628,7 +676,7 @@
       "refersTo": "button-primary",
       "description": "The global Chestnut action. One per decision; a resolved event primary replaces Chestnut only inside event surfaces.",
       "html": "<button class=\"ds-button-primary\">Create your event <svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M5 12h14\"></path><path d=\"m13 6 6 6-6 6\"></path></svg></button>",
-      "css": ".ds-button-primary { box-sizing: border-box; min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-primary:not(:disabled):hover { transform: translateY(-1px); } .ds-button-primary:disabled { opacity: .48; cursor: not-allowed; } .ds-button-primary:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-primary { transition-duration: .01ms; } } .ds-button-primary { background: var(--chestnut, #4a2415); color: #fff; } .ds-button-primary:not(:disabled):hover { background: var(--chestnut-strong, #31170c); } .ds-button-primary svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; }"
+      "css": ".ds-button-primary { min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-primary:not(:disabled):hover { transform: translateY(-1px); } .ds-button-primary:disabled { opacity: .48; cursor: not-allowed; } .ds-button-primary:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-primary { transition-duration: .01ms; } } .ds-button-primary { background: var(--chestnut, #4a2415); color: #fff; } .ds-button-primary:not(:disabled):hover { background: var(--chestnut-strong, #31170c); } .ds-button-primary svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; }"
     },
     {
       "name": "Secondary Button",
@@ -636,23 +684,23 @@
       "refersTo": "button-secondary",
       "description": "Chestnut outline on a transparent ground. Hover is the 1px lift only; there is no filled low-contrast substitute.",
       "html": "<button class=\"ds-button-secondary\">See how it works</button>",
-      "css": ".ds-button-secondary { box-sizing: border-box; min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-secondary:not(:disabled):hover { transform: translateY(-1px); } .ds-button-secondary:disabled { opacity: .48; cursor: not-allowed; } .ds-button-secondary:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-secondary { transition-duration: .01ms; } } .ds-button-secondary { border-color: var(--chestnut, #4a2415); background: transparent; color: var(--chestnut, #4a2415); }"
+      "css": ".ds-button-secondary { min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-secondary:not(:disabled):hover { transform: translateY(-1px); } .ds-button-secondary:disabled { opacity: .48; cursor: not-allowed; } .ds-button-secondary:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-secondary { transition-duration: .01ms; } } .ds-button-secondary { border-color: var(--chestnut, #4a2415); background: transparent; color: var(--chestnut, #4a2415); }"
     },
     {
       "name": "Approval Button",
       "kind": "button",
       "refersTo": "button-approval",
-      "description": "Moss fill for positive completion: publishing, approving, confirming. The only filled control that is not Chestnut.",
+      "description": "Moss fill for positive completion: publishing, approving, confirming.",
       "html": "<button class=\"ds-button-approve\">Approve 12 photos</button>",
-      "css": ".ds-button-approve { box-sizing: border-box; min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-approve:not(:disabled):hover { transform: translateY(-1px); } .ds-button-approve:disabled { opacity: .48; cursor: not-allowed; } .ds-button-approve:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-approve { transition-duration: .01ms; } } .ds-button-approve { background: var(--moss, #68763d); color: #fff; }"
+      "css": ".ds-button-approve { min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-approve:not(:disabled):hover { transform: translateY(-1px); } .ds-button-approve:disabled { opacity: .48; cursor: not-allowed; } .ds-button-approve:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-approve { transition-duration: .01ms; } } .ds-button-approve { background: var(--moss, #68763d); color: #fff; }"
     },
     {
       "name": "Danger Outline Button",
       "kind": "button",
       "refersTo": "button-danger-outline",
-      "description": "Destructive intent stays an outline, never a fill, so refusal and loss read as deliberate rather than inviting.",
+      "description": "Danger outline introduces a destructive action; its final confirmation uses a Danger fill.",
       "html": "<button class=\"ds-button-danger\">Disable printed entry</button>",
-      "css": ".ds-button-danger { box-sizing: border-box; min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-danger:not(:disabled):hover { transform: translateY(-1px); } .ds-button-danger:disabled { opacity: .48; cursor: not-allowed; } .ds-button-danger:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-danger { transition-duration: .01ms; } } .ds-button-danger { border-color: var(--danger, #b54033); background: transparent; color: var(--danger, #b54033); }"
+      "css": ".ds-button-danger { min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-danger:not(:disabled):hover { transform: translateY(-1px); } .ds-button-danger:disabled { opacity: .48; cursor: not-allowed; } .ds-button-danger:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-danger { transition-duration: .01ms; } } .ds-button-danger { border-color: var(--danger, #b54033); background: transparent; color: var(--danger, #b54033); }"
     },
     {
       "name": "Text Field",
@@ -660,7 +708,7 @@
       "refersTo": "input",
       "description": "A 48px field on the near-white Field plane. The input inherits DM Sans at 400; only its label carries weight. There is no hover treatment.",
       "html": "<label class=\"ds-field\"><span>Event name</span><input value=\"Maya &amp; Theo\" aria-label=\"Event name\"></label>",
-      "css": ".ds-field { box-sizing: border-box; width: min(420px, 100%); display: grid; gap: 8px; color: var(--ink, #2b1d17); font: 600 16px \"DM Sans\", sans-serif; } .ds-field input { box-sizing: border-box; width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border, #d9cec2); border-radius: 7px; background: var(--field, #fffdf8); color: var(--ink, #2b1d17); font: 400 16px \"DM Sans\", sans-serif; } .ds-field input:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } .ds-field input[aria-invalid=\"true\"] { border-color: var(--danger, #b54033); box-shadow: 0 0 0 2px rgb(181 64 51 / 10%); }"
+      "css": ".ds-field { width: min(420px, 100%); display: grid; gap: 8px; color: var(--ink, #2b1d17); font: 600 16px \"DM Sans\", sans-serif; } .ds-field input { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border, #d9cec2); border-radius: 7px; background: var(--field, #fffdf8); color: var(--ink, #2b1d17); font: 400 16px \"DM Sans\", sans-serif; } .ds-field input:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } .ds-field input[aria-invalid=\"true\"] { border-color: var(--danger, #b54033); box-shadow: 0 0 0 2px rgb(181 64 51 / 10%); }"
     },
     {
       "name": "Paper Card",
@@ -668,7 +716,7 @@
       "refersTo": "paper-card",
       "description": "Held paper: Paper over Parchment, one warm rule, and the only shadow ordinary product panels get. 40px on desktop, 28px by 20px on phones.",
       "html": "<article class=\"ds-paper-card\"><p class=\"ds-paper-card__label\">EVENT STATUS</p><h3>Ready for guests</h3><p>The printed event QR and schedule are prepared.</p></article>",
-      "css": ".ds-paper-card { box-sizing: border-box; width: min(420px, 100%); padding: 40px; border: 1px solid var(--border, #d9cec2); border-radius: 12px; background: var(--paper, #fffaf3); color: var(--ink, #2b1d17); box-shadow: 0 18px 50px rgb(74 36 21 / 5%); font-family: \"DM Sans\", sans-serif; } @media (max-width: 760px) { .ds-paper-card { padding: 28px 20px; } } .ds-paper-card__label { margin: 0 0 10px; color: var(--chestnut, #4a2415); font-size: 12px; font-weight: 600; letter-spacing: .13em; } .ds-paper-card h3 { margin: 0; font: 700 26px/1.12 Manrope, sans-serif; letter-spacing: -.035em; } .ds-paper-card p:last-child { margin: 12px 0 0; color: var(--muted, #766c70); line-height: 1.6; }"
+      "css": ".ds-paper-card { width: min(420px, 100%); padding: 40px; border: 1px solid var(--border, #d9cec2); border-radius: 12px; background: var(--paper, #fffaf3); color: var(--ink, #2b1d17); box-shadow: 0 18px 50px rgb(74 36 21 / 5%); font-family: \"DM Sans\", sans-serif; } @media (max-width: 760px) { .ds-paper-card { padding: 28px 20px; } } .ds-paper-card__label { margin: 0 0 10px; color: var(--chestnut, #4a2415); font-size: 12px; font-weight: 600; letter-spacing: .13em; } .ds-paper-card h3 { margin: 0; font: 700 1.6rem/1.04 Manrope, sans-serif; letter-spacing: -.04em; } .ds-paper-card p:last-child { margin: 12px 0 0; color: var(--muted, #766c70); line-height: 1.6; }"
     },
     {
       "name": "Completion Status",
@@ -687,36 +735,52 @@
       "css": ".ds-status-pending { width: fit-content; padding: 6px 10px; display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; background: var(--denim-soft, #dde7f0); color: var(--chestnut, #4a2415); font: 600 12px \"DM Sans\", sans-serif; font-style: normal; text-transform: capitalize; } .ds-status-pending svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; }"
     },
     {
-      "name": "Public Header",
+      "name": "Landing Header",
       "kind": "nav",
-      "refersTo": "public-header",
-      "description": "An opaque Paper bar, 88px tall, brand at one edge and the ordered row navigate | return | act at the other. Never translucent, never blurred.",
+      "refersTo": "landing-header",
+      "description": "The opaque sticky landing header; its Sign in and short Create exits stay visible on phones.",
       "html": "<header class=\"ds-public-header\"><a class=\"ds-brand\" href=\"#\" aria-label=\"Candidary home\"><span class=\"ds-brand__mark\" aria-hidden=\"true\"><i></i><i></i><i></i></span><span>Candidary</span></a><nav class=\"ds-site-nav\" aria-label=\"Primary\"><a class=\"ds-site-nav__link\" href=\"#\">How it works</a><span class=\"ds-signin\"><span class=\"ds-signin__rule\" aria-hidden=\"true\"></span><a class=\"ds-signin__link\" href=\"#\">Sign in</a></span><a class=\"ds-header-cta\" href=\"#\"><span class=\"ds-header-cta__long\">Create an event</span><span class=\"ds-header-cta__short\">Create</span></a></nav></header>",
-      "css": ".ds-public-header { box-sizing: border-box; width: 100%; min-height: 88px; padding: 0 5vw; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border, #d9cec2); background: var(--paper, #fffaf3); color: var(--ink, #2b1d17); font-family: \"DM Sans\", sans-serif; } .ds-brand { min-height: 44px; display: inline-flex; align-items: center; gap: 11px; color: var(--chestnut, #4a2415); font: 700 21.6px Manrope, sans-serif; letter-spacing: -.035em; text-decoration: none; white-space: nowrap; } .ds-brand__mark { width: 28px; height: 27px; flex: 0 0 28px; display: flex; align-items: flex-end; justify-content: center; gap: 2px; transform: rotate(-3deg); } .ds-brand__mark i { width: 7px; display: block; border-radius: 5px 5px 2px 2px; background: var(--denim, #3f6d95); } .ds-brand__mark i:nth-child(1) { height: 15px; transform: rotate(-14deg); } .ds-brand__mark i:nth-child(2) { height: 25px; background: var(--chestnut, #4a2415); } .ds-brand__mark i:nth-child(3) { height: 17px; transform: rotate(12deg); } .ds-site-nav { display: flex; align-items: center; gap: 16px; } .ds-site-nav__link { min-height: 44px; padding: 0 13px; display: inline-flex; align-items: center; border-radius: 9px; color: var(--ink, #2b1d17); font-size: .9375rem; font-weight: 600; text-decoration: none; white-space: nowrap; transition: background 180ms, color 180ms; } .ds-site-nav__link:hover { background: #f2eadf; color: var(--chestnut, #4a2415); } .ds-signin { display: flex; align-items: center; gap: 16px; } .ds-signin__rule { width: 1px; height: 22px; flex: 0 0 1px; background: var(--border, #d9cec2); } .ds-signin__link { min-height: 44px; padding: 0 2px; display: inline-flex; align-items: center; color: var(--muted, #766c70); font-size: .9375rem; font-weight: 600; text-decoration: none; white-space: nowrap; } .ds-header-cta { min-height: 44px; padding: 11px 18px; display: inline-flex; align-items: center; border: 1px solid var(--chestnut, #4a2415); border-radius: 8px; color: var(--chestnut, #4a2415); font-size: .9375rem; font-weight: 600; text-decoration: none; white-space: nowrap; transition: background 180ms, color 180ms; } .ds-header-cta:hover { background: var(--chestnut, #4a2415); color: var(--paper, #fffaf3); } .ds-header-cta__short { display: none; } .ds-public-header a:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (max-width: 760px) { .ds-public-header { min-height: 70px; padding: 0 20px; } .ds-brand { font-size: 16.8px; } .ds-brand__mark { width: 23px; flex-basis: 23px; transform: scale(.8); transform-origin: left center; } .ds-site-nav { gap: 10px; } .ds-site-nav__link { display: none; } .ds-signin__rule { display: none; } .ds-header-cta { padding: 11px 15px; } .ds-header-cta__long { display: none; } .ds-header-cta__short { display: inline; } }"
+      "css": ".ds-public-header { width: 100%; min-height: 88px; padding: 0 5vw; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border, #d9cec2); background: var(--paper, #fffaf3); color: var(--ink, #2b1d17); font-family: \"DM Sans\", sans-serif; } .ds-brand { min-height: 44px; display: inline-flex; align-items: center; gap: 11px; color: var(--chestnut, #4a2415); font: 700 21.6px Manrope, sans-serif; letter-spacing: -.035em; text-decoration: none; white-space: nowrap; } .ds-brand__mark { width: 28px; height: 27px; flex: 0 0 28px; display: flex; align-items: flex-end; justify-content: center; gap: 2px; transform: rotate(-3deg); } .ds-brand__mark i { width: 7px; display: block; border-radius: 5px 5px 2px 2px; background: var(--denim, #3f6d95); } .ds-brand__mark i:nth-child(1) { height: 15px; transform: rotate(-14deg); } .ds-brand__mark i:nth-child(2) { height: 25px; background: var(--chestnut, #4a2415); } .ds-brand__mark i:nth-child(3) { height: 17px; transform: rotate(12deg); } .ds-site-nav { display: flex; align-items: center; gap: 16px; } .ds-site-nav__link { min-height: 44px; padding: 0 13px; display: inline-flex; align-items: center; border-radius: 9px; color: var(--ink, #2b1d17); font-size: .9375rem; font-weight: 600; text-decoration: none; white-space: nowrap; transition: background 180ms, color 180ms; } .ds-site-nav__link:hover { background: #f2eadf; color: var(--chestnut, #4a2415); } .ds-signin { display: flex; align-items: center; gap: 16px; } .ds-signin__rule { width: 1px; height: 22px; flex: 0 0 1px; background: var(--border, #d9cec2); } .ds-signin__link { min-height: 44px; padding: 0 2px; display: inline-flex; align-items: center; color: var(--muted, #766c70); font-size: .9375rem; font-weight: 600; text-decoration: none; white-space: nowrap; } .ds-header-cta { min-height: 44px; padding: 11px 18px; display: inline-flex; align-items: center; border: 1px solid var(--chestnut, #4a2415); border-radius: 8px; color: var(--chestnut, #4a2415); font-size: .9375rem; font-weight: 600; text-decoration: none; white-space: nowrap; transition: background 180ms, color 180ms; } .ds-header-cta:hover { background: var(--chestnut, #4a2415); color: var(--paper, #fffaf3); } .ds-header-cta__short { display: none; } .ds-public-header a:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (max-width: 760px) { .ds-public-header { min-height: 70px; padding: 0 20px; } .ds-brand { font-size: 16.8px; } .ds-brand__mark { width: 23px; flex-basis: 23px; transform: scale(.8); transform-origin: left center; } .ds-site-nav { gap: 10px; } .ds-site-nav__link { display: none; } .ds-signin__rule { display: none; } .ds-header-cta { padding: 11px 15px; } .ds-header-cta__long { display: none; } .ds-header-cta__short { display: inline; } } @media (max-width: 760px) { .ds-public-header { min-height: 70px; padding: 0 20px; gap: 12px; } .ds-signin__link { font-size: .875rem; } }"
     },
     {
-      "name": "Manager Navigation Item",
+      "name": "Manager Navigation",
       "kind": "nav",
       "refersTo": "manager-nav-active",
-      "description": "The active destination in the 184px rail at 1101px and up: Denim Soft ground, Chestnut label, count at the far edge. Below that tier it stacks to 52px and stays labelled.",
-      "html": "<button class=\"ds-manager-nav-item\" aria-current=\"page\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 4h16v16H4z\"></path><circle cx=\"9\" cy=\"9\" r=\"2\"></circle><path d=\"m20 15-4-4L7 20\"></path></svg><span>Intake</span><strong>24</strong></button>",
-      "css": ".ds-manager-nav-item { box-sizing: border-box; min-width: 184px; min-height: 46px; padding: 10px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 6px; background: var(--denim-soft, #dde7f0); color: var(--chestnut, #4a2415); font: 600 14px \"DM Sans\", sans-serif; text-align: left; cursor: pointer; } .ds-manager-nav-item svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; } .ds-manager-nav-item strong { min-width: 20px; height: 20px; margin-left: auto; padding: 0 5px; display: grid; place-items: center; border-radius: 999px; background: var(--chestnut, #4a2415); color: #fff; font-size: 12px; } .ds-manager-nav-item:hover { background: color-mix(in srgb, var(--denim-soft, #dde7f0) 74%, var(--denim, #3f6d95)); } .ds-manager-nav-item:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (max-width: 1100px) { .ds-manager-nav-item { min-width: 0; min-height: 52px; flex-direction: column; gap: 4px; text-align: center; } .ds-manager-nav-item strong { margin-left: 0; } }"
+      "description": "The labelled Manager rail and an expanded native disclosure specimen for its phone destination list. The application uses an aria-expanded button for that disclosure.",
+      "html": "<nav class=\"ds-manager-nav\" aria-label=\"Event management\"><span class=\"ds-manager-brand\">Candidary</span><details class=\"ds-manager-phone\"><summary>Gallery <span aria-hidden=\"true\">⌄</span></summary><div class=\"ds-manager-menu\"><button class=\"ds-manager-nav-item\">Overview</button><button class=\"ds-manager-nav-item\">RSVP</button><button class=\"ds-manager-nav-item ds-manager-nav-item--active\" aria-current=\"page\">Gallery</button><button class=\"ds-manager-nav-item\">Guestbook <strong>24</strong></button><button class=\"ds-manager-nav-item\">Share</button><button class=\"ds-manager-nav-item\">Settings</button></div></details><div class=\"ds-manager-rail\"><button class=\"ds-manager-nav-item\">Overview</button><button class=\"ds-manager-nav-item\">RSVP</button><button class=\"ds-manager-nav-item ds-manager-nav-item--active\" aria-current=\"page\">Gallery</button><button class=\"ds-manager-nav-item\">Guestbook <strong>24</strong></button><button class=\"ds-manager-nav-item\">Share</button><button class=\"ds-manager-nav-item\">Settings</button></div></nav>",
+      "css": ".ds-manager-nav { width: 184px; padding: 28px 15px; background: #f2eadf; color: var(--ink, #2b1d17); font-family: \"DM Sans\", sans-serif; border-right: 1px solid var(--border, #d9cec2); } .ds-manager-brand { min-height: 52px; display: flex; align-items: center; font: 700 1.05rem Manrope, sans-serif; color: var(--chestnut, #4a2415); } .ds-manager-rail { display: grid; gap: 5px; margin-top: 60px; } .ds-manager-phone { display: none; } .ds-manager-nav-item { width: 100%; min-height: 46px; padding: 10px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 6px; background: transparent; color: var(--ink, #2b1d17); font: 400 .875rem/1 \"DM Sans\", sans-serif; text-align: left; cursor: pointer; } .ds-manager-nav-item--active { background: var(--denim-soft, #dde7f0); color: var(--chestnut, #4a2415); font-weight: 600; } .ds-manager-nav-item:not(.ds-manager-nav-item--active):hover { background: rgb(221 231 240 / 45%); color: var(--chestnut, #4a2415); } .ds-manager-nav-item:focus-visible, .ds-manager-phone summary:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } .ds-manager-nav-item strong { min-width: 20px; min-height: 20px; margin-left: auto; padding: 0 5px; display: grid; place-items: center; border-radius: 999px; background: var(--chestnut, #4a2415); color: #fff; font-size: .75rem; } @media (min-width: 761px) and (max-width: 1100px) { .ds-manager-nav { width: 104px; padding: 20px 8px; } .ds-manager-rail { margin-top: 28px; } .ds-manager-nav-item { min-height: 52px; padding: 7px 2px 8px; flex-direction: column; text-align: center; gap: 4px; } .ds-manager-nav-item strong { margin-left: 0; } } @media (max-width: 760px) { .ds-manager-nav { position: relative; width: 100%; padding: 0 12px; display: flex; justify-content: space-between; align-items: center; border-right: 0; border-bottom: 1px solid var(--border, #d9cec2); } .ds-manager-phone { display: block; } .ds-manager-rail { display: none; } .ds-manager-phone summary { min-height: 44px; margin: 4px 0; padding: 8px 10px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--border, #d9cec2); border-radius: 7px; background: var(--paper, #fffaf3); color: var(--chestnut, #4a2415); font-size: .875rem; font-weight: 600; line-height: 1.3; list-style: none; cursor: pointer; } .ds-manager-phone summary::-webkit-details-marker { display: none; } .ds-manager-menu { position: absolute; top: calc(100% + 8px); left: 12px; right: 12px; z-index: 1; max-height: calc(100svh - 77px); overflow-y: auto; overscroll-behavior: contain; padding: 8px; display: grid; gap: 4px; border: 1px solid var(--border, #d9cec2); border-radius: 8px; background: var(--paper, #fffaf3); } .ds-manager-nav-item { min-height: 48px; padding: 10px 12px; gap: 10px; line-height: 1.3; } .ds-manager-nav-item:not(.ds-manager-nav-item--active):hover { background: #faf6ee; } .ds-manager-nav-item:focus-visible, .ds-manager-phone summary:focus-visible { outline-offset: -3px; } }"
     },
     {
       "name": "Guest Event Hero",
       "kind": "custom",
       "refersTo": "event-hero-default",
-      "description": "The signature bridge between imagery and state. A cover fills the frame, a scrim protects the copy, and the welcome message is the heading while the event name and date sit above it as the small line.",
+      "description": "The default no-cover event hero and its localized overlay. The enclosing desktop guest frame owns the radius and shadow; this hero-only specimen omits that frame.",
       "html": "<section class=\"ds-event-hero\"><span class=\"ds-event-hero__scrim\" aria-hidden=\"true\"></span><div class=\"ds-event-hero__copy\"><p class=\"ds-event-hero__event\">Maya &amp; Theo <span aria-hidden=\"true\">·</span> September 19, 2026</p><h1 class=\"ds-event-hero__welcome\">We’re so glad you’re here.</h1></div></section>",
-      "css": ".ds-event-hero { box-sizing: border-box; position: relative; isolation: isolate; width: min(620px, 100%); min-height: 218px; padding: 26px 22px 24px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; border-radius: 25px; background: linear-gradient(145deg, #634134 0%, #a06e5a 53%, #d98b6a 100%); color: #fff; box-shadow: 0 22px 70px rgb(54 37 30 / 13%); font-family: \"DM Sans\", sans-serif; } .ds-event-hero__scrim { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgb(31 15 9 / 10%), rgb(31 15 9 / 52%)); } .ds-event-hero__copy { position: relative; z-index: 1; width: 100%; } .ds-event-hero__event { margin: 0 0 7px; font-size: .72rem; font-weight: 700; letter-spacing: .11em; line-height: 1.35; text-transform: uppercase; } .ds-event-hero__welcome { max-width: 520px; margin: 0; font-family: Manrope, sans-serif; font-size: clamp(1.9rem, 8vw, 3.1rem); font-weight: 700; line-height: 1.05; letter-spacing: -.04em; text-wrap: balance; overflow-wrap: anywhere; } @media (min-width: 700px) and (min-height: 760px) { .ds-event-hero { min-height: 265px; padding: 38px 40px 34px; } }"
+      "css": ".ds-event-hero { position: relative; isolation: isolate; width: min(620px, 100%); min-height: 218px; padding: 26px 22px 24px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; background: linear-gradient(145deg, #634134 0%, #a06e5a 53%, #d98b6a 100%); color: #fff; font-family: \"DM Sans\", sans-serif; } .ds-event-hero__scrim { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgb(31 15 9 / 10%), rgb(31 15 9 / 52%)); } .ds-event-hero__copy { position: relative; z-index: 1; width: 100%; } .ds-event-hero__event { margin: 0 0 7px; font-size: .72rem; font-weight: 700; letter-spacing: .11em; line-height: 1.35; text-transform: uppercase; } .ds-event-hero__welcome { max-width: 520px; margin: 0; font-family: Manrope, sans-serif; font-size: clamp(1.9rem, 8vw, 3.1rem); font-weight: 700; line-height: 1.05; letter-spacing: -.04em; text-wrap: balance; overflow-wrap: anywhere; } @media (min-width: 700px) and (min-height: 760px) { .ds-event-hero { min-height: 265px; padding: 38px 40px 34px; } }"
     },
     {
       "name": "RSVP Person Card",
       "kind": "custom",
       "refersTo": "rsvp-person-card",
-      "description": "One named invitee, one binary attendance choice. A themed fieldset with no ground of its own; the checked option thickens its border to 2px rather than relying on the radio alone.",
+      "description": "A transparent per-person fieldset inside the raised RSVP card, with textual attendance choices and an explicit selected border.",
       "html": "<fieldset class=\"ds-rsvp-person\"><legend>Avery Perkins</legend><div class=\"ds-rsvp-attendance\"><label><input type=\"radio\" name=\"ds-rsvp-demo\" checked><span>Attending</span></label><label><input type=\"radio\" name=\"ds-rsvp-demo\"><span>Not attending</span></label></div></fieldset>",
-      "css": ".ds-rsvp-person { box-sizing: border-box; width: min(420px, 100%); min-width: 0; margin: 0; padding: 15px 13px; border: 1px solid var(--event-border, #e3dcd8); border-radius: var(--event-card-radius, 10px); background: var(--event-raised-surface, #fff); color: var(--event-text, #352924); font-family: \"DM Sans\", sans-serif; } .ds-rsvp-person legend { max-width: 100%; padding: 0 5px; color: var(--event-page-text, #2b1d17); font-family: Manrope, sans-serif; font-size: 16px; font-weight: 800; overflow-wrap: anywhere; } .ds-rsvp-attendance { margin-top: 5px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } .ds-rsvp-attendance label { min-width: 0; min-height: 44px; padding: 9px 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--event-input-border, #928a84); border-radius: var(--event-input-radius, 11px); background: var(--event-surface, #fffaf3); font-size: 13px; font-weight: 700; cursor: pointer; } .ds-rsvp-attendance label:has(input:checked) { border-width: 2px; border-color: var(--event-primary, #4a2415); } .ds-rsvp-attendance input { width: 20px; height: 20px; flex: 0 0 20px; margin: 0; accent-color: var(--event-primary, #4a2415); } .ds-rsvp-attendance input:focus-visible + span { outline: 2px solid var(--event-focus, #2c5c85); outline-offset: 3px; }"
+      "css": ".ds-rsvp-person { width: min(420px, 100%); min-width: 0; margin: 0; padding: 15px 13px; border: 1px solid var(--event-border, #e3dcd8); border-radius: var(--event-card-radius, 10px); color: var(--event-text, #352924); font-family: \"DM Sans\", sans-serif; } .ds-rsvp-person legend { max-width: 100%; padding: 0 5px; color: var(--event-page-text, #2b1d17); font-family: Manrope, sans-serif; font-size: 16px; font-weight: 800; overflow-wrap: anywhere; } .ds-rsvp-attendance { margin-top: 5px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } .ds-rsvp-attendance label { min-width: 0; min-height: 44px; padding: 9px 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--event-input-border, #928a84); border-radius: var(--event-input-radius, 11px); background: var(--event-surface, #fffaf3); font-size: .82rem; font-weight: 700; cursor: pointer; } .ds-rsvp-attendance label:has(input:checked) { border-width: 2px; border-color: var(--event-primary, #4a2415); } .ds-rsvp-attendance input { width: 20px; height: 20px; flex: 0 0 20px; margin: 0; accent-color: var(--event-primary, #4a2415); } .ds-rsvp-attendance input:focus-visible + span { outline: 3px solid var(--event-focus, #2c5c85); outline-offset: 3px; }"
+    },
+    {
+      "name": "Quiet Button",
+      "kind": "button",
+      "refersTo": "button-quiet",
+      "description": "The existing global quiet action.",
+      "html": "<button class=\"ds-button-quiet\">Edit details</button>",
+      "css": ".ds-button-quiet { min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-quiet:not(:disabled):hover { transform: translateY(-1px); } .ds-button-quiet:disabled { opacity: .48; cursor: not-allowed; } .ds-button-quiet:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-quiet { transition-duration: .01ms; } }  .ds-button-quiet { background: transparent; border-color: transparent; color: var(--chestnut, #4a2415); }"
+    },
+    {
+      "name": "Danger Confirmation Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "The existing global final destructive confirmation.",
+      "html": "<button class=\"ds-button-danger-fill\">Delete event</button>",
+      "css": ".ds-button-danger-fill { min-height: 48px; padding: 12px 20px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; font: 600 16px \"DM Sans\", sans-serif; text-decoration: none; cursor: pointer; transition: background 180ms, color 180ms, border 180ms, transform 180ms; } .ds-button-danger-fill:not(:disabled):hover { transform: translateY(-1px); } .ds-button-danger-fill:disabled { opacity: .48; cursor: not-allowed; } .ds-button-danger-fill:focus-visible { outline: 2px solid var(--focus, #2c5c85); outline-offset: 3px; } @media (prefers-reduced-motion: reduce) { .ds-button-danger-fill { transition-duration: .01ms; } }  .ds-button-danger-fill { background: var(--danger, #b54033); border-color: var(--danger, #b54033); color: var(--paper, #fffaf3); } .ds-button-danger-fill:hover:not(:disabled) { filter: brightness(.94); }"
     }
   ],
   "narrative": {
@@ -748,7 +812,7 @@
       },
       {
         "name": "The Two-Face Rule",
-        "body": "Use only the bundled Manrope and DM Sans families for product UI. A private event may change semantic colors and radii, never typography.",
+        "body": "Headings, prose, and controls use bundled Manrope and DM Sans. Access-link values may use the existing system monospace stack. A private event may change semantic colors and radii, never typography.",
         "section": "typography"
       },
       {
@@ -768,13 +832,13 @@
       },
       {
         "name": "The Labeled Navigation Rule",
-        "body": "Every Manager destination remains visibly named at every width; icon-only navigation is not part of this system.",
+        "body": "Every Manager destination has a visible name in the open phone menu and persistent desktop rails. The closed phone menu names the current section; icon-only navigation is not part of this system.",
         "section": "layout"
       },
       {
         "name": "The Flat-by-Default Rule",
         "body": "Use ground color, surface color, and one-pixel rules to establish structure. Add a shadow only when the element behaves like held paper, a framed event surface, or a physical photograph.",
-        "section": "elevation"
+        "section": "elevation & depth"
       },
       {
         "name": "The Arch and Print Rule",
@@ -783,7 +847,7 @@
       },
       {
         "name": "The No Bubble Drift Rule",
-        "body": "Pills belong to compact statuses, counts, and completion markers. Do not turn navigation, prose, or ordinary cards into floating capsules.",
+        "body": "Pills belong to compact statuses, counts, completion markers, and the implemented audience-fact chips. Do not turn navigation, prose, or ordinary cards into floating capsules.",
         "section": "shapes"
       },
       {
