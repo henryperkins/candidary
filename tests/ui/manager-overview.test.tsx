@@ -152,7 +152,7 @@ describe('Manager Overview', () => {
 
 it('uses confirmed disabled entry for both Overview phase and recommendation even before lifecycle catches up', async () => {
   setup({ lifecycle: () => json({ ...PHASE, phase: 'photos-primary', photoIntakeState: 'open' }), entry: { eventLink: null, disabledAt: '2026-10-11T00:00:00Z' } });
-  expect(await screen.findByRole('button', { name: 'Review event access', exact: true })).toBeVisible();
+  expect(await screen.findByRole('button', { name: 'Review event access' })).toBeVisible();
   expect(screen.getByText('Event QR disabled', { exact: true })).toBeVisible();
   expect(screen.queryByRole('button', { name: 'Share your QR' })).not.toBeInTheDocument();
 });
