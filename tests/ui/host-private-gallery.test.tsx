@@ -1826,7 +1826,7 @@ describe('host private gallery', () => {
     await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
 
     expect(screen.getByRole('button', { name: 'Download all' })).toBeDisabled();
-    expect(screen.getByText('Deliver a photo before preparing the current collection.')).toBeVisible();
+    expect(screen.getByText('When photos arrive, use Exports to download the originals.')).toBeVisible();
     expect(onPrepare).not.toHaveBeenCalled();
   });
 

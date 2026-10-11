@@ -58,7 +58,7 @@ const MANAGER_SECTIONS = [
   // delivered photographs, `Gallery` once a mode with an audience is chosen.
   { name: 'Gallery', heading: 'Library' },
   { name: 'Guestbook', heading: 'Guestbook from the day' },
-  { name: 'Share', heading: 'Share your event' },
+  { name: 'Share', heading: 'Share your link or QR' },
   { name: 'Settings', heading: 'Settings' },
 ] as const;
 
@@ -1054,7 +1054,7 @@ const MANAGER_AXE_FIXTURES: ManagerAxeFixture[] = [((): ManagerAxeFixture => {
       await exportsResponse;
     },
     async ready(page) {
-      await readyHeading(page, 'Share your event');
+      await readyHeading(page, 'Share your link or QR');
       await expect(page.getByText('Event link', { exact: true })).toBeVisible();
       await expect(page.getByRole('button', { name: 'Show full event link' })).toBeVisible();
       await expect(page.getByRole('region', { name: 'Event entry controls' })).toBeVisible();

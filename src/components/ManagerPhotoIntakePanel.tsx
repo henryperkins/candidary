@@ -64,13 +64,15 @@ export function ManagerPhotoIntakePanel({
       : event.photoIntakeRecheckAfterMs !== null
         ? 'Guest uploads are paused for this event and will not open at the scheduled start.'
         : null;
-  return <section className="manager-credential" aria-labelledby="photo-intake-title">
-    <h3 id="photo-intake-title">Guest uploads</h3>
-    <p role="status" aria-live="polite">{pending ? 'Saving guest uploads…' : control.status}</p>
+  return <section className="manager-credential" aria-labelledby="photo-intake-title" data-host-tour-anchor={entryDisabled ? undefined : 'settings'}>
+    <div data-host-tour-anchor={entryDisabled ? 'settings' : undefined} data-host-tour-compact={entryDisabled ? undefined : 'settings'} tabIndex={-1}>
+      <h3 id="photo-intake-title">Guest uploads</h3>
+      <p role="status" aria-live="polite">{pending ? 'Saving guest uploads…' : entryDisabled ? 'The printed event QR was disabled, so guest uploads cannot resume.' : control.status}</p>
+    </div>
     <p>Event start: {eventStart} ({event.eventTimezone}).</p>
     {withheld
       ? <p>{withheld}</p>
-      : <button
+      : !entryDisabled && <button
           type="button"
           className="button button--secondary"
           disabled={pending}

@@ -527,7 +527,7 @@ describe('moving a photo to Trash', () => {
     expect(document.querySelectorAll('[data-gallery-live-host="true"] > .album-undo')).toHaveLength(1);
     if (screen.queryByRole('button', { name: 'Close viewer' })) await user.click(screen.getByRole('button', { name: 'Close viewer' }));
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    expect(await screen.findByRole('heading', { name: 'Share your event' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Share your link or QR' })).toBeVisible();
     expect(undo).toBeInTheDocument();
 
     await user.click(undo);
@@ -618,7 +618,7 @@ describe('moving a photo to Trash', () => {
     await waitFor(() => expect(undo).toHaveFocus());
     if (screen.queryByRole('button', { name: 'Close viewer' })) await user.click(screen.getByRole('button', { name: 'Close viewer' }));
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    const shareHeading = await screen.findByRole('heading', { name: 'Share your event' });
+    const shareHeading = await screen.findByRole('heading', { name: 'Share your link or QR' });
     await user.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(shareHeading).toHaveFocus();
   });

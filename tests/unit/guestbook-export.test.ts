@@ -585,7 +585,7 @@ describe('Manager Guestbook export downloads', () => {
   });
 
   it.each([
-    ['complete', 'Prepare current collection', 'Deliver a photo before preparing the current collection.'],
+    ['complete', 'Prepare current collection', 'When photos arrive, use Exports to download the originals.'],
     ['album', 'Prepare Album ZIP', 'Add a photo to the Album before preparing it.'],
   ] as const)('locally disables a current export only for a trusted zero count', (kind, label, reason) => {
     const props = {

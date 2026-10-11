@@ -103,6 +103,12 @@ describe('manager location paths', () => {
       `/manage/event/${EVENT}?section=gallery&mode=album`,
     );
   });
+  it('preserves explicit Overview returns while bare Manager remains Library', () => {
+    const overview = `/manage/event/${EVENT}?section=overview`;
+    expect(canonicalManagerReturnPath(overview)?.href).toBe(overview);
+    expect(managerHref(EVENT, { section: 'overview' })).toBe(overview);
+    expect(parseManagerLocation('').location).toEqual({ section: 'gallery', mode: 'library' });
+  });
 
   it.each([
     EVENT,

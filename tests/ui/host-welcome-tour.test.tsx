@@ -2,6 +2,7 @@ import { act, cleanup, render, renderHook, screen, waitFor } from '@testing-libr
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useHostWelcomeTour } from '../../src/features/manager/use-host-welcome-tour';
+import type { HostWelcomeContext } from '../../src/features/manager/host-welcome-content';
 import { HostWelcomeTour } from '../../src/features/manager/HostWelcomeTour';
 
 const state = (accountId = 'account-a', status = 'unseen') => ({ accountId, status, version: 1, tourKey: 'host-event-welcome' });
@@ -87,20 +88,20 @@ describe('tour flow', () => {
   it('waits for committed navigation, refuses repeated Next, and restores the current step after refusal', async () => {
     anchors(); const user = userEvent.setup(); const navigate = vi.fn(); const close = vi.fn();
     const props = { location: 'overview', blocked: false, onNavigate: navigate, onClose: close };
-    const view = render(<HostWelcomeTour {...props} />);
+    const view = render(<HostWelcomeTour mode="tools" context={introContext} {...props} />);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: 'Next' }));
     expect(navigate).toHaveBeenCalledWith('rsvp');
     expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument();
-    view.rerender(<HostWelcomeTour {...props} blocked />);
+    view.rerender(<HostWelcomeTour mode="tools" context={introContext} {...props} blocked />);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    view.rerender(<HostWelcomeTour {...props} />);
+    view.rerender(<HostWelcomeTour mode="tools" context={introContext} {...props} />);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Your next task' })).toHaveFocus(), { timeout: 2500 });
     await user.keyboard('{Escape}'); expect(close).toHaveBeenCalledWith('dismissed');
   });
   it('shows retry and exit for missing anchors and yields to another dialog', async () => {
     const user = userEvent.setup();
-    render(<HostWelcomeTour location="overview" blocked={false} onNavigate={vi.fn()} onClose={vi.fn()} />);
+    render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={vi.fn()} onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/This part of the page is not available/)).toBeVisible(), { timeout: 2500 });
     expect(screen.getByRole('button', { name: 'Retry step' })).toBeVisible();
     const other = document.createElement('div'); other.setAttribute('role', 'dialog'); document.body.append(other);
@@ -113,17 +114,19 @@ describe('tour flow', () => {
 
 it('completes all six committed steps and focuses Overview without activating its action', async () => {
   anchors(); const user = userEvent.setup(); const navigate = vi.fn(); const close = vi.fn();
-  const action = document.createElement('button'); action.dataset.hostTourRecommendedAction = ''; document.body.append(action);
+  const action = document.createElement('button'); action.dataset.hostTourRecommendedAction = '';
+  action.getBoundingClientRect = document.querySelector<HTMLElement>('[data-host-tour-anchor="overview-task"]')!.getBoundingClientRect;
+  action.scrollIntoView = vi.fn(); document.body.append(action);
   const activate = vi.fn(); action.onclick = activate;
-  const view = render(<HostWelcomeTour location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
+  const view = render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
   for (const destination of ['rsvp', 'share', 'library', 'library', 'settings']) {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: 'Next' }));
-    view.rerender(<HostWelcomeTour location={destination} blocked={false} onNavigate={navigate} onClose={close} />);
+    view.rerender(<HostWelcomeTour mode="tools" context={introContext} location={destination} blocked={false} onNavigate={navigate} onClose={close} />);
   }
   await waitFor(() => expect(screen.getByRole('button', { name: 'Finish' })).toBeEnabled());
   await user.click(screen.getByRole('button', { name: 'Finish' }));
-  view.rerender(<HostWelcomeTour location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
+  view.rerender(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
   await waitFor(() => expect(close).toHaveBeenCalledWith('completed'));
   view.unmount();
   await waitFor(() => expect(action).toHaveFocus());
@@ -197,13 +200,13 @@ it.each(['Escape', 'Skip tour', 'Close tour'])('restores current destination foc
   anchors(); const user = userEvent.setup(); const navigate = vi.fn();
   const invoker = document.createElement('button'); document.body.append(invoker); invoker.focus();
   const close = vi.fn(() => view.unmount());
-  const view = render(<HostWelcomeTour location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
+  const view = render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
   await user.click(screen.getByRole('button', { name: 'Next' }));
   invoker.remove();
   const destination = document.querySelector<HTMLElement>('[data-host-tour-anchor="rsvp"]')!;
   destination.tabIndex = -1;
-  view.rerender(<HostWelcomeTour location="rsvp" blocked={false} onNavigate={navigate} onClose={close} />);
+  view.rerender(<HostWelcomeTour mode="tools" context={introContext} location="rsvp" blocked={false} onNavigate={navigate} onClose={close} />);
   await waitFor(() => expect(screen.getByRole('heading', { name: 'Your guest list' })).toHaveFocus());
   if (control === 'Escape') await user.keyboard('{Escape}');
   else await user.click(screen.getByRole('button', { name: control }));
@@ -212,28 +215,173 @@ it.each(['Escape', 'Skip tour', 'Close tour'])('restores current destination foc
 });
 
 it.each([false, true])('dismisses a pending tour when another destination commits (blocked=%s)', async blocked => {
-  anchors(); const user = userEvent.setup(); const navigate = vi.fn(); const close = vi.fn();
+  anchors(); const user = userEvent.setup(); const navigate = vi.fn(); const close = vi.fn(() => view.unmount());
   const props = { blocked: false, onNavigate: navigate, onClose: close };
-  const view = render(<HostWelcomeTour {...props} location="overview" />);
+  const view = render(<HostWelcomeTour mode="tools" context={introContext} {...props} location="overview" />);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
   await user.click(screen.getByRole('button', { name: 'Next' }));
   expect(navigate).toHaveBeenCalledWith('rsvp');
-  view.rerender(<HostWelcomeTour {...props} blocked={blocked} location="share" />);
+  view.rerender(<HostWelcomeTour mode="tools" context={introContext} {...props} blocked={blocked} location="share" />);
   await waitFor(() => expect(close).toHaveBeenCalledWith('dismissed'));
   expect(navigate).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(document.querySelector('[data-host-tour-anchor="share-qr"]')).toHaveFocus());
 });
 
 
 it('restores the visible Exports control when exiting its later Library step', async () => {
   anchors(); const user = userEvent.setup(); const navigate = vi.fn();
   const close = vi.fn(() => view.unmount());
-  const view = render(<HostWelcomeTour location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
+  const view = render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
   for (const destination of ['rsvp', 'share', 'library', 'library']) {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: 'Next' }));
-    view.rerender(<HostWelcomeTour location={destination} blocked={false} onNavigate={navigate} onClose={close} />);
+    view.rerender(<HostWelcomeTour mode="tools" context={introContext} location={destination} blocked={false} onNavigate={navigate} onClose={close} />);
   }
   await waitFor(() => expect(screen.getByRole('heading', { name: 'Keep your originals' })).toHaveFocus());
   await user.keyboard('{Escape}');
   await waitFor(() => expect(document.querySelector('[data-host-tour-anchor="exports"]')).toHaveFocus());
+});
+
+
+it('keeps a lost target unavailable until Retry, then recovers without navigating or activating it', async () => {
+  anchors(); const user = userEvent.setup(); const navigate = vi.fn(); const close = vi.fn();
+  render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+  const anchor = document.querySelector<HTMLElement>('[data-host-tour-anchor="overview-task"]')!;
+  anchor.hidden = true;
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry step' })).toBeVisible());
+  anchor.hidden = false;
+  await act(async () => {});
+  expect(screen.getByRole('button', { name: 'Retry step' })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'Retry step' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+  expect(navigate).not.toHaveBeenCalled(); expect(close).not.toHaveBeenCalled();
+});
+
+
+it.each(['Escape', 'Skip tour', 'Close tour'])('visibly restores a connected offscreen invoker on %s without activating it', async control => {
+  anchors(); const user = userEvent.setup(); const navigate = vi.fn();
+  const invoker = document.createElement('button'); document.body.append(invoker);
+  invoker.getBoundingClientRect = () => ({ x: 100, y: 1500, top: 1500, left: 100, right: 300, bottom: 1548, width: 200, height: 48, toJSON() {} });
+  invoker.scrollIntoView = vi.fn(); const activate = vi.fn(); invoker.onclick = activate; invoker.focus();
+  const close = vi.fn(() => view.unmount());
+  const view = render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={navigate} onClose={close} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+  if (control === 'Escape') await user.keyboard('{Escape}');
+  else await user.click(screen.getByRole('button', { name: control }));
+  await waitFor(() => expect(invoker).toHaveFocus());
+  expect(invoker.scrollIntoView).toHaveBeenCalled();
+  expect(activate).not.toHaveBeenCalled(); expect(navigate).not.toHaveBeenCalled(); invoker.remove();
+});
+
+
+it.each(['Escape', 'Skip tour', 'Close tour'])('uses the Overview action when automatic launch has BODY as its invoker on %s', async control => {
+  anchors(); const user = userEvent.setup();
+  const action = document.createElement('button'); action.dataset.hostTourRecommendedAction = '';
+  action.getBoundingClientRect = document.querySelector<HTMLElement>('[data-host-tour-anchor="overview-task"]')!.getBoundingClientRect;
+  action.scrollIntoView = vi.fn(); document.body.append(action);
+  const navigationControl = document.createElement('button');
+  navigationControl.getBoundingClientRect = action.getBoundingClientRect; navigationControl.scrollIntoView = vi.fn();
+  document.body.prepend(navigationControl); document.body.focus();
+  const bodyRect = vi.spyOn(document.body, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, top: 0, left: 0, right: 1024, bottom: 2000, width: 1024, height: 2000, toJSON() {} });
+  const close = vi.fn(() => view.unmount());
+  const view = render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={vi.fn()} onClose={close} />);
+  try {
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+    if (control === 'Escape') await user.keyboard('{Escape}');
+    else await user.click(screen.getByRole('button', { name: control }));
+    await waitFor(() => expect(action).toHaveFocus());
+  } finally { bodyRect.mockRestore(); document.body.removeAttribute('tabindex'); navigationControl.remove(); action.remove(); }
+});
+
+it('automatically chooses intro and explicit replay selects tools without resetting terminal preference', async () => {
+  const { result } = renderHook(() => useHostWelcomeTour({ eventId: 'mode-event', eligible: true }));
+  await waitFor(() => expect(result.current.open).toBe(true));
+  expect(result.current.mode).toBe('intro');
+  act(() => result.current.close('completed'));
+  await waitFor(() => expect(result.current.saveFailed).toBe(false));
+  act(() => result.current.start('tools'));
+  expect(result.current.mode).toBe('tools');
+  act(() => result.current.close('dismissed'));
+  act(() => result.current.start());
+  expect(result.current.mode).toBe('intro');
+});
+
+const introContext: HostWelcomeContext = {
+  lifecycle: { phase: 'photos-primary', rsvpState: 'disabled', photoIntakeState: 'open', guestAccessEnded: false, entryDisabled: false, lifecycleRecheckAfterMs: null },
+  phaseLabel: 'Photo delivery is open', recommendation: { label: 'Open Library', destination: 'library', reason: 'Photo delivery is open.' },
+  eventStartLabel: 'September 19 at 5 PM CDT', namedGuests: null, photos: 2, entryAvailability: 'available',
+};
+it('keeps an introduction and draft when guarded handoff refuses', async () => {
+  anchors(); const user = userEvent.setup(); const navigate = vi.fn(); const close = vi.fn();
+  const draft = document.createElement('input'); draft.value = 'Unsaved name'; document.body.append(draft);
+  const view = render(<HostWelcomeTour mode="intro" context={introContext} location="overview" blocked={false} onNavigate={vi.fn()} onNavigateTask={navigate} onClose={close} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Go to Library' })).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: 'Go to Library' }));
+  expect(navigate).toHaveBeenCalledWith('library');
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Collect photos privately' })).toBeVisible(), { timeout: 2500 });
+  expect(close).not.toHaveBeenCalled(); expect(draft.value).toBe('Unsaved name');
+  view.unmount(); draft.remove();
+});
+it('revalidates a stale intro destination and waits for a useful committed target', async () => {
+  anchors(); const user = userEvent.setup(); const close = vi.fn(); const navigate = vi.fn();
+  const props = { blocked: false, onNavigate: vi.fn(), onNavigateTask: navigate, onClose: close };
+  const view = render(<HostWelcomeTour mode="intro" context={introContext} location="overview" {...props} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Go to Library' })).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: 'Go to Library' }));
+  const ended: HostWelcomeContext = { ...introContext, lifecycle: { ...introContext.lifecycle!, guestAccessEnded: true }, recommendation: { label: 'Retrieve originals', reason: 'Guest access has ended.', destination: 'originals' } };
+  view.rerender(<HostWelcomeTour mode="intro" context={ended} location="library" {...props} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Go to Exports' })).toBeVisible());
+  expect(close).not.toHaveBeenCalled(); expect(navigate).toHaveBeenCalledTimes(1);
+});
+
+
+it('describes the one-screen introduction with the confirmed task and gives its focused heading progress only', () => {
+  anchors();
+  render(<HostWelcomeTour mode="intro" context={introContext} location="overview" blocked={false} onNavigate={vi.fn()} onClose={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Collect photos privately' });
+  expect(dialog).toHaveAccessibleDescription(/^Introduction .*Photo delivery is open\. Open Library: Photo delivery is open\./);
+  expect(dialog).toHaveAttribute('aria-modal', 'true');
+  const heading = screen.getByRole('heading', { name: 'Collect photos privately' });
+  expect(heading).toHaveFocus();
+  expect(heading).toHaveAccessibleDescription('Introduction');
+  expect(screen.queryByText(/Step \d of/)).not.toBeInTheDocument();
+});
+
+it('updates the tools description on committed Next and Back while containing keyboard focus', async () => {
+  anchors(); const user = userEvent.setup(); const navigate = vi.fn();
+  const props = { mode: 'tools' as const, context: introContext, blocked: false, onNavigate: navigate, onClose: vi.fn() };
+  const view = render(<HostWelcomeTour {...props} location="overview" />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+  expect(screen.getByRole('dialog')).toHaveAccessibleDescription(/^Step 1 of 6 Photo delivery is open\./);
+  expect(screen.getByRole('heading', { name: 'Your next task' })).toHaveAccessibleDescription('Step 1 of 6');
+  await user.tab({ shift: true });
+  expect(screen.getByRole('button', { name: 'Next' })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('button', { name: 'Close tour' })).toHaveFocus();
+  await user.click(screen.getByRole('button', { name: 'Next' }));
+  view.rerender(<HostWelcomeTour {...props} location="rsvp" />);
+  const title = await screen.findByRole('heading', { name: 'Your guest list' });
+  await waitFor(() => expect(title).toHaveFocus());
+  expect(screen.getByRole('dialog')).toHaveAccessibleDescription(/^Step 2 of 6 Review your guest list/);
+  expect(title).toHaveAccessibleDescription('Step 2 of 6');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Back' })).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: 'Back' }));
+  view.rerender(<HostWelcomeTour {...props} location="overview" />);
+  await waitFor(() => expect(screen.getByRole('heading', { name: 'Your next task' })).toHaveFocus());
+  expect(screen.getByRole('dialog')).toHaveAccessibleDescription(/^Step 1 of 6 Photo delivery is open\./);
+  expect(screen.getByRole('heading', { name: 'Your next task' })).toHaveAccessibleDescription('Step 1 of 6');
+});
+
+it('keeps missing-target and failed-preference recovery in one status inside the active dialog', async () => {
+  const user = userEvent.setup(); const retrySave = vi.fn();
+  render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} saveFailed onRetrySave={retrySave} onNavigate={vi.fn()} onClose={vi.fn()} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry step' })).toBeVisible(), { timeout: 2500 });
+  const dialog = screen.getByRole('dialog');
+  const status = screen.getByRole('status');
+  expect(dialog).toContainElement(status);
+  expect(status).toHaveTextContent('This part of the page is not available yet.');
+  expect(status).toHaveTextContent('Your tour preference could not be saved.');
+  expect(screen.getByRole('heading', { name: 'Your next task' })).toHaveFocus();
+  await user.click(screen.getByRole('button', { name: 'Retry saving tour preference' }));
+  expect(retrySave).toHaveBeenCalledOnce();
 });

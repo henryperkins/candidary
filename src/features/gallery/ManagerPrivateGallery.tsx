@@ -40,6 +40,7 @@ const SEARCH_MAX_CODE_POINTS = 120;
 interface ManagerPrivateGalleryProps {
   event: EventView;
   eventId: string;
+  emptyMessage?: string;
   active?: boolean;
   suspended?: boolean;
   readsPaused?: boolean;
@@ -189,6 +190,7 @@ function connectedPresentationFallback(target: HTMLElement | null): HTMLElement 
 export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, ManagerPrivateGalleryProps>(function ManagerPrivateGallery({
   event,
   eventId,
+  emptyMessage,
   active = true,
   suspended = false,
   readsPaused = false,
@@ -1216,8 +1218,8 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
       </div>;
     } else {
       content = <div className="empty-state">
-        <h3 ref={emptyRef} tabIndex={-1}>No photos have been delivered yet.</h3>
-        <p>Photos added by you or your guests appear here.</p>
+        <h3 ref={emptyRef} tabIndex={-1}>No photos yet.</h3>
+        <p>{emptyMessage ?? "Photos added by you or your guests appear here."}</p>
       </div>;
     }
   } else {

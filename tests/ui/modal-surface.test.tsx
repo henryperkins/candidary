@@ -13,12 +13,14 @@ function ModalHarness({
   backdrop = true,
   inertExceptionRef,
   actions = true,
+  describedBy,
 }: {
   onClose?: () => void;
   escape?: boolean;
   backdrop?: boolean;
   inertExceptionRef?: React.RefObject<HTMLElement | null>;
   actions?: boolean;
+  describedBy?: string;
 }) {
   const [open, setOpen] = useState(true);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -27,6 +29,7 @@ function ModalHarness({
     <button ref={returnFocusRef}>Open modal</button>
     {open && <ModalSurface
       labelledBy="modal-surface-title"
+      describedBy={describedBy}
       initialFocusRef={titleRef}
       onRequestClose={() => { onClose(); setOpen(false); }}
       closePolicy={{ escape, backdrop }}
@@ -35,6 +38,7 @@ function ModalHarness({
     >
       <div className="test-modal">
         <h2 id="modal-surface-title" ref={titleRef} tabIndex={-1}>Modal title</h2>
+        <p id="modal-surface-description">Context for the current action.</p>
         {actions && <>
           <button>First action</button>
           <button>Last action</button>
@@ -55,6 +59,7 @@ describe('ModalSurface', () => {
     render(<ModalHarness onClose={onClose} />);
 
     const dialog = screen.getByRole('dialog', { name: 'Modal title' });
+    expect(dialog).not.toHaveAttribute('aria-describedby');
     expect(screen.getByRole('heading', { name: 'Modal title' })).toHaveFocus();
     expect(background).toHaveAttribute('inert');
     expect(document.body.style.overflow).toBe('hidden');
@@ -146,4 +151,13 @@ it('hands ownership to a custom portal dialog while the tour suspends', () => {
   expect(background).not.toHaveAttribute('inert');
   expect(document.body.style.overflow).toBe('');
   background.remove();
+});
+
+
+it('optionally associates a dialog description without changing its name or modal ownership', () => {
+  render(<ModalHarness describedBy="modal-surface-description" />);
+  const dialog = screen.getByRole('dialog', { name: 'Modal title' });
+  expect(dialog).toHaveAccessibleDescription('Context for the current action.');
+  expect(dialog).toHaveAttribute('aria-modal', 'true');
+  expect(screen.getByRole('heading', { name: 'Modal title' })).toHaveFocus();
 });

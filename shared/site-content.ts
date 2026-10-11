@@ -33,14 +33,14 @@ export interface SiteLegalPage {
 export const SITE_NAME = 'Candidary';
 export const SITE_ORIGIN = 'https://candidary.app';
 export const SITE_BLURB =
-  'One private QR for guest RSVP and original photo delivery at weddings and large events—no app or guest account.';
+  'Create a private event and share its link or QR code. Guests send original photos without an app or account. Photos arrive privately; you choose what to share.';
 
 export const LANDING_HERO = {
   label: 'For weddings & private events',
   // Two halves rather than one sentence: the page breaks the line between them,
   // and a markdown heading joins them back with a space.
   headline: ['Gather the moments', 'you didn’t see.'],
-  lede: 'One private QR takes guests from RSVP to photo delivery—no app or guest account. Every original reaches you privately; you choose what gets shared.',
+  lede: 'Create a private event and share its link or QR code. Guests send original photos without an app or account. Photos arrive privately; you choose what to share.',
 } as const;
 
 export const LANDING_WORKFLOW = {
@@ -50,10 +50,10 @@ export const LANDING_WORKFLOW = {
 
 /** An illustrative event, kept separate from real guest or host state. */
 export const LANDING_DEMO = {
-  label: 'Interactive example',
+  label: 'Interactive example · RSVP is optional',
   controlsLabel: 'Explore an example event',
   stages: [
-    { id: 'before', label: 'Before', title: 'The invitation.', caption: 'Guests scan the invitation and reply for their household.' },
+    { id: 'before', label: 'Before', title: 'The invitation.', caption: 'If you use optional RSVPs, guests scan the invitation and reply for their household.' },
     { id: 'during', label: 'During', title: 'The celebration.', caption: 'The same QR opens photo delivery when your event begins.' },
     { id: 'after', label: 'After', title: 'Yours to keep.', caption: 'Originals arrive privately. You choose what gets shared.' },
   ],
@@ -89,8 +89,8 @@ export const LANDING_DEMO = {
 
 export const LANDING_JOURNEY = [
   {
-    title: 'Invite and RSVP',
-    body: 'Add one private QR to the invitation. Guests find their household by the name on the invitation and reply without an account.',
+    title: 'Invite and RSVP (optional)',
+    body: 'You send invitations or share the guest link or QR. If you want attendance replies, set up your guest list; RSVP is optional for photo delivery.',
   },
   {
     title: 'Scan again and send',

@@ -9,7 +9,10 @@ import {
   MAX_COVER_UPLOAD_BYTES,
 } from '../../shared/constants';
 import { CREATE_INTRO } from '../../shared/site-content';
-import type { EventThemePresetId } from '../../shared/contracts';
+import { EVENT_START_MIGRATION_SENTINEL } from '../../shared/rsvp';
+import { formatEventDateTime, TIME_UNAVAILABLE } from '../app/event-date-time';
+import { getCreationReceiptCopy, OPTIONAL_RSVP_HELP } from '../features/manager/host-welcome-content';
+import type { EventThemePresetId, PhotoIntakeState } from '../../shared/contracts';
 import { EVENT_THEME_VERSION } from '../../shared/event-theme';
 import { PageHeader } from '../components/Brand';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
@@ -44,6 +47,7 @@ interface Created {
     eventStartAt: string;
     eventStartTime: string;
     eventTimezone: string;
+    photoIntakeState?: PhotoIntakeState;
   };
   // The permanent printed credential. It never changes for the life of the
   // event, which is what lets a host print it on invitations and signs.
@@ -82,19 +86,6 @@ function knownTimeZones(): string[] {
   } catch {
     return [];
   }
-}
-
-// Always the event's own zone, never this device's: a host in another zone must
-// read back the start they actually chose, not the one their laptop would show.
-function formatEventStart(instant: string, timeZone: string): string {
-  const at = new Date(instant);
-  const date = new Intl.DateTimeFormat('en-US', {
-    month: 'long', day: 'numeric', year: 'numeric', timeZone,
-  }).format(at);
-  const time = new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric', minute: '2-digit', timeZone,
-  }).format(at);
-  return `${date} at ${time}`;
 }
 
 export function CreatePage() {
@@ -154,8 +145,15 @@ export function CreatePage() {
     } finally { setBusy(false); }
   }
 
+  const eventStartLabel = created && created.event.eventStartAt !== EVENT_START_MIGRATION_SENTINEL
+    ? formatEventDateTime(created.event.eventStartAt, created.event.eventTimezone) : null;
+  const receiptCopy = created ? getCreationReceiptCopy({
+    eventStartLabel, entryAvailability: created.eventLink ? 'available' : 'absent',
+    lifecycle: created.event.photoIntakeState ? { photoIntakeState: created.event.photoIntakeState, entryDisabled: false, guestAccessEnded: false } : null,
+  }) : '';
+
   if (created) return <div className="public-shell"><PageHeader /><main className="success-layout">
-    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>Save the management link somewhere safe, then share the event link when you’re ready.</p><p className="form-note">You can save this event to an account until its management deadline, or 12 hours after it was created — whichever comes first.</p>{coverError && <p className="form-error" role="alert">{coverError}</p>}
+    <section className="success-copy"><span className="success-icon"><Check aria-hidden="true" /></span><h1>Your event is ready.</h1><p>{receiptCopy}</p>{saved ? <p className="form-note" role="status">Saved to your account</p> : <p className="form-note">You can save this event to an account until its management deadline, or 12 hours after it was created — whichever comes first.</p>}{coverError && <p className="form-error" role="alert">{coverError}</p>}
       {/* The warning is only true while the link is the sole way in. Once the event
           is saved to an account it stops being true, and leaving it up would talk a
           host out of the recovery they just set up. */}
@@ -163,17 +161,17 @@ export function CreatePage() {
       {/* The schedule the Worker resolved, said out loud in the event's own zone.
           A defaulted midnight is a choice the host made rather than an
           assumption they never saw. */}
-      <p className="form-note">{created.event.name} begins {formatEventStart(created.event.eventStartAt, created.event.eventTimezone)} ({created.event.eventTimezone}).</p>
-      <p className="form-note">RSVP is paused until you add and validate the guest list. Photo delivery opens by itself when the event starts.</p>
+      <p className="form-note">{created.event.name} begins {eventStartLabel ?? TIME_UNAVAILABLE} ({created.event.eventTimezone}).</p>
+      <p className="form-note">{OPTIONAL_RSVP_HELP}</p>
       <CopyableLinkCard label="Event link" value={created.eventLink} /><CopyableLinkCard label="Management link" value={created.managementLink} sensitive />
       <div className="button-row">
-        <Link className="button button--primary" to={`/manage/event/${created.event.id}`}>Open event manager</Link>
+        <Link className="button button--primary" to={`/manage/event/${created.event.id}?section=overview`}>Continue to your event</Link>
         {/* The event is paused on purpose, so the receipt names the step that
             actually unpauses it rather than leaving the host to find it. */}
         <Link className="button button--secondary" to={`/manage/event/${created.event.id}?section=rsvp`}>Set up guest list</Link>
       </div>
     </section>
-    <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Event QR code</h2><p>The same code handles RSVPs now and event photos later. Print it once.</p>{qr && <img src={qr} alt="QR code for the event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
+    <aside className="qr-card"><QrCode aria-hidden="true" /><h2>Event QR code</h2><p>Share this link or print its QR. It opens the guest activity available for your event.</p>{qr && <img src={qr} alt="QR code for the event link" />}<a className="button button--secondary" href={qr} download={`${created.event.slug}-qr.png`}>Download QR code</a></aside>
     {/* Mounted on whether creation already attached the event, not on `saved`.
         Keying it to `saved` would unmount the panel the moment completion
         succeeded, so the host would click Confirm and watch it disappear instead
@@ -188,7 +186,7 @@ export function CreatePage() {
       onRegistrationResent={({ resumeExpiresAt }) => {
         refreshPendingRegistrationExpiry(resumeExpiresAt);
       }}
-      onStarted={() => navigate(hostRegisterHref(created.event.id, `/manage/event/${created.event.id}`, true))}
+      onStarted={() => navigate(hostRegisterHref(created.event.id, `/manage/event/${created.event.id}?section=overview`, true))}
     />}
   </main></div>;
 
@@ -205,7 +203,7 @@ export function CreatePage() {
           visible so it never becomes an invisible server assumption. */}
       <div className="create-field"><label>Event start time<input name="eventStartTime" type="time" defaultValue="00:00" required aria-invalid={Boolean(fields.eventStartTime)} aria-describedby={fields.eventStartTime ? 'eventStartTime-error' : undefined} /></label>{fields.eventStartTime && <small id="eventStartTime-error">{fields.eventStartTime}</small>}</div>
       <div className="create-field"><label>Event time zone<input name="eventTimezone" list="event-time-zones" value={timeZone} onChange={(changed) => setTimeZone(changed.target.value)} required autoComplete="off" spellCheck={false} aria-invalid={Boolean(fields.eventTimezone)} aria-describedby={fields.eventTimezone ? 'eventTimezone-error' : 'eventTimezone-hint'} /></label><small id="eventTimezone-hint">RSVP deadlines close at the end of this day, in this zone.</small>{fields.eventTimezone && <small id="eventTimezone-error">{fields.eventTimezone}</small>}{zoneOptions.length > 0 && <datalist id="event-time-zones">{zoneOptions.map((zone) => <option key={zone} value={zone} />)}</datalist>}</div>
-      <div className="create-field"><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" required aria-invalid={Boolean(fields.rsvpDeadlineDate)} aria-describedby={fields.rsvpDeadlineDate ? 'rsvpDeadlineDate-error' : undefined} /></label>{fields.rsvpDeadlineDate && <small id="rsvpDeadlineDate-error">{fields.rsvpDeadlineDate}</small>}</div>
+      <div className="create-field"><label>RSVP deadline<input name="rsvpDeadlineDate" type="date" required aria-invalid={Boolean(fields.rsvpDeadlineDate)} aria-describedby={fields.rsvpDeadlineDate ? 'rsvpDeadlineDate-error' : 'rsvpDeadlineDate-hint'} /></label><small id="rsvpDeadlineDate-hint">This date controls attendance replies if you use RSVPs. Photo uploads follow your event’s upload settings.</small>{fields.rsvpDeadlineDate && <small id="rsvpDeadlineDate-error">{fields.rsvpDeadlineDate}</small>}</div>
       <div className="create-field"><label>Welcome message<textarea name="welcomeMessage" rows={4} maxLength={500} required placeholder="Tell guests what you’d love them to share." aria-invalid={Boolean(fields.welcomeMessage)} aria-describedby={fields.welcomeMessage ? 'welcomeMessage-error' : undefined} /></label>{fields.welcomeMessage && <small id="welcomeMessage-error">{fields.welcomeMessage}</small>}</div>
       <EventThemePresetSelector name="themePreset" value={themePresetId} onChange={setThemePresetId} disabled={busy} />
       <label className="cover-field"><ImagePlus aria-hidden="true" /><div><strong>Cover photo</strong><p>{cover ? cover.name : `Optional · JPEG, PNG, WebP, or HEIC · ${COVER_MAX_MB} MB max`}</p></div><span className="button button--secondary">{cover ? 'Change' : 'Choose photo'}</span><input className="sr-only cover-field__input" type="file" accept={COVER_ACCEPT} onChange={(event) => { const file = event.target.files?.[0] ?? null; if (!file) { setCover(null); return; } try { validateCoverFile(file); setCover(file); } catch (rejected) { setCover(null); setError(rejected instanceof CoverUploadRejected ? rejected.message : 'That photo could not be used as a cover.'); } }} /></label>

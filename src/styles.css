@@ -2362,7 +2362,9 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
   .manager-overview__workflows li { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 24px; }
 }
 
-/* Guidance keeps the host's real workspace visible but non-interactive. */
+/* Guidance keeps the host's real workspace visible but non-interactive.
+   Temporary trailing space lets the actual last control clear sticky navigation. */
+body:has([data-host-welcome-tour]) .manager-main::after { content: ''; display: block; height: 100dvh; }
 .host-welcome {
   position: fixed;
   inset: 0;
@@ -2402,13 +2404,8 @@ input, textarea { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px
 .host-welcome-save { margin: 16px; padding: 16px; background: var(--paper); border: 1px solid var(--border); border-radius: 8px; }
 @media (max-width: 760px) {
   .host-welcome__panel {
-    inset: auto 8px max(8px, env(safe-area-inset-bottom));
-    width: auto;
-    max-height: calc(100dvh - 96px);
+    inset: auto;
     padding: 20px;
   }
   .host-welcome__actions .button { flex-grow: 1; padding-inline: 12px; }
 }
-
-.host-welcome__leader { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.host-welcome__leader line { stroke: var(--focus); stroke-width: 2px; }

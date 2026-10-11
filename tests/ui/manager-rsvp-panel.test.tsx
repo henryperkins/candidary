@@ -218,6 +218,7 @@ describe('manager RSVP panel', () => {
     expect(await screen.findByRole('heading', { name: 'Start your guest list' })).toBeVisible();
     expect(screen.queryByRole('group', { name: 'Invited capacity' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add guests' })).toBeVisible();
+    expect(screen.getByText('RSVP is optional. If you want attendance replies, set up your guest list. You send invitations; guests can send photos without RSVPing.')).toBeVisible();
   });
 
   it('keeps the normal dashboard and launcher for archived-only or history-unavailable rosters', async () => {

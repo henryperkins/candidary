@@ -158,7 +158,7 @@ test('Share opens complete export', async ({ page }) => {
   await expect(action).toBeFocused();
   await page.getByRole('button', { name: /^Guest gallery(?:,|$)/ }).focus();
   await page.goBack();
-  await expect(page.getByRole('heading', { name: 'Share your event' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Share your link or QR' })).toBeVisible();
   await page.goForward();
   await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.activeElement?.matches('button') && document.activeElement?.textContent?.trim() === 'Download all')).toBe(false);

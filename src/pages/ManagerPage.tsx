@@ -57,7 +57,8 @@ import { Brand } from '../components/Brand';
 import { HostWelcomeTour } from '../features/manager/HostWelcomeTour';
 import { useHostWelcomeTour } from '../features/manager/use-host-welcome-tour';
 import { ManagerOverview } from '../features/manager/ManagerOverview';
-import { overviewLifecycleKey } from '../features/manager/overview-policy';
+import { getGuestEntryCopy, getEmptyLibraryMessage, type HostWelcomeContext } from '../features/manager/host-welcome-content';
+import { overviewLifecycleKey, overviewPhaseLabel, resolveOverviewRecommendation, type OverviewDestination } from '../features/manager/overview-policy';
 import { ManagerNavigation } from '../features/manager/ManagerNavigation';
 import { useWideViewport } from '../features/gallery/viewport';
 import { CopyableLinkCard } from '../components/CopyableLinkCard';
@@ -961,24 +962,40 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }, [eventId]),
   });
   const event = eventResource.state.value;
+  // Eligibility is read by the effect after this render initializes resources.
+  // The same controller supplies activity to those resources without a second
+  // open state or a second lifecycle subscription.
+  const welcomeTour = useHostWelcomeTour({
+    eventId,
+    eligible: () => !!event && !eventResource.state.failure && !escalatedFailure
+      && section === 'overview' && overviewLifecycleResource.state.value !== null,
+  });
+  const overviewContextActive = section === 'overview' || welcomeTour.open;
+  // Inline Share and Library guidance needs the same server-confirmed availability.
+  const lifecycleContextActive = overviewContextActive || section === 'share' || section === 'gallery';
   const overviewLifecycleResource = useManagerResource<HostEventLifecycleView>({
     eventId, queryKey: 'overview-lifecycle',
-    enabled: section === 'overview' && !rotationResourcesPaused,
+    enabled: lifecycleContextActive && !rotationResourcesPaused,
     fallbackMessage: 'The current event phase could not be loaded.', onEscalate: escalate,
     load: useCallback((signal: AbortSignal) => api<HostEventLifecycleView>(`/api/manage/events/${eventId}/lifecycle`, { signal }), [eventId]),
   });
   const overviewSummaryResource = useManagerResource<RsvpSummary>({
     eventId, queryKey: 'overview-rsvp-summary',
-    enabled: section === 'overview' && !rotationResourcesPaused,
+    enabled: overviewContextActive && !rotationResourcesPaused,
     fallbackMessage: 'The RSVP totals could not be loaded.', onEscalate: escalate,
     load: useCallback((signal: AbortSignal) => api<RsvpSummary>(`/api/manage/events/${eventId}/rsvp/summary`, { signal }), [eventId]),
   });
   const overviewLifecycle = overviewLifecycleResource.state.value;
   async function recheckOverviewLifecycle(): Promise<LifecycleRecheckOutcome> {
-    if (section !== 'overview' || rotationResourcesPausedRef.current || overviewLifecycleResource.isTerminal()) return 'unchanged';
+    if (!lifecycleContextActive || rotationResourcesPausedRef.current || overviewLifecycleResource.isTerminal()) return 'unchanged';
     const capture = overviewLifecycleResource.capture();
     try {
       const loaded = await api<HostEventLifecycleView>(`/api/manage/events/${eventId}/lifecycle`);
+      if (!overviewLifecycleResource.isCaptureCurrent(capture)) return 'unchanged';
+      await Promise.all([
+        ...(welcomeTour.open ? [overviewSummaryResource.reload()] : []),
+        ...(welcomeTour.open || section === 'share' || section === 'gallery' ? [entryResource.reload()] : []),
+      ]);
       if (!overviewLifecycleResource.isCaptureCurrent(capture)) return 'unchanged';
       if (overviewLifecycle && overviewLifecycleKey(overviewLifecycle) === overviewLifecycleKey(loaded)) return 'unchanged';
       return overviewLifecycleResource.adoptIfCurrent(capture, loaded) ? 'changed' : 'unchanged';
@@ -988,9 +1005,9 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     }
   }
   useLifecycleRecheck(
-    section === 'overview' ? overviewLifecycle?.lifecycleRecheckAfterMs ?? null : null,
+    lifecycleContextActive && !rotationResourcesPaused ? overviewLifecycle?.lifecycleRecheckAfterMs ?? null : null,
     recheckOverviewLifecycle,
-    `${eventId}:${section}:${overviewLifecycle ? overviewLifecycleKey(overviewLifecycle) : 'unknown'}`,
+    `${eventId}:${lifecycleContextActive && !rotationResourcesPaused}:${overviewLifecycle ? overviewLifecycleKey(overviewLifecycle) : 'unknown'}`,
   );
 
   // Quiet lifecycle reads resolve asynchronously; compare their semantic
@@ -1312,9 +1329,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       exportsResource.reload(),
       entryResource.reload(),
       guestbookResource.reload(),
-      ...(section === 'overview' ? [overviewLifecycleResource.reload(), overviewSummaryResource.reload()] : []),
+      ...(lifecycleContextActive ? [overviewLifecycleResource.reload()] : []),
+      ...(overviewContextActive ? [overviewSummaryResource.reload()] : []),
     ]);
-  }, [audienceResource, entryResource, eventResource, exportsResource, guestbookResource, trashResource, overviewLifecycleResource, overviewSummaryResource, section]);
+  }, [audienceResource, entryResource, eventResource, exportsResource, guestbookResource, trashResource, overviewLifecycleResource, overviewSummaryResource, overviewContextActive, lifecycleContextActive]);
 
   const refreshExports = exportsResource.reload;
 
@@ -2123,6 +2141,12 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     requestSectionDestination({ kind: 'complete-export' });
   }
 
+  function navigateOverviewTask(destination: OverviewDestination): void {
+    if (destination === 'originals') openCompleteExport();
+    else if (destination === 'library') requestSectionDestination({ kind: 'section', section: 'gallery' });
+    else openSection(destination);
+  }
+
   function openRecentlyDeleted(mediaId: string) {
     requestSectionDestination({ kind: 'recently-deleted', focusMediaId: mediaId });
   }
@@ -2695,6 +2719,10 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
     // A shorter relative delay is not a manager-visible transition. Leaving
     // the current event object alone preserves the hook's armed boundary and
     // the anti-spin floor established by this recheck.
+    if (welcomeTour.open && loaded.event.storedMediaCount !== shown?.storedMediaCount) {
+      eventResource.update((current: EventView | null) => current
+        ? { ...current, storedMediaCount: loaded.event.storedMediaCount } : current);
+    }
     if (!moved) return 'unchanged';
     eventResource.update((current: EventView | null) => current
       ? mergePhotoIntakeResponse(current, loaded.event, {
@@ -2752,10 +2780,27 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
   // Offered for the plain no-credential state as well as a dead account session: a
   // bare manager URL cannot prove whether it arrived from the account page or from a
   // copied management link, and signing in is safe either way.
-  const welcomeTour = useHostWelcomeTour({
-    eventId,
-    eligible: !!event && !failure && section === 'overview' && overviewLifecycleResource.state.value !== null,
-  });
+  const welcomeContext = useMemo<HostWelcomeContext>(() => {
+    const entry = entryResource.state.value;
+    const entryAvailability = overviewLifecycle?.entryDisabled || entry?.disabledAt ? 'disabled'
+      : !entry ? 'unknown' : entry.eventLink ? 'available' : 'absent';
+    const namedGuests = overviewSummaryResource.state.value?.namedInvitees ?? null;
+    const photos = event?.storedMediaCount ?? null;
+    const confirmedLifecycle = overviewLifecycle && entryAvailability === 'disabled'
+      ? { ...overviewLifecycle, entryDisabled: true } : overviewLifecycle;
+    const proposed = resolveOverviewRecommendation(confirmedLifecycle, namedGuests, photos);
+    // A phase alone cannot prove that a guest credential has loaded. Share's
+    // real availability gates the one recommendation used by both surfaces.
+    const recommendation = proposed.destination === 'share' && entryAvailability !== 'available'
+      ? { destination: 'settings' as const, label: 'Review event access', reason: entryAvailability === 'unknown'
+          ? 'The event link is not confirmed yet. Check access or retry loading it in Share.'
+          : 'The event link and QR are unavailable. Review access in Settings.' }
+      : proposed;
+    return { lifecycle: confirmedLifecycle, phaseLabel: overviewPhaseLabel(confirmedLifecycle), recommendation,
+      eventStartLabel: event && event.eventStartAt !== EVENT_START_MIGRATION_SENTINEL
+        ? formatEventDateTime(event.eventStartAt, event.eventTimezone) : null,
+      namedGuests, photos, entryAvailability };
+  }, [overviewLifecycle, overviewSummaryResource.state.value, entryResource.state.value, event?.storedMediaCount, event?.eventStartAt, event?.eventTimezone]);
   if (failure) return <main className="centered-state"><Brand /><div className="manager-load-failure">
     <h1 className="sr-only">Event manager unavailable</h1>
     <ErrorState
@@ -2948,16 +2993,14 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
         lifecycle={overviewLifecycleResource.state}
         summary={overviewSummaryResource.state}
         exports={exportsResource.state}
-        deliveredPhotos={event.storedMediaCount ?? null}
+        recommendation={welcomeContext.recommendation}
+        phaseLabel={welcomeContext.phaseLabel}
         onRetryLifecycle={() => void overviewLifecycleResource.reload()}
         onRetrySummary={() => void overviewSummaryResource.reload()}
         onRetryExports={() => void exportsResource.reload()}
-        onTakeTour={welcomeTour.start}
-        onNavigate={destination => {
-          if (destination === 'originals') openCompleteExport();
-          else if (destination === 'library') requestSectionDestination({ kind: 'section', section: 'gallery' });
-          else void openSection(destination);
-        }}
+        onShowIntroduction={() => welcomeTour.start('intro')}
+        onTakeTour={() => welcomeTour.start('tools')}
+        onNavigate={navigateOverviewTask}
       />}
 
       {/* Mounted only from its own destination, so the CSV, household, and totals
@@ -3009,6 +3052,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
           settingsBlocked: rsvpCommitPending,
         }}
         onResourceEscalate={escalate}
+        emptyLibraryMessage={getEmptyLibraryMessage(welcomeContext)}
         exports={{
           job: completeExport,
           albumJob: albumExport,
@@ -3034,19 +3078,21 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
 
       {section === 'share' && <section className="manager-panel">
         <p className="section-label">Invite your guests</p>
-        <h2 data-host-tour-anchor="share-qr" tabIndex={-1}>Share your event</h2>
+        <h2 tabIndex={-1}>Share your link or QR</h2>
         {entryResource.state.failure && <ErrorState
           message={entryResource.state.failure.message}
           recoveryHint={entryResource.state.failure.recoveryHint}
           onRetry={() => void entryResource.reload()}
         />}
-        <div className="share-layout">
+        {welcomeContext.entryAvailability === 'available' && !welcomeContext.lifecycle?.entryDisabled && !welcomeContext.lifecycle?.guestAccessEnded && <p className="form-note">Copy the guest link or download the QR. Guests send originals without an account.</p>}
+        <p data-host-tour-anchor="share-status" tabIndex={-1} role="status">{getGuestEntryCopy(welcomeContext)}</p>
+        <div className="share-layout" data-host-tour-anchor="share-qr">
           <div>{eventLink
-            ? <><CopyableLinkCard label="Event link" value={eventLink} /><ShareGuestLink key={eventLink} eventLink={eventLink} eventName={event.name} /></>
+            ? <><div data-host-tour-compact="share-qr"><CopyableLinkCard label="Event link" value={eventLink} /></div><ShareGuestLink key={eventLink} eventLink={eventLink} eventName={event.name} /></>
             : <p ref={entryDisabledResult} className="manager-notice" tabIndex={-1}>{entryDisabledAt
-              ? 'This event QR was disabled and cannot be replaced.'
+              ? 'This event’s guest link and QR have been permanently disabled. Guests can no longer use them.'
               : 'This event has no printed entry.'}</p>}
-            <p className="form-note">One code for RSVPs now and event photos later. Print it once.</p>
+            {eventLink && !welcomeContext.lifecycle?.guestAccessEnded && <p className="form-note">Share this link or print its QR. It opens the guest activity available for your event.</p>}
           </div>
           {qr && <div className="manager-qr"><img src={qr} alt="Event QR code" /></div>}
         </div>
@@ -3087,7 +3133,7 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
 
       {settingsMounted && <section className="manager-panel" hidden={section !== 'settings'} inert={section !== 'settings'}>
         <p className="section-label">Event controls</p>
-        <h2 ref={settingsHeading} tabIndex={-1} data-host-tour-anchor="settings">Settings</h2>
+        <h2 ref={settingsHeading} tabIndex={-1}>Settings</h2>
         {guestGallerySettingsReturn && (
           <button
             type="button"
@@ -3283,11 +3329,16 @@ function ManagerEventPage({ eventId }: { eventId: string }) {
       />}
     </main>
 
-    {welcomeTour.saveFailed && <aside className="host-welcome-save" role="status">
+    {welcomeTour.saveFailed && !welcomeTour.open && <aside className="host-welcome-save" role="status">
       <p>Your tour preference could not be saved. It will stay closed for this session.</p>
       <button type="button" className="button button--secondary" onClick={welcomeTour.retrySave}>Retry saving tour preference</button>
     </aside>}
     {welcomeTour.open && <HostWelcomeTour
+      mode={welcomeTour.mode}
+      saveFailed={welcomeTour.saveFailed}
+      onRetrySave={welcomeTour.retrySave}
+      context={welcomeContext}
+      onNavigateTask={navigateOverviewTask}
       location={section === 'gallery' ? (galleryMode === 'library' && !libraryTrash ? 'library' : galleryMode === 'library' ? 'trash' : galleryMode) : section}
       blocked={blocker.state === 'blocked' || pendingSection !== null || pendingRsvpClose || activeAlbumLeaveAttempt !== null || managerUploadOpen || managerLinkRotation !== null || entryAction !== null}
       onNavigate={destination => {

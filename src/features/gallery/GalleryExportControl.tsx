@@ -123,7 +123,7 @@ export const GalleryExportControl = forwardRef<
 
   const prepareDisabled = pendingAction !== null || waitMessage !== null || currentSourceEmpty;
   const prepareReason = waitMessage
-    ?? (currentSourceEmpty ? 'Deliver a photo before preparing the current collection.' : null);
+    ?? (currentSourceEmpty ? 'When photos arrive, use Exports to download the originals.' : null);
 
   // One element, two possible parents — never two copies. Only the first ask moves: `Download all`
   // is the mode's action and has no status to keep it company yet, while the ready job's links, a

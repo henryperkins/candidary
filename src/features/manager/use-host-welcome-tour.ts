@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { HOST_EVENT_WELCOME_TOUR_KEY, HOST_EVENT_WELCOME_TOUR_VERSION, type HostTourStateView } from '../../../shared/contracts';
 import { api } from '../../app/api';
+import type { HostWelcomeMode } from './host-welcome-content';
 
 const path = `/api/host/tours/${HOST_EVENT_WELCOME_TOUR_KEY}/${HOST_EVENT_WELCOME_TOUR_VERSION}`;
 type Outcome = 'dismissed' | 'completed';
@@ -88,8 +89,9 @@ function savePreference(accountId: string, status?: Outcome): Promise<void> | nu
   return write.promise;
 }
 
-export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eligible: boolean }) {
+export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eligible: boolean | (() => boolean) }) {
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<HostWelcomeMode>('intro');
   const [account, setAccount] = useState<HostTourStateView | null>(null);
   const [saveFailed, setSaveFailed] = useState(false);
   const owner = useRef({ eventId, generation: 0 });
@@ -133,9 +135,9 @@ export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eli
   }, [eventId]);
 
   useEffect(() => {
-    if (manualVisit.current || !eligible || observedEvent.current !== eventId || !account || account.status !== 'unseen' || seen(account.accountId)) return;
+    if (manualVisit.current || !(typeof eligible === 'function' ? eligible() : eligible) || observedEvent.current !== eventId || !account || account.status !== 'unseen' || seen(account.accountId)) return;
     remember(account.accountId);
-    setOpen(true);
+    setMode('intro'); setOpen(true);
   }, [account, eligible, eventId]);
 
   function observeSave(read: TourLookup) {
@@ -156,8 +158,8 @@ export function useHostWelcomeTour({ eventId, eligible }: { eventId: string; eli
     observeSave(read);
   }
   return {
-    open, saveFailed,
-    start() { manualVisit.current = true; if (account && observedEvent.current === eventId) remember(account.accountId); setOpen(true); },
+    open, mode, saveFailed,
+    start(nextMode: HostWelcomeMode = 'intro') { setMode(nextMode); manualVisit.current = true; if (account && observedEvent.current === eventId) remember(account.accountId); setOpen(true); },
     close(status: Outcome) {
       manualVisit.current = true;
       setOpen(false);

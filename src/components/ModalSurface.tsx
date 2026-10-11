@@ -17,6 +17,7 @@ import { createPortal } from 'react-dom';
 
 export interface ModalSurfaceProps {
   labelledBy: string;
+  describedBy?: string;
   initialFocusRef: RefObject<HTMLElement | null>;
   onRequestClose(): void;
   closePolicy: { escape: boolean; backdrop: boolean };
@@ -80,6 +81,7 @@ export function acquireModalOwnership(host: HTMLElement, exception?: HTMLElement
 
 export function ModalSurface({
   labelledBy,
+  describedBy,
   initialFocusRef,
   onRequestClose,
   closePolicy,
@@ -166,6 +168,7 @@ export function ModalSurface({
     role: 'dialog',
     'aria-modal': true,
     'aria-labelledby': labelledBy,
+    ...(describedBy === undefined ? {} : { 'aria-describedby': describedBy }),
     ref: (node: HTMLDivElement | null) => {
       assignRef(childRef, node);
       assignRef(dialogRef, node);

@@ -93,6 +93,7 @@ export interface GalleryAudienceAuthority {
 export interface ManagerGalleryWorkspaceProps {
   event: EventView;
   eventId: string;
+  emptyLibraryMessage?: string;
   mode: GalleryMode;
   onModeChange(mode: GalleryMode): void;
   /** Manager-owned generation for every Gallery data owner after a mutation. */
@@ -195,6 +196,7 @@ ManagerGalleryWorkspaceProps
 >(function ManagerGalleryWorkspace({
   event,
   eventId,
+  emptyLibraryMessage,
   mode,
   onModeChange,
   galleryMutationEpoch,
@@ -935,7 +937,7 @@ ManagerGalleryWorkspaceProps
 
   return <section className="manager-gallery" data-mode={mode} ref={rootRef} aria-labelledby="gallery-workspace-title">
     <div className="workspace-heading" hidden={librarySuspended}>
-      <h2 data-host-tour-anchor={mode === 'library' ? 'library' : undefined} id="gallery-workspace-title" tabIndex={-1}>{mode === 'library' ? 'Library' : 'Gallery'}</h2>
+      <h2 id="gallery-workspace-title" tabIndex={-1}>{mode === 'library' ? 'Library' : 'Gallery'}</h2>
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} {event.storedMediaCount === 1 ? 'photo' : 'photos'}</p>
       <div className="library-heading-actions">
         {mode === 'library' && <div className="library-add-photos">{libraryActions}</div>}
@@ -953,7 +955,7 @@ ManagerGalleryWorkspaceProps
       </div>
     </div>
     <div className="gallery-control-row">
-      <div className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
+      <div data-host-tour-anchor="library" className="gallery-mode-switch gallery-mode-switch--three" role="group" aria-label="Gallery mode">
         {/* The counts live in the switch so it answers how many, and where, without costing a
             second row on a phone. */}
         {(['library', 'album', 'guest-gallery'] as const).map((value) => {
@@ -974,6 +976,7 @@ ManagerGalleryWorkspaceProps
         })}
       </div>
     </div>
+    <p className="form-note">Originals stay private in Library. Album and Guest gallery are optional ways to share selected photos.</p>
     {/* The audience facts are read on arrival, not consulted while scrolling, so they sit in the
         flow below the switch rather than inside the pinned band — the mode is the only thing worth
         pinning, and this line was costing every mode roughly a third of that band.
@@ -1018,6 +1021,7 @@ ManagerGalleryWorkspaceProps
         onEscalate={onResourceEscalate}
         onArrivalsAccepted={onArrivalsAccepted}
         event={event}
+        emptyMessage={emptyLibraryMessage}
         eventId={eventId}
         active={mode === 'library'}
         pickCount={pickCount}

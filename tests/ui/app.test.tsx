@@ -43,6 +43,7 @@ import type {
 } from '../../src/app/manager-history-state';
 import { EventAccountCard } from '../../src/components/EventAccountCard';
 import { ManagementLinkRecovery } from '../../src/components/ManagementLinkRecovery';
+import * as HostAccountPanelModule from '../../src/components/HostAccountPanel';
 import { EventPage } from '../../src/pages/EventPage';
 import { ManagerPage } from '../../src/pages/ManagerPage';
 import {
@@ -140,7 +141,7 @@ const CREATED = {
   event: {
     id: 'event-a', name: 'Maya & Theo', slug: 'maya-theo', eventDate: '2026-09-19',
     eventStartAt: '2026-09-19T05:00:00.000Z', eventStartTime: '00:00',
-    eventTimezone: 'America/Chicago',
+    eventTimezone: 'America/Chicago', photoIntakeState: 'scheduled',
   },
   eventLink: 'https://example.test/join#entry-id.entry-secret',
   managementLink: 'https://example.test/manage/manager-secret',
@@ -168,6 +169,7 @@ const EVENT_SUMMARY = {
 async function createEvent(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('Event name'), 'Maya & Theo');
   await user.type(screen.getByLabelText('Event date'), '2026-09-19');
+  await user.type(screen.getByLabelText('RSVP deadline'), '2026-09-05');
   await user.type(screen.getByLabelText('Welcome message'), 'Come share the moments you caught.');
   await user.click(screen.getByRole('button', { name: 'Create private event' }));
   await screen.findByRole('heading', { name: 'Your event is ready.' });
@@ -256,12 +258,12 @@ describe('public Candidary experience', () => {
     render(<RouterProvider router={createAppRouter(['/'])} />);
     expect(screen.getByText('For weddings & private events')).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Gather the moments you didn’t see.' })).toBeVisible();
-    expect(screen.getByText(/One private QR takes guests from RSVP to photo delivery/)).toBeVisible();
+    expect(screen.getByText(/Create a private event and share its link or QR code/)).toBeVisible();
     expect(screen.getByRole('link', { name: 'Create your event' })).toHaveAttribute('href', '/create');
     // Scoped to the workflow list: the footer's own link groups are list items too.
     const workflow = screen.getByRole('heading', { name: 'One QR. Three moments.' }).closest('section');
     expect(within(workflow as HTMLElement).getAllByRole('listitem')).toHaveLength(3);
-    expect(within(workflow as HTMLElement).getByText('Invite and RSVP')).toBeVisible();
+    expect(within(workflow as HTMLElement).getByText('Invite and RSVP (optional)')).toBeVisible();
     expect(within(workflow as HTMLElement).getByText('Scan again and send')).toBeVisible();
     expect(within(workflow as HTMLElement).getByText('Keep every perspective')).toBeVisible();
   });
@@ -323,8 +325,9 @@ describe('public Candidary experience', () => {
     expect(screen.getByRole('heading', { name: 'Your event is ready.' })).toBeVisible();
     expect(screen.getByText('Event link')).toBeVisible();
     expect(screen.getByText('Management link')).toBeVisible();
-    expect(screen.getByRole('link', { name: /open event manager/i }))
-      .toHaveAttribute('href', `/manage/event/${CREATED.event.id}`);
+    expect(screen.getByRole('link', { name: 'Continue to your event' }))
+      .toHaveAttribute('href', `/manage/event/${CREATED.event.id}?section=overview`);
+    expect(screen.getByText(/You can save this event to an account until/)).toBeVisible();
     // A new event is paused by default, so the receipt names the next real step.
     expect(screen.getByRole('link', { name: 'Set up guest list' }))
       .toHaveAttribute('href', `/manage/event/${CREATED.event.id}?section=rsvp`);
@@ -337,6 +340,7 @@ describe('public Candidary experience', () => {
     const [, request] = fetchMock.mock.calls[0]!;
     expect(JSON.parse(String(request?.body))).toMatchObject({
       theme: { version: 1, presetId: 'candidary-default', overrides: {} },
+      rsvpDeadlineDate: '2026-09-05',
     });
   });
 
@@ -356,6 +360,8 @@ describe('public Candidary experience', () => {
     // it is never an invisible server assumption either.
     expect(screen.getByLabelText('Event start time')).toBeVisible();
     expect(screen.getByLabelText('Event start time')).toHaveValue('00:00');
+    expect(screen.getByLabelText('RSVP deadline')).toBeRequired();
+    expect(screen.getByLabelText('RSVP deadline')).toHaveAccessibleDescription('This date controls attendance replies if you use RSVPs. Photo uploads follow your event’s upload settings.');
 
     await user.clear(screen.getByLabelText('Event time zone'));
     await user.type(screen.getByLabelText('Event time zone'), 'Europe/London');
@@ -365,8 +371,10 @@ describe('public Candidary experience', () => {
     expect(JSON.parse(String(request?.body))).toMatchObject({
       eventStartTime: '00:00', eventTimezone: 'Europe/London',
     });
-    expect(screen.getByText('Maya & Theo begins September 19, 2026 at 12:00 AM (Europe/London).')).toBeVisible();
-    expect(screen.getByText('RSVP is paused until you add and validate the guest list. Photo delivery opens by itself when the event starts.')).toBeVisible();
+    expect(screen.getByText('Maya & Theo begins September 19, 2026 at 12:00 AM GMT+1 (Europe/London).')).toBeVisible();
+    expect(screen.getByText('Your guest link and QR are ready. Photo uploads open September 19, 2026 at 12:00 AM GMT+1. Keep your management link private so you can return.')).toBeVisible();
+    expect(screen.getByText('RSVP is optional. If you want attendance replies, set up your guest list. You send invitations; guests can send photos without RSVPing.')).toBeVisible();
+    expect(screen.getByText('Share this link or print its QR. It opens the guest activity available for your event.')).toBeVisible();
   });
 
   it('associates create errors with their fields and focuses the first invalid one', async () => {
@@ -1209,7 +1217,7 @@ describe('event print pack integration', () => {
   it('provides event-specific print controls inside Share and updates quantities for the selected stock', async () => {
     vi.stubGlobal('fetch', managerFetch({}));
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a?section=share'])} />);
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
     expect(screen.getByRole('heading', { name: 'Print and download' })).toBeVisible();
     const user = userEvent.setup();
     await user.selectOptions(screen.getByLabelText('Wording'), 'memorial');
@@ -1675,7 +1683,7 @@ describe('canonical Manager location ownership', () => {
 
   it.each([
     ['Gallery mode', '', 'Library'],
-    ['Manager section', '?section=share', 'Share your event'],
+    ['Manager section', '?section=share', 'Share your link or QR'],
     ['browser Back', '', 'Library'],
   ] as const)(
     'keeps Album rendered until URL settlement for a %s request',
@@ -1830,7 +1838,7 @@ describe('canonical Manager location ownership', () => {
       state: managerHistoryState(anchor, 'library'),
     }, `/manage/event/${MANAGED_EVENT.id}?section=share`]);
     render(<RouterProvider router={router} />);
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
 
     await router.navigate(-1);
     await waitFor(() => expect(router.state.location.search).toBe(''));
@@ -1901,7 +1909,7 @@ describe('canonical Manager location ownership', () => {
       state: managerHistoryState(anchor, 'album'),
     }, `/manage/event/${MANAGED_EVENT.id}?section=share`]);
     render(<RouterProvider router={router} />);
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
 
     await router.navigate(-1);
     await waitFor(() => expect(router.state.location.search).toBe('?section=gallery&mode=album'));
@@ -2509,7 +2517,7 @@ describe('canonical Manager location ownership', () => {
     }]);
     render(<RouterProvider router={router} />);
 
-    await screen.findByText('Deliver a photo before preparing the current collection.');
+    await screen.findByText('When photos arrive, use Exports to download the originals.');
     expect(screen.getByRole('region', { name: 'Complete export' })).toHaveFocus();
   });
 
@@ -2542,7 +2550,7 @@ describe('canonical Manager location ownership', () => {
     const router = createAppRouter([shareEntry]);
     const view = render(<RouterProvider router={router} />);
     const user = userEvent.setup();
-    const share = await screen.findByRole('heading', { name: 'Share your event' });
+    const share = await screen.findByRole('heading', { name: 'Share your link or QR' });
 
     await user.click(within(share.closest('section')!).getByRole('button', { name: 'Open Gallery' }));
 
@@ -2552,7 +2560,7 @@ describe('canonical Manager location ownership', () => {
 
     galleryMode('Guest gallery').focus();
     await router.navigate(-1);
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
     await router.navigate(1);
     const returnedAction = await screen.findByRole('button', { name: 'Download all' });
     expect(returnedAction).not.toHaveFocus();
@@ -2578,7 +2586,7 @@ describe('canonical Manager location ownership', () => {
     document.addEventListener('focusin', recordFocus);
     onTestFinished(() => document.removeEventListener('focusin', recordFocus));
     render(<StrictMode><RouterProvider router={router} /></StrictMode>);
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
 
     await router.navigate({
       pathname: `/manage/event/${MANAGED_EVENT.id}`,
@@ -2815,7 +2823,7 @@ describe('canonical Manager location ownership', () => {
     await waitFor(() => expect(cleanupCalls).toBe(2));
 
     await originalNavigate(`/manage/event/${MANAGED_EVENT.id}?section=share`);
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
     await originalNavigate(-1);
 
     await waitFor(() => expect(focusSnapshots).toHaveLength(1));
@@ -2975,7 +2983,7 @@ describe('canonical Manager location ownership', () => {
     fireEvent.click(await findGalleryMode('Guest gallery'));
     await captureCommitted;
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
-    const winner = await screen.findByRole('heading', { name: 'Share your event' });
+    const winner = await screen.findByRole('heading', { name: 'Share your link or QR' });
     await waitFor(() => expect(router.state.location.search).toBe('?section=share'));
     winner.tabIndex = -1;
     winner.focus();
@@ -3255,7 +3263,7 @@ describe('canonical Manager location ownership', () => {
     await waitFor(() => expect(router.state.location.search).toBe('?section=gallery&view=trash'));
     await screen.findByRole('heading', { name: 'Trash' });
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
     await act(async () => { releaseFirstTrash(); });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await screen.findByRole('heading', { name: 'Library' });
@@ -3523,7 +3531,7 @@ describe('canonical Manager location ownership', () => {
     expect(await screen.findByRole('button', { name: 'Return to Guest gallery' })).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
     await router.navigate(-1);
 
     await screen.findByRole('heading', { name: 'Settings' });
@@ -3768,7 +3776,7 @@ describe('manager experience', () => {
       'Guest gallery': 'On, 0 published',
     });
     await user.click(within(navigation).getByRole('button', { name: 'Share' }));
-    await screen.findByRole('heading', { name: 'Share your event' });
+    await screen.findByRole('heading', { name: 'Share your link or QR' });
     await user.click(within(navigation).getByRole('button', { name: 'Gallery' }));
     expect(await galleryAudienceFacts()).toEqual({
       Album: '0 photos',
@@ -5178,7 +5186,7 @@ describe('manager experience', () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    expect(screen.getByText(/cannot be replaced/iu)).toBeVisible();
+    expect(screen.getByText('This event’s guest link and QR have been permanently disabled. Guests can no longer use them.', { selector: '.manager-notice' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Show full event link' })).not.toBeInTheDocument();
     for (const copy of screen.getAllByRole('button', { name: 'Copy event link' })) {
       expect(copy).toBeDisabled();
@@ -5364,7 +5372,7 @@ describe('manager experience', () => {
     await user.click(confirm);
 
     await waitFor(() => expect(bodies).toEqual([{ confirmName: 'Maya & Theo' }]));
-    expect(await screen.findByText(/cannot be replaced/iu)).toBeVisible();
+    expect(await screen.findByText('This event’s guest link and QR have been permanently disabled. Guests can no longer use them.', { selector: '.manager-notice' })).toBeVisible();
     expect(screen.queryByAltText('Event QR code')).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Print and download' })).not.toBeInTheDocument();
     // There is no replacement to offer, so the action itself retires.
@@ -5622,7 +5630,7 @@ describe('manager experience', () => {
         name: `Disable printed event QR for ${MANAGED_EVENT.name}`,
       }));
 
-      const result = await screen.findByText('This event QR was disabled and cannot be replaced.');
+      const result = await screen.findByText('This event’s guest link and QR have been permanently disabled. Guests can no longer use them.', { selector: '.manager-notice' });
       await waitFor(() => expect(result).toHaveFocus());
       expect(result).toHaveAttribute('tabindex', '-1');
       expect(result.isConnected).toBe(true);
@@ -7238,7 +7246,7 @@ describe('manager experience', () => {
     })).toBeDisabled();
     expect(sectionPrompt).toHaveTextContent('A change already sent may still finish saving');
     await act(async () => { resolveFirstSave(); });
-    expect(await screen.findByRole('heading', { name: 'Share your event' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Share your link or QR' })).toBeVisible();
 
     await user.click(within(managerNavigation).getByRole('button', { name: /gallery/i }));
     await user.click(await findGalleryMode('Album'));
@@ -7298,7 +7306,7 @@ describe('manager experience', () => {
     await user.click(within(prompt).getByRole('button', {
       name: 'Discard unsent Album changes and leave',
     }));
-    expect(await screen.findByRole('heading', { name: 'Share your event' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Share your link or QR' })).toBeVisible();
     await user.click(screen.getByRole('link', { name: 'Candidary home' }));
     await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Manager sections' }))
       .not.toBeInTheDocument());
@@ -7573,19 +7581,19 @@ describe('Manager Library empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    const emptyHeading = await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    const emptyHeading = await screen.findByRole('heading', { name: 'No photos yet.' });
     const emptyState = emptyHeading.closest('.empty-state') as HTMLElement;
-    expect(within(emptyState).getByText('Photos added by you or your guests appear here.')).toBeVisible();
+    expect(within(emptyState).getByText('Photo upload availability is not confirmed. Check the current phase in Overview.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Add photos' })).toHaveClass('button--primary');
 
     await user.click(screen.getByRole('button', { name: 'Trash' }));
     expect(await screen.findByRole('heading', { name: 'Nothing in Trash.' })).toBeVisible();
-    expect(screen.queryByRole('heading', { name: 'No photos have been delivered yet.' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'No photos yet.' })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Back to Library' }));
-    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    await screen.findByRole('heading', { name: 'No photos yet.' });
     await user.click(screen.getByRole('button', { name: 'Share' }));
-    expect(await screen.findByRole('heading', { name: 'Share your event' })).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Share your link or QR' })).toBeVisible();
   });
 
   it('Library true empty returns Add photos focus to the Library trigger', async () => {
@@ -7593,7 +7601,7 @@ describe('Manager Library empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    await screen.findByRole('heading', { name: 'No photos yet.' });
     const libraryInvoker = screen.getByRole('button', { name: 'Add photos' });
     await user.click(libraryInvoker);
     await user.click(within(screen.getByRole('dialog', { name: 'Add photos' }))
@@ -7661,7 +7669,7 @@ describe('Manager Library empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    await screen.findByRole('heading', { name: 'No photos yet.' });
     const libraryInvoker = screen.getByRole('button', { name: 'Add photos' });
     await user.click(libraryInvoker);
     const dialog = screen.getByRole('dialog', { name: 'Add photos' });
@@ -7745,7 +7753,7 @@ describe('Manager Library empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    await screen.findByRole('heading', { name: 'No photos yet.' });
     const libraryInvoker = screen.getByRole('button', { name: 'Add photos' });
     await user.click(libraryInvoker);
     const dialog = screen.getByRole('dialog', { name: 'Add photos' });
@@ -7787,7 +7795,7 @@ describe('Manager Library empty states', () => {
     render(<RouterProvider router={createAppRouter(['/manage/event/event-a'])} />);
     const user = userEvent.setup();
 
-    await screen.findByRole('heading', { name: 'No photos have been delivered yet.' });
+    await screen.findByRole('heading', { name: 'No photos yet.' });
     const invokers = screen.getAllByRole('button', { name: 'Add photos' });
     expect(invokers).toHaveLength(1);
     for (const invoker of invokers) {
@@ -8265,6 +8273,23 @@ describe('host account attachment and recovery', () => {
     await user.click(screen.getByRole('button', { name: 'Confirm my email' }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe(`/manage/event/${RECOVERY_EVENT_ID}`));
+    expect(router.state.location.search).toBe('?section=overview');
+
+    // Exercise the completion contract while the receipt remains mounted. The
+    // ordinary registration route above intentionally leaves the receipt.
+    cleanup();
+    stubHostFlow();
+    vi.spyOn(HostAccountPanelModule, 'HostAccountPanel').mockImplementation(({ onCompleted }) =>
+      <button onClick={() => onCompleted?.({ boundEvent: true })}>Confirm mounted binding</button>);
+    render(<RouterProvider router={createAppRouter(['/create'])} />);
+    await createEvent(user);
+    expect(screen.getByText(/You can save this event to an account until/)).toBeVisible();
+    expect(screen.getByText(/cannot be recovered/i)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Confirm mounted binding' }));
+    expect(screen.getByText('Saved to your account')).toBeVisible();
+    expect(screen.queryByText(/You can save this event to an account until/)).not.toBeInTheDocument();
+    expect(screen.getByText('Keep your management link private.', { exact: true })).toBeVisible();
+    expect(screen.getByText(/Anyone who has it can manage this event/i)).toBeVisible();
   });
 
   it('says the event is still link-only when completion binds nothing', async () => {
@@ -8347,6 +8372,9 @@ describe('host account attachment and recovery', () => {
 
     expect(screen.getByText(/Anyone who has it can manage this event/i)).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Create account' })).not.toBeInTheDocument();
+    expect(screen.getByText('Saved to your account')).toBeVisible();
+    expect(screen.queryByText(/You can save this event to an account until/)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Continue to your event' })).toHaveAttribute('href', `/manage/event/${RECOVERY_EVENT_ID}?section=overview`);
   });
 
   it('moves create-success registration into the addressable pending route', async () => {
@@ -8361,7 +8389,7 @@ describe('host account attachment and recovery', () => {
     await user.click(screen.getByRole('button', { name: 'Create account' }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/host/register'));
-    expect(router.state.location.search).toBe(`?returnTo=%2Fmanage%2Fevent%2F${eventId}&adopt=${eventId}&pending=1`);
+    expect(router.state.location.search).toBe(`?returnTo=%2Fmanage%2Fevent%2F${eventId}%3Fsection%3Doverview&adopt=${eventId}&pending=1`);
     expect(fetchMock.mock.calls.some(([url]) => url === '/api/host/register')).toBe(true);
   });
 
@@ -9253,5 +9281,41 @@ describe('guest event phase composition', () => {
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' });
     expect(await screen.findByRole('alert')).toHaveTextContent('The book is resting. Try again.');
     expect(screen.getByRole('textbox', { name: 'Your note' })).toBeEnabled();
+  });
+});
+
+describe('contextual onboarding guidance', () => {
+  it.each(['share', 'gallery'] as const)('loads confirmed onboarding guidance in direct Share and Library: %s', async section => {
+    const base = managerFetch({ first: { media: [], nextCursor: null } });
+    let lifecycleReads = 0;
+    let summaryReads = 0;
+    const writes: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method && init.method !== 'GET') writes.push(url);
+      if (url.endsWith('/lifecycle')) {
+        lifecycleReads += 1;
+        return json({ phase: 'before-start', rsvpState: 'disabled', photoIntakeState: 'scheduled', guestAccessEnded: false, entryDisabled: false, lifecycleRecheckAfterMs: null });
+      }
+      if (url.endsWith('/rsvp/summary')) summaryReads += 1;
+      if (url.endsWith('/api/manage/events/event-a')) return json({ event: { ...MANAGED_EVENT, storedMediaCount: 0 } });
+      if (url.endsWith('/api/host/session')) return errorJson({ code: 'AUTH_REQUIRED', message: 'Sign in required.' }, 401);
+      return base(input);
+    }));
+    render(<RouterProvider router={createAppRouter([`/manage/event/event-a?section=${section}`])} />);
+    if (section === 'share') {
+      expect(await screen.findByRole('heading', { name: 'Share your link or QR' })).toBeVisible();
+      expect(await screen.findByText('Photo uploads open September 19, 2026 at 5:00 PM CDT.')).toBeVisible();
+      expect(screen.getByText('Copy the guest link or download the QR. Guests send originals without an account.')).toBeVisible();
+      expect(screen.queryByText('Photo uploads are already open.')).not.toBeInTheDocument();
+    } else {
+      expect(await screen.findByRole('heading', { name: 'No photos yet.' })).toBeVisible();
+      expect(await screen.findByText('Share your guest link so guests are ready when uploads open.')).toBeVisible();
+      expect(screen.queryByText('Share your guest link so guests can send originals.')).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(lifecycleReads).toBe(1);
+    expect(summaryReads).toBe(0);
+    expect(writes).toEqual([]);
   });
 });

@@ -1,14 +1,14 @@
 # Host event welcome and guided tour — shape brief
 
-Status: Approved by the user on 2026-10-08. Composition, primary outcome, automatic first-visit launch, tour coverage, account-level replay behavior, and entry boundary are confirmed. Implemented and remediated while preserving the existing design system, then pushed to main in commit `39f16cc`. See the implementation and remediation plans for focused evidence and limitations.
+Status: Original direction approved on 2026-10-08. The 2026-10-11 remediation is implemented locally against `4ffcc33`, with entry, introduction and tools-tour behavior described below. See [the remediation checklist](../superpowers/plans/2026-10-11-onboarding-remediation-checklist.md) for focused evidence and remaining verification gaps. No release of this remediation is claimed.
 
-Release checkpoint: Migration `0027_host_tours.sql` is applied in preview and production. Production application deployment has not been verified.
+Historical release checkpoint (original implementation `39f16cc`): Migration `0027_host_tours.sql` is applied in preview and production. Production application deployment has not been verified.
 
 ## Job and audience
 
-After signing in and choosing an event, a host needs to recognize the event, understand its current phase, and see one recommended next task. First-time hosts also need a guided explanation of the tools. Returning hosts need direct access to their work. The visitor mode is **Operate**.
+After signing in and choosing an event, a host needs to recognize the event, understand its current phase, and see one recommended next task. First-time hosts need a short introduction that hands off to their current task; a separate tools tour is optional. Returning hosts need direct access to their work. The visitor mode is **Operate**.
 
-Add a persistent **Overview** destination inside the existing Manager. Its composition is **Choose your next task**: an explained workflow launcher led by current phase and one recommended action. First-time guidance is an anchored modal tour.
+Add a persistent **Overview** destination inside the existing Manager. Its composition is **Choose your next task**: an explained workflow launcher led by current phase and one recommended action. First-time guidance is a one-screen anchored modal introduction, with a separate six-step tools tour.
 
 ## Outcome and proof
 
@@ -27,7 +27,7 @@ Reading order:
 1. Existing Manager header and event identity, including the zoned event date.
 2. Current phase and one recommended action, with a short explanation.
 3. Explained workflow choices using familiar labels and existing destinations.
-4. Confirmed review/export information when useful, plus **Take a tour** for replay.
+4. Confirmed review/export information when useful. **Show me how to collect photos** sits beside the recommended task; **Tour event tools** sits beside the workflow heading.
 
 The action policy follows server-confirmed state:
 
@@ -45,9 +45,9 @@ Original retrieval stays available regardless of Album or Guest gallery publicat
 
 ## Scope and boundaries
 
-The requested entry is an event chosen from **Your events**. Make that link open an explicit Overview location, and add Overview to Manager navigation.
+Events chosen from **Your events** open explicit Overview. Creation now also enters `?section=overview` through **Continue to your event** and the account-registration return. Overview remains a labelled Manager destination.
 
-Preserve bare Manager URLs as Gallery → Library and preserve explicit workspace, login-return, recovery, management-link, and PWA launch destinations. A direct link to active work must not become a forced welcome detour. Creation's existing manager entry remains outside this first pass.
+Preserve bare Manager URLs as Gallery → Library and preserve explicit workspace, login-return, recovery, management-link, and PWA launch destinations. A direct link to active work must not become a forced welcome detour. Creation was outside the original October 8 scope; the approved October 11 remediation adds these two explicit entry paths.
 
 Keep the existing RSVP, Gallery, Guestbook, Share, and Settings tools and their responsibilities. Gallery retains Library, Album, and Guest gallery. Every welcome action and tour transition uses existing guarded navigation.
 
@@ -55,24 +55,26 @@ The tour explains real controls. Next never changes settings, submits a guest li
 
 ## Guided tour
 
-Start automatically on the signed-in host's first Overview visit. Provide **Back**, **Next**, **Skip tour**, and **Finish**, with a visible step count. Closing or pressing Escape exits. **Take a tour** remains available for replay.
+An unseen signed-in account receives the short **Introduction** after event identity, lifecycle and account eligibility are confirmed. It explains private, account-free photo delivery, the confirmed phase/reason, and one exact task. **Go to Share / RSVP / Library / Exports / Settings** uses the same guarded recommendation dispatcher as Overview. Completion waits for the intended destination and useful focus; it never activates the highlighted control.
 
-Proposed sequence:
+**Tour event tools** explicitly starts six steps, with **Back**, **Next**, **Skip tour**, **Close tour**, and **Finish**. Closing or pressing Escape exits either mode. Manual replay starts again; reload closes guidance at the committed workspace and does not promise resume. Optional details live beside RSVP, Share, Library modes and Exports controls.
+
+Tools sequence:
 
 | Step | Destination and anchor | What the host learns |
 | --- | --- | --- |
 | 1. Your next task | Overview's phase and recommended-action region | What is happening now and where to go next. |
-| 2. Your guest list | RSVP's visible heading or available Add guests control | Named invitations and household attendance live here; RSVP is optional. |
-| 3. One QR for your event | Share's guest QR / print-pack region | The same QR goes on invitations and venue signs; its guest task changes with the event. |
+| 2. Your guest list | RSVP's real Add guests control, with neutral wording for existing/unknown rosters | Named invitations and household attendance live here; RSVP is optional. |
+| 3. One QR for your event | Share's actual guest-link/QR region, or compact link controls with a truthful close-to-inspect-QR note | The same QR goes on invitations and venue signs; its guest task changes with the event. |
 | 4. Your delivered photos | Gallery's Library region and mode switch | Originals arrive in Library; Album and Guest gallery are distinct, optional sharing choices. |
 | 5. Keep your originals | Library's Exports control | Retrieve originals through exports; preparation does not prove download. |
-| 6. Event details and access | Settings' visible details / delivery region | Adjust details and availability here; the tour itself edits nothing. |
+| 6. Event details and access | Settings' Guest uploads status/actions; disabled access uses status | Adjust details and availability here; the tour itself edits nothing. |
 
-Finish returns to Overview and focuses its recommended action. Back visits the previous step through guarded navigation rather than issuing an unqualified browser Back.
+Tools **Finish** returns to Overview and focuses its recommended action. Back visits the previous step through guarded navigation rather than issuing an unqualified browser Back.
 
 On desktop, dialogs point to visible controls. On phones, use a reachable anchored panel or bottom sheet when a floating bubble would obscure its target or leave the viewport. Placement follows actual target bounds, scrolling, and text enlargement. Never anchor to a hidden mobile navigation item.
 
-Persist first-visit status per signed-in host account and tour version, rather than per event or inferred from setup activity. Completion and dismissal suppress automatic replay across devices. Exiting is not event setup completion. Existing accounts with no record are eligible for the new tour. Link-only hosts can replay it manually without registering. The current application has no tour record; this requires an explicit addition.
+Persist first-visit status per signed-in host account and tour version, rather than per event or inferred from setup activity. Completion and dismissal suppress automatic replay across devices. Exiting is not event setup completion. Existing accounts with no record are eligible for the new tour. Link-only hosts can replay it manually without registering. The original proposal had no tour record; migration `0027_host_tours.sql` subsequently added account-level state. Both current modes reuse `host-event-welcome`, version `1`, with terminal completion precedence, confirmed/pending saves, retry and identity isolation. This remediation adds no migration or version bump.
 
 ## States, interaction, and accessibility
 
@@ -80,7 +82,7 @@ Only event identity gates the Manager shell. Counts, entry data, phase, and expo
 
 Each step waits for the committed destination, settled scroll, and a visible anchor. Prevent repeated Next activation while transitioning. An unavailable target keeps an understandable explanation and retry/exit path, rather than an arrow pointing at empty coordinates.
 
-The existing modal surface makes Manager inert. Highlighted controls are explanatory targets, not interactive holes in the focus trap. Focus each new step, label the dialog, retain keyboard operation, and restore focus on exit. Keep 44px minimum targets, standard 48px controls, existing focus treatments, and reduced-motion behavior.
+The existing modal surface makes Manager inert. Highlighted controls are explanatory targets, not interactive holes in the focus trap. Focus each new step, label the dialog, retain keyboard operation, and restore focus on exit. The dialog describes the full phase/task body; its focused heading describes only Introduction or Step N of 6 to avoid repeating long instructions in native readers. Keep 44px minimum targets, standard 48px controls, existing focus treatments, and reduced-motion behavior.
 
 Only one modal owns the screen. Suspend the tour before an existing save, upload, viewer, or confirmation dialog takes focus. If navigation is refused, retain the current step. Preserve autosave, guest-list drafts, Album leave preparation, uploads, rotated-link warnings, Gallery anchors, and browser history.
 
@@ -88,12 +90,12 @@ Support empty/populated events, optional RSVP, long names, localized dates, summ
 
 ## Data and implementation constraints
 
-`src/pages/HostEventsPage.tsx` currently links to the bare Manager path; `src/app/manager-location.ts` resolves it to Gallery → Library. Add an explicit Overview location without changing that meaning. `src/pages/ManagerPage.tsx` owns resources and guarded destinations; `src/features/manager/ManagerNavigation.tsx` owns the responsive shell.
+Historically, `HostEventsPage` linked to bare Manager. Its event links now select Overview explicitly; `src/app/manager-location.ts` still resolves bare Manager to Gallery → Library. `src/pages/ManagerPage.tsx` owns resources and guarded destinations; `src/features/manager/ManagerNavigation.tsx` owns the responsive shell.
 
-Manager exposes photo-delivery state but not the complete guest phase. Add a host-safe server phase projection using the existing resolver in `shared/rsvp.ts`, server access-window rules, and a relative lifecycle refresh delay. Preserve legacy-event behavior. Do not reconstruct phase from the browser clock or a bearer guest route.
+Manager uses the host-safe server phase projection using the existing resolver in `shared/rsvp.ts`, server access-window rules, and a relative lifecycle refresh delay. Preserve legacy-event behavior. Do not reconstruct phase from the browser clock or a bearer guest route.
 
 There is no event end time or defined Manager “event finished” phase. Do not invent one. Distinguish the existing RSVP / before-start / photos / waiting semantics from guest-access expiry. A later post-event phase needs an agreed rule.
 
-Use the existing RSVP summary endpoint without mounting its editor and full roster. Add explicit tour first-visit/dismissal/completion state. `src/components/ModalSurface.tsx` supplies modal semantics and focus containment; anchored positioning, step-specific focus, and coordination with guarded navigation are new requirements.
+Use the existing RSVP summary endpoint without mounting its editor and full roster. Retain the existing explicit account tour first-visit/dismissal/completion state. `src/components/ModalSurface.tsx` supplies modal semantics and focus containment; anchored positioning, step-specific focus and coordinated guarded navigation are implemented. Actual platform evidence and limitations are recorded in the remediation checklist.
 
-Confirm the assembled hierarchy, six-step tour, account-level replay behavior, and entry boundary before writing an implementation plan.
+The approved remediation preserves mounted Settings drafts and normal autosave. Valid drafts can save during navigation; invalid/failed drafts retain the existing Router refusal, including the exercised internal Overview and external Home intents, until the host chooses how to proceed. The guide does not introduce a separate saving policy. No automatic sharing, mutation, invitation sending or export preparation is part of either guide mode.

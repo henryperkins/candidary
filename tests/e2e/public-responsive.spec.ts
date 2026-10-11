@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 import type { HostSessionResponse } from '../../shared/contracts';
+import { SITE_BLURB } from '../../shared/site-content';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 import { UNBROKEN_TOKEN, makeMedia } from './fixtures/ui-data';
 import {
@@ -107,6 +108,11 @@ test('the landing copy precedes the decorative hero image on phones', async ({ p
     await page.setViewportSize({ width, height: 844 });
     await page.goto('/');
 
+    await expect(page.locator('.hero__copy > p:not(.section-label)')).toHaveText('Create a private event and share its link or QR code. Guests send original photos without an app or account. Photos arrive privately; you choose what to share.');
+    expect(SITE_BLURB).toBe('Create a private event and share its link or QR code. Guests send original photos without an app or account. Photos arrive privately; you choose what to share.');
+    await expect(page.locator('.workflow ol strong').filter({ hasText: 'Invite and RSVP (optional)' })).toBeVisible();
+    await expect(page.getByText('Interactive example · RSVP is optional', { exact: true })).toBeVisible();
+    await expect(page.getByText('Illustrative event. No responses or photos are sent.', { exact: true })).toBeVisible();
     const headline = await measureFold(page, page.getByRole('heading', { level: 1 }));
     const image = await measureFold(page, page.locator('.hero__image'));
     expect(image.top, `hero image follows the headline at ${width}`).toBeGreaterThan(headline.bottom);

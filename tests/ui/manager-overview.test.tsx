@@ -39,14 +39,14 @@ const PHASE: HostEventLifecycleView = { phase: 'rsvp-primary', rsvpState: 'open'
 const SUMMARY = { namedInvitees: 0, invitedCapacity: 0, plusOneCapacity: 0, attending: 0, declined: 0, awaitingResponse: 0, householdsResponded: 0, householdsAwaitingResponse: 0 };
 function json(data: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(status >= 400 ? { ...(data as object), requestId: 'overview' } : { data, requestId: 'overview' }), { status, headers: { 'content-type': 'application/json' } })); }
 function deferred() { let resolve!: (value: Response) => void; const promise = new Promise<Response>(r => { resolve = r; }); return { promise, resolve }; }
-function setup(options: { lifecycle?: () => Promise<Response>; summary?: () => Promise<Response>; event?: () => Promise<Response>; path?: string } = {}) {
+function setup(options: { lifecycle?: () => Promise<Response>; summary?: () => Promise<Response>; event?: () => Promise<Response>; path?: string; entry?: { eventLink: string | null; disabledAt: string | null } } = {}) {
   const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith('/lifecycle')) return options.lifecycle?.() ?? json(PHASE);
     if (url.endsWith('/rsvp/summary')) return options.summary?.() ?? json(SUMMARY);
     if (/\/api\/manage\/events\/event-[ab]$/.test(url)) return options.event?.() ?? json({ event: { ...EVENT, id: url.endsWith('event-b') ? 'event-b' : 'event-a', name: url.endsWith('event-b') ? 'Second event' : EVENT.name } });
     if (url.endsWith('/exports')) return json({ exports: [] });
-    if (url.endsWith('/entry')) return json({ eventLink: null, disabledAt: null });
+    if (url.endsWith('/entry')) return json(options.entry ?? { eventLink: 'https://candidary.test/join#fixture', disabledAt: null });
     if (url.includes('/guestbook')) return json({ summary: { needsReviewCount: 0 } });
     if (url.includes('/gallery/summary')) return json({ summary: { albumPhotoCount: 0, albumEntryCount: 0, albumLink: { active: false }, guestGalleryVisible: false, guestGalleryPublishedCount: 0 } });
     if (url.includes('/photo-exports/capabilities')) return json({ enabled: false });
@@ -64,12 +64,19 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('Manager Overview', () => {
   it('uses only supplied guarded callbacks for every workflow and tour replay', async () => {
     function state<T>(value: T): ResourceState<T> { return { eventId: 'event-a', queryKey: 'test', generation: 1, value, status: 'ready', failure: null, terminal: false }; }
-    const onNavigate = vi.fn(); const onTakeTour = vi.fn();
-    render(<ManagerOverview lifecycle={state(PHASE)} summary={state(SUMMARY)} exports={state([])} deliveredPhotos={null} onNavigate={onNavigate} onTakeTour={onTakeTour} onRetryLifecycle={vi.fn()} onRetrySummary={vi.fn()} onRetryExports={vi.fn()} />);
+    const onNavigate = vi.fn(); const onTakeTour = vi.fn(); const onShowIntroduction = vi.fn();
+    render(<ManagerOverview phaseLabel="RSVP is open" lifecycle={state(PHASE)} summary={state(SUMMARY)} exports={state([])} recommendation={{ label: 'Add guests', reason: 'RSVP is open.', destination: 'rsvp' }} onNavigate={onNavigate} onTakeTour={onTakeTour} onShowIntroduction={onShowIntroduction} onRetryLifecycle={vi.fn()} onRetrySummary={vi.fn()} onRetryExports={vi.fn()} />);
     const user = userEvent.setup();
     for (const label of ['Add guests', 'Open RSVP', 'Open Share', 'Open Library', 'Open Exports', 'Open Settings']) await user.click(screen.getByRole('button', { name: label }));
     expect(onNavigate.mock.calls.map(([destination]) => destination)).toEqual(['rsvp', 'rsvp', 'share', 'library', 'originals', 'settings']);
-    await user.click(screen.getByRole('button', { name: 'Take a tour' }));
+    const introduction = screen.getByRole('button', { name: 'Show me how to collect photos' });
+    expect(introduction.closest('[data-host-tour-anchor]')).toHaveAttribute('data-host-tour-anchor', 'overview-task');
+    expect(introduction).toHaveClass('button--quiet');
+    await user.click(introduction);
+    expect(onShowIntroduction).toHaveBeenCalledOnce();
+    const tools = screen.getByRole('button', { name: 'Tour event tools' });
+    expect(tools.closest('section')).toHaveAttribute('aria-labelledby', 'overview-workflows-title');
+    await user.click(tools);
     expect(onTakeTour).toHaveBeenCalledOnce();
     expect(screen.getByRole('button', { name: 'Add guests' }).closest('[data-host-tour-anchor]')).toHaveAttribute('data-host-tour-anchor', 'overview-task');
   });
@@ -141,4 +148,11 @@ describe('Manager Overview', () => {
     expect(screen.queryByRole('heading', { name: 'Choose your next task' })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/lifecycle'))).toBe(false);
   });
+});
+
+it('uses confirmed disabled entry for both Overview phase and recommendation even before lifecycle catches up', async () => {
+  setup({ lifecycle: () => json({ ...PHASE, phase: 'photos-primary', photoIntakeState: 'open' }), entry: { eventLink: null, disabledAt: '2026-10-11T00:00:00Z' } });
+  expect(await screen.findByRole('button', { name: 'Review event access', exact: true })).toBeVisible();
+  expect(screen.getByText('Event QR disabled', { exact: true })).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Share your QR' })).not.toBeInTheDocument();
 });
