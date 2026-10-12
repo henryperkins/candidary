@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -39,9 +39,10 @@ const PHASE: HostEventLifecycleView = { phase: 'rsvp-primary', rsvpState: 'open'
 const SUMMARY = { namedInvitees: 0, invitedCapacity: 0, plusOneCapacity: 0, attending: 0, declined: 0, awaitingResponse: 0, householdsResponded: 0, householdsAwaitingResponse: 0 };
 function json(data: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(status >= 400 ? { ...(data as object), requestId: 'overview' } : { data, requestId: 'overview' }), { status, headers: { 'content-type': 'application/json' } })); }
 function deferred() { let resolve!: (value: Response) => void; const promise = new Promise<Response>(r => { resolve = r; }); return { promise, resolve }; }
-function setup(options: { lifecycle?: () => Promise<Response>; summary?: () => Promise<Response>; event?: () => Promise<Response>; path?: string; entry?: { eventLink: string | null; disabledAt: string | null } } = {}) {
-  const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
+function setup(options: { lifecycle?: () => Promise<Response>; summary?: () => Promise<Response>; event?: () => Promise<Response>; tour?: () => Promise<Response>; path?: string; entry?: { eventLink: string | null; disabledAt: string | null } } = {}) {
+  const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>((input) => {
     const url = String(input);
+    if (url === '/api/host/tours/host-event-welcome/1') return options.tour?.() ?? json({ code: 'HOST_SESSION_REQUIRED', message: 'Sign in required.' }, 401);
     if (url.endsWith('/lifecycle')) return options.lifecycle?.() ?? json(PHASE);
     if (url.endsWith('/rsvp/summary')) return options.summary?.() ?? json(SUMMARY);
     if (/\/api\/manage\/events\/event-[ab]$/.test(url)) return options.event?.() ?? json({ event: { ...EVENT, id: url.endsWith('event-b') ? 'event-b' : 'event-a', name: url.endsWith('event-b') ? 'Second event' : EVENT.name } });
@@ -142,11 +143,18 @@ describe('Manager Overview', () => {
     expect(screen.queryByRole('button', { name: 'Retrieve originals' })).not.toBeInTheDocument();
   });
   it.each(['', '?section=gallery&mode=guest-gallery'])('preserves existing direct work URL %s', async path => {
-    const { router, fetchMock } = setup({ path: '/manage/event/event-a' + path });
+    const account = deferred();
+    const { router, fetchMock } = setup({ path: '/manage/event/event-a' + path, tour: () => account.promise });
     await screen.findByRole('heading', { name: EVENT.name });
+    const workspace = await screen.findByRole('group', { name: 'Gallery mode' });
+    expect(within(workspace).getByRole('button', { name: path ? /^Guest gallery/ : /^Library/ })).toHaveAttribute('aria-pressed', 'true');
+    await act(async () => { account.resolve(await json({ accountId: 'direct-work-account', tourKey: 'host-event-welcome', version: 1, status: 'unseen' })); });
     expect(router.state.location.search).toBe(path);
     expect(screen.queryByRole('heading', { name: 'Choose your next task' })).not.toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/lifecycle'))).toBe(false);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/lifecycle'))).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/rsvp/households'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([, init]) => !['GET', 'HEAD'].includes((init as RequestInit)?.method ?? 'GET'))).toBe(false);
   });
 });
 

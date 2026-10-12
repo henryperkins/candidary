@@ -646,7 +646,8 @@ test('onboarding-a11y: failed-save replay and missing target expose one recovera
   fail = false;
   await dialog.getByRole('button', { name: 'Retry saving tour preference' }).focus(); await page.keyboard.press('Enter');
   await expect(dialog.getByRole('button', { name: 'Retry saving tour preference' })).toHaveCount(0);
-  await expect(dialog.getByRole('status')).toHaveCount(0);
+  await expect(dialog.getByRole('status')).toHaveCount(1);
+  await expect(dialog.getByRole('status')).toHaveText('');
   // Removing the successful retry control must keep focus in the dialog.
   await expect(title).toBeFocused();
   await page.keyboard.press('Escape');

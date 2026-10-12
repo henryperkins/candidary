@@ -313,7 +313,9 @@ export function HostWelcomeTour({ location, blocked, onNavigate, onClose, mode =
         {compact && step.anchor === 'share-qr' && <p>The highlighted controls hold your guest link. Close the tour to inspect the QR below.</p>}
         {compact && step.anchor === 'settings' && <p>The highlighted region shows Guest uploads status. Close the tour to inspect the available controls below.</p>}
         {inline && <p>This part of the page cannot fit beside the guide at this size. Close the tour to inspect it in the workspace, or continue the tour.</p>}
-        {status && <p role="status">{status}</p>}
+        <div className="host-welcome__status" role="status" aria-live="polite" aria-atomic="true">
+          <p aria-atomic="true" className={status ? undefined : 'sr-only'}>{status}</p>
+        </div>
         {saveFailed && onRetrySave && <button type="button" className="button button--secondary" onClick={event => {
           saveRetryHadFocus.current = document.activeElement === event.currentTarget;
           onRetrySave();

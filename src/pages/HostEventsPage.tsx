@@ -1,10 +1,12 @@
 import { CalendarDays, Images, MailWarning } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 
 import type { HostSessionResponse } from '../../shared/contracts';
 import { managerHref } from '../app/manager-location';
 import { api, ClientApiError } from '../app/api';
+import { hostAuthLandingFromState, hostAuthLandingMatchesAccount, type HostAuthLandingIdentity } from '../app/host-auth-landing';
+import { hostSignInHref, HOST_EVENTS_PATH } from '../app/recovery';
 import {
   DATE_UNAVAILABLE,
   TIME_UNAVAILABLE,
@@ -19,6 +21,7 @@ type EventSortOrder = 'newest' | 'oldest';
 
 export function HostEventsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [session, setSession] = useState<HostSessionResponse | null>(null);
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [busy, setBusy] = useState(false);
@@ -27,24 +30,62 @@ export function HostEventsPage() {
   // Kept apart from `failure`: these are refused actions on a page that loaded fine,
   // so they must not replace the events with an error screen.
   const [actionError, setActionError] = useState('');
+  const mounted = useRef(false);
+  const requestSequence = useRef(0);
+  const locationKey = useRef(location.key);
+  locationKey.current = location.key;
+  const landing = useRef<{ identity: HostAuthLandingIdentity; key: string | null } | null>(null);
 
   const load = useCallback(async () => {
+    const sequence = ++requestSequence.current;
+    const key = location.key;
+    const isCurrent = () => mounted.current && locationKey.current === key && requestSequence.current === sequence;
     setFailure(null);
     try {
-      setSession(await api<HostSessionResponse>('/api/host/session'));
+      const loaded = await api<HostSessionResponse>('/api/host/session');
+      if (!isCurrent()) return;
+      const intent = landing.current;
+      const openOnlyEvent = intent?.key === key && loaded.events.length === 1
+        && await hostAuthLandingMatchesAccount(intent.identity, loaded.account);
+      if (!isCurrent()) return;
+      landing.current = null;
+      if (openOnlyEvent) {
+        navigate(managerHref(loaded.events[0]!.id, { section: 'overview' }), { replace: true });
+        return;
+      }
+      setSession(loaded);
     } catch (caught) {
+      if (!isCurrent()) return;
       // A missing or expired account session is not an error page — it is the
       // sign-in page, which is the only thing that resolves it.
       if (caught instanceof ClientApiError
         && ['HOST_SESSION_REQUIRED', 'SESSION_REQUIRED', 'SESSION_EXPIRED'].includes(caught.code)) {
-        navigate('/host/login');
+        navigate(hostSignInHref(null, HOST_EVENTS_PATH));
         return;
       }
       setFailure(describeLoadFailure(caught, 'manager', 'Your events could not be loaded.'));
     }
-  }, [navigate]);
+  }, [location.key, navigate]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; requestSequence.current += 1; };
+  }, []);
+
+  useEffect(() => {
+    const identity = hostAuthLandingFromState(location.state);
+    if (identity) {
+      landing.current = { identity, key: null };
+      // Consume the history intent before the lookup. Retry keeps it only in this
+      // mount; navigating away and coming Back always restores the dashboard.
+      navigate({ pathname: location.pathname, search: location.search, hash: location.hash }, { replace: true, state: null });
+      return;
+    }
+    if (landing.current?.key === null) landing.current.key = location.key;
+    else if (landing.current?.key !== location.key) landing.current = null;
+    void load();
+    return () => { requestSequence.current += 1; };
+  }, [load, location, navigate]);
 
   async function signOut() {
     setBusy(true); setActionError('');

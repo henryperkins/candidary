@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import type { HostSessionAccountView, HostSessionEventView } from '../../shared/contracts';
 import { EVENT_FIXTURE, stubManagerRoutes } from './fixtures/routes';
 
 const eventId = '11111111-2222-4333-8444-555555555555';
@@ -8,8 +9,8 @@ type Status = 'link' | 'unseen' | 'dismissed' | 'completed';
 
 // Each explicit viewport/scenario has one owner; the second configured project
 // deliberately skips it instead of duplicating this matrix.
-test.beforeEach(async ({}, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop', 'Explicit viewport matrix is owned by desktop project.');
+test.beforeEach(async ({ browserName }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', `Explicit ${browserName} viewport matrix is owned by desktop project.`);
 });
 
 async function stubEntry(page: Page, initial: Status, boundEvent = true) {
@@ -172,3 +173,106 @@ for (const viewport of [{ width: 320, height: 568 }, { width: 375, height: 667 }
     await page.screenshot({ path: `output/playwright/onboarding-remediation-2026-10-11/task-4/overview-${viewport.width}.png` });
   });
 }
+
+async function stubSignInEntry(page: Page, eventCount = 1) {
+  const audit = await stubEntry(page, 'unseen');
+  const account: HostSessionAccountView = {
+    id: 'host-entry', email: 'host@example.test', displayName: null,
+    emailVerified: true, notificationsEnabled: true,
+  };
+  const events: HostSessionEventView[] = Array.from({ length: eventCount }, (_, index) => ({
+    id: index === 0 ? eventId : 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    name: index === 0 ? EVENT_FIXTURE.name : 'Second event',
+    slug: index === 0 ? EVENT_FIXTURE.slug : 'second-event',
+    eventDate: EVENT_FIXTURE.eventDate, eventTimezone: EVENT_FIXTURE.eventTimezone,
+    storedMediaCount: EVENT_FIXTURE.storedMediaCount,
+    managementAccessExpiresAt: EVENT_FIXTURE.managementAccessExpiresAt,
+  }));
+  let signedIn = false;
+  let sessionReads = 0;
+  await page.route('**/api/host/login', async route => {
+    expect(route.request().postDataJSON()).toEqual({ email: account.email, password: 'a-sufficiently-long-password' });
+    signedIn = true;
+    await route.fulfill({ json: { data: { account } } });
+  });
+  await page.route('**/api/host/password/forgot', route => route.fulfill({ json: { data: { requested: true } } }));
+  await page.route('**/api/host/password/reset', async route => {
+    expect(route.request().postDataJSON()).toEqual({ email: account.email, code: '424242', password: 'a-sufficiently-new-password' });
+    signedIn = true;
+    await route.fulfill({ json: { data: { reset: true } } });
+  });
+  await page.route('**/api/host/session', async route => {
+    sessionReads += 1;
+    await route.fulfill(signedIn
+      ? { json: { data: { account, events } } }
+      : { status: 401, json: { code: 'HOST_SESSION_REQUIRED', message: 'Sign in required.' } });
+  });
+  return { ...audit, sessionReads: () => sessionReads };
+}
+
+async function signIn(page: Page, returnTo?: string) {
+  await page.goto('/host/login' + (returnTo ? '?returnTo=' + encodeURIComponent(returnTo) : ''));
+  await page.getByLabel('Email address', { exact: true }).fill('host@example.test');
+  await page.getByLabel('Password', { exact: true }).fill('a-sufficiently-long-password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+}
+
+test('onboarding-signin: solitary saved event opens Overview and the unseen introduction', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const audit = await stubSignInEntry(page);
+  await signIn(page);
+  await expect(page).toHaveURL(`${manager}?section=overview`);
+  await expect(page.getByRole('heading', { name: 'Collect photos privately', exact: true })).toBeFocused();
+  expect(audit.sessionReads()).toBe(1);
+  expect(audit.mutations).toEqual([]);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Share your QR', exact: true })).toBeFocused();
+});
+
+test('onboarding-signin: password reset uses the solitary-event Overview destination', async ({ page }) => {
+  await stubSignInEntry(page);
+  await page.goto('/host/login');
+  await page.getByRole('button', { name: 'Forgotten your password?' }).click();
+  await page.getByLabel('Email address', { exact: true }).fill('host@example.test');
+  await page.getByRole('button', { name: 'Send reset code' }).click();
+  await page.getByLabel('Confirmation code', { exact: true }).fill('424242');
+  await page.getByLabel('New password', { exact: true }).fill('a-sufficiently-new-password');
+  await page.getByRole('button', { name: 'Set new password' }).click();
+  await expect(page).toHaveURL(`${manager}?section=overview`);
+  await expect(page.getByRole('heading', { name: 'Collect photos privately', exact: true })).toBeFocused();
+});
+
+for (const eventCount of [0, 2]) {
+  test(`onboarding-signin: ${eventCount} saved events keep the Host Events dashboard`, async ({ page }) => {
+    await stubSignInEntry(page, eventCount);
+    await signIn(page);
+    await expect(page).toHaveURL('/host/events');
+    await expect(page.getByRole('heading', { name: 'Your events', exact: true })).toBeVisible();
+    await expect(page.getByRole('checkbox', { name: 'Send me event emails' })).toBeEnabled();
+    if (eventCount === 0) await expect(page.getByText(/No events are saved to this account yet/)).toBeVisible();
+    else await expect(page.getByRole('listitem')).toHaveCount(eventCount);
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+  });
+}
+
+test('onboarding-signin: explicit Host Events return keeps account settings available', async ({ page }) => {
+  await stubSignInEntry(page);
+  await signIn(page, '/host/events');
+  await expect(page).toHaveURL('/host/events');
+  await expect(page.getByRole('heading', { name: 'Your events', exact: true })).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: 'Send me event emails' })).toBeEnabled();
+  await expect(page.getByRole('link', { name: new RegExp(EVENT_FIXTURE.name) })).toHaveAttribute('href', `${manager}?section=overview`);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('onboarding-signin: explicit Gallery deep link wins without an automatic introduction', async ({ page }) => {
+  const audit = await stubSignInEntry(page);
+  const destination = `${manager}?section=gallery&mode=guest-gallery`;
+  await signIn(page, destination);
+  await expect(page).toHaveURL(destination);
+  await expect(page.getByRole('group', { name: 'Gallery mode' }).getByRole('button', { name: /^Guest gallery/ })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('heading', { name: 'Choose your next task' })).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(audit.writes).toEqual([]);
+  expect(audit.mutations).toEqual([]);
+});

@@ -110,6 +110,32 @@ describe('tour flow', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Skip tour' })).toBeVisible());
     await user.click(screen.getByRole('button', { name: 'Skip tour' }));
   });
+  it('keeps recovery announcements in a persistent polite live region while a target disappears and recovers', async () => {
+    anchors();
+    const user = userEvent.setup();
+    render(<HostWelcomeTour mode="tools" context={introContext} location="overview" blocked={false} onNavigate={vi.fn()} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+    // AT must know the live region before recovery text is added to it.
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent(/^$/);
+    expect(status).toHaveAttribute('aria-live', 'polite');
+    expect(status).toHaveAttribute('aria-atomic', 'true');
+    const message = status.firstElementChild;
+    expect(message).not.toBeNull();
+    const target = document.querySelector<HTMLElement>('[data-host-tour-anchor="overview-task"]')!;
+    act(() => target.remove());
+    await waitFor(() => expect(status).toHaveTextContent('This part of the page is not available yet.'), { timeout: 2500 });
+    expect(screen.getByRole('status')).toBe(status);
+    expect(status.firstElementChild).toBe(message);
+    expect(screen.getByRole('heading', { name: 'Your next task' })).toHaveFocus();
+    act(() => document.body.append(target));
+    await user.click(screen.getByRole('button', { name: 'Retry step' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+    expect(screen.getByRole('status')).toBe(status);
+    expect(status.firstElementChild).toBe(message);
+    expect(status).toHaveTextContent(/^$/);
+    expect(screen.getByRole('heading', { name: 'Your next task' })).toHaveFocus();
+  });
 });
 
 it('completes all six committed steps and focuses Overview without activating its action', async () => {

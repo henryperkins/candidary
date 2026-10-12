@@ -1,7 +1,9 @@
-import { type FormEvent, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
+import type { HostSessionAccountView } from '../../shared/contracts';
 import { api, ClientApiError } from '../app/api';
+import { hostResetLandingIdentity, type HostAuthLandingIdentity } from '../app/host-auth-landing';
 import {
   clearPendingRegistration,
   matchesPendingRegistration,
@@ -26,6 +28,7 @@ const TITLES: Record<Mode, string> = {
 
 export function HostLoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [search] = useSearchParams();
   const returnTo = safeReturnTo(search.get('returnTo'));
   const adopt = adoptTargetFor(returnTo, search.get('adopt'));
@@ -36,19 +39,36 @@ export function HostLoginPage() {
   const [notice, setNotice] = useState('');
   // Carried from the reset request so the host does not retype it alongside the code.
   const [email, setEmail] = useState('');
+  const mounted = useRef(false);
+  const requestSequence = useRef(0);
+  const locationKey = useRef(location.key);
+  locationKey.current = location.key;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; requestSequence.current += 1; };
+  }, []);
+
+  useEffect(() => {
+    requestSequence.current += 1;
+    setBusy(false);
+  }, [location.key]);
 
   function switchTo(next: Mode) {
+    requestSequence.current += 1; setBusy(false);
     setMode(next); setError(''); setFields({}); setNotice('');
   }
 
   // Both sign-in and a completed reset land here. The claim is made before the
   // navigation because the management-link cookie that authorizes it belongs to the
   // page the host came from, and a refusal is worth showing rather than swallowing.
-  async function finishAuthenticated() {
+  async function finishAuthenticated(identity: HostAuthLandingIdentity | null, isCurrent: () => boolean) {
+    if (!isCurrent()) return;
     if (adopt) {
       try {
         await api(`/api/host/events/${adopt}/adopt`, { method: 'POST', body: JSON.stringify({}) });
       } catch (caught) {
+        if (!isCurrent()) return;
         // The host is signed in either way, so they are not stranded — but the event
         // did not attach, and silently navigating on would repeat exactly the
         // false-success this branch exists to remove.
@@ -58,35 +78,44 @@ export function HostLoginPage() {
         return;
       }
     }
-    navigate(returnTo ?? HOST_EVENTS_PATH);
+    if (!isCurrent()) return;
+    if (returnTo) navigate(returnTo);
+    else navigate(HOST_EVENTS_PATH, { state: identity ? { hostAuthLanding: identity } : null });
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setFields({}); setNotice('');
+    const sequence = ++requestSequence.current;
+    const key = location.key;
+    const isCurrent = () => mounted.current && locationKey.current === key && requestSequence.current === sequence;
     const data = new FormData(event.currentTarget);
     try {
       if (mode === 'signin') {
         const submittedEmail = String(data.get('email') ?? '');
-        if (await matchesPendingRegistration(submittedEmail, new Date())) {
+        const matchesPending = await matchesPendingRegistration(submittedEmail, new Date());
+        if (!isCurrent()) return;
+        if (matchesPending) {
           const pending = await api<{ pending: boolean; expiresAt: string | null }>(
             '/api/host/register/pending',
           );
+          if (!isCurrent()) return;
           if (pending.pending) {
             navigate(hostRegisterHref(adopt, returnTo, true), { replace: true });
             return;
           }
           clearPendingRegistration();
         }
-        await api('/api/host/login', { method: 'POST', body: JSON.stringify({
+        const signedIn = await api<{ account: HostSessionAccountView }>('/api/host/login', { method: 'POST', body: JSON.stringify({
           email: data.get('email'), password: data.get('password'),
         }) });
-        await finishAuthenticated();
+        await finishAuthenticated(signedIn.account?.id ? { kind: 'account', id: signedIn.account.id } : null, isCurrent);
         return;
       }
       if (mode === 'forgot') {
         await api('/api/host/password/forgot', { method: 'POST', body: JSON.stringify({ email: data.get('email') }) });
+        if (!isCurrent()) return;
         setEmail(String(data.get('email') ?? ''));
-        switchTo('reset');
+        setMode('reset');
         // Worded to match what the server actually promises. It answers the same
         // way for an address with no account, and saying "we sent you a code"
         // outright would be a claim the response cannot support.
@@ -96,11 +125,14 @@ export function HostLoginPage() {
       await api('/api/host/password/reset', { method: 'POST', body: JSON.stringify({
         email, code: data.get('code'), password: data.get('password'),
       }) });
-      await finishAuthenticated();
+      if (!isCurrent()) return;
+      const identity = returnTo ? null : await hostResetLandingIdentity(email);
+      await finishAuthenticated(identity, isCurrent);
     } catch (caught) {
+      if (!isCurrent()) return;
       if (caught instanceof ClientApiError) { setError(caught.message); setFields(caught.fieldErrors ?? {}); }
       else setError('That did not go through. Try again.');
-    } finally { setBusy(false); }
+    } finally { if (isCurrent()) setBusy(false); }
   }
 
   return <div className="public-shell">

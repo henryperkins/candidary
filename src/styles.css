@@ -2397,7 +2397,7 @@ body:has([data-host-welcome-tour]) .manager-main::after { content: ''; display: 
 .host-welcome__heading h2 { margin: 0; font-size: 1.6rem; line-height: 1.2; overflow-wrap: anywhere; flex: 1; }
 .host-welcome__heading button { flex-shrink: 0; min-width: 44px; min-height: 44px; margin-top: -8px; margin-right: -8px; }
 .host-welcome__count { margin: 8px 0 16px; font-size: 0.875rem; color: var(--muted); }
-.host-welcome__panel > p { line-height: 1.55; }
+.host-welcome__panel > p, .host-welcome__status > p { line-height: 1.55; }
 .host-welcome__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 24px; }
 .host-welcome__actions .button { min-height: 48px; }
 .host-welcome__actions .button--quiet { margin-right: auto; }
