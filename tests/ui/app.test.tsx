@@ -1170,7 +1170,7 @@ async function expandAlbumSettings(): Promise<void> {
 }
 
 async function expandLibraryExports(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  const trigger = await screen.findByRole('button', { name: 'Exports', exact: true });
+  const trigger = await screen.findByRole('button', { name: 'Exports' });
   if (trigger.getAttribute('aria-expanded') !== 'true') await user.click(trigger);
 }
 
@@ -7953,7 +7953,7 @@ describe('Manager Add photos integration', () => {
 
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /Gallery/ }));
-    await user.click(screen.getByRole('button', { name: 'Exports', exact: true }));
+    await user.click(screen.getByRole('button', { name: 'Exports' }));
     expect(await screen.findByText('Current collection: 10,000 photos (+1 photo).')).toBeVisible();
 
     const count = (suffix: string) => calls.filter((call) => call.endsWith(suffix)).length;

@@ -1378,7 +1378,7 @@ describe('gallery modes', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Summary unavailable.');
     expect(await screen.findByRole('button', { name: 'Open First dance, from Jose' })).toBeVisible();
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports', exact: true }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports' }));
     expect(screen.getByRole('button', { name: 'Download all' })).toBeEnabled();
     expect(state.albumReads).toBe(0);
   });
@@ -4526,19 +4526,19 @@ describe('the album', () => {
     });
 
     renderWorkspace(harness().fetchMock, { activeJob: activeAlbum });
-    await userEvent.setup().click(await screen.findByRole('button', { name: 'Exports', exact: true }));
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Exports' }));
     expect(await screen.findByRole('button', { name: 'Download all' })).toBeDisabled();
 
     cleanup();
     renderWorkspace(harness().fetchMock, { job: completeJob('failed'), activeJob: activeAlbum });
-    await userEvent.setup().click(await screen.findByRole('button', { name: 'Exports', exact: true }));
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Exports' }));
     expect(await screen.findByRole('button', { name: 'Retry this prepared export' })).toBeDisabled();
     expect(screen.getByText('Album export is Running. Prepare and retry actions will be available when it finishes.'))
       .toBeVisible();
 
     cleanup();
     renderWorkspace(harness().fetchMock, { job: completeJob('ready'), activeJob: activeAlbum });
-    await userEvent.setup().click(await screen.findByRole('button', { name: 'Exports', exact: true }));
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Exports' }));
     expect(await screen.findByRole('button', { name: 'Get download links' })).toBeEnabled();
   });
 
