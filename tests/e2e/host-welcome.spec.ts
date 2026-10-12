@@ -59,7 +59,7 @@ test('direct Library stays at work, manual link replay and originals action only
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await chooseManagerSection(page, 'Overview');
   await page.getByRole('button', { name: 'Retrieve originals', exact: true }).click();
-  await expect(page.locator('.gallery-export-tools')).toHaveAttribute('open', '');
+  await expect(page.getByRole('button', { name: 'Exports', exact: true })).toHaveAttribute('aria-expanded', 'true');
   await expect(page.locator('.gallery-export-tools :focus')).toHaveCount(1);
   expect(mutations).toEqual([]);
   await chooseManagerSection(page, 'Overview');
@@ -479,7 +479,7 @@ test('onboarding-context: ended disabled access hands off to Exports without pre
   await expect(page.locator('.host-welcome__panel')).toContainText('cannot be replaced');
   await page.getByRole('button', { name: 'Go to Exports', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.locator('.gallery-export-tools')).toHaveAttribute('open', '');
+  await expect(page.getByRole('button', { name: 'Exports', exact: true })).toHaveAttribute('aria-expanded', 'true');
   await expect(page.locator('.gallery-export-tools :focus')).toHaveCount(1);
   await expect.poll(() => writes).toEqual(['completed']);
   expect(mutations).toEqual([]);

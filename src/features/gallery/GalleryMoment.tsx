@@ -82,7 +82,7 @@ function GalleryTile({
       onClick={event => onFavorite(photo, event.currentTarget, event.detail === 0 ? 'keyboard' : 'pointer')}
     >
       {photo.isFavorite ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" />}
-      <span>{favoritePending ? photo.isFavorite ? 'Removing…' : 'Adding…' : photo.isFavorite ? 'In album' : 'Add to album'}</span>
+      <span>{favoritePending ? photo.isFavorite ? 'Removing…' : 'Adding…' : photo.isFavorite ? 'In album · Remove' : 'Add to album'}</span>
     </button>}
     {selecting && <span className="gallery-photo__selection-state">{selected ? 'Selected' : photo.isFavorite ? 'In album' : 'Not selected'}</span>}
   </article>;

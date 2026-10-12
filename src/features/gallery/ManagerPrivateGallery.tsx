@@ -1,4 +1,4 @@
-import { Minus, Plus, Search, SquareDashedMousePointer, X } from 'lucide-react';
+import { ChevronDown, Minus, Plus, Search, SquareCheck, X } from 'lucide-react';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 import { flushSync } from 'react-dom';
 
@@ -1276,6 +1276,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
           <option value="all">All photos</option>
           <option value="album">In album ({pickCount})</option>
         </select>
+        <ChevronDown aria-hidden="true" />
       </label>
       <label className="library-sort">
         <span className="sr-only">Photo order</span>
@@ -1283,6 +1284,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
           <option value="newest">Newest first</option>
           <option value="earliest">Earliest first</option>
         </select>
+        <ChevronDown aria-hidden="true" />
       </label>
       <button
         type="button"
@@ -1291,7 +1293,7 @@ export const ManagerPrivateGallery = forwardRef<ManagerPrivateGalleryHandle, Man
         aria-pressed={selecting}
         aria-label={selecting ? 'Done selecting' : 'Select photos'}
         onClick={toggleSelecting}
-      ><SquareDashedMousePointer aria-hidden="true" /><span className="sr-only">{selecting ? 'Done selecting' : 'Select photos'}</span></button>
+      ><SquareCheck aria-hidden="true" /><span>{selecting ? 'Done' : 'Select'}</span></button>
     </div>
     <div className="library-arrivals">
       {arrivals.count > 0 && <button type="button" ref={arrivalButton}

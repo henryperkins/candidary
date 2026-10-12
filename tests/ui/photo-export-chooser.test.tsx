@@ -1,6 +1,6 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PhotoExportChooser } from '../../src/features/gallery/PhotoExportChooser';
+import { PhotoExportChooser, PhotoExportEntryActions, usePhotoExportCapabilities } from '../../src/features/gallery/PhotoExportChooser';
 import type { PhotoExportView } from '../../shared/photo-exports';
 const source = { mode: 'ids', scope: 'library', mediaIds: ['photo-a'] } as const;
 const job: PhotoExportView = { id: 'job-a', kind: 'selection', destination: 'device', source: { ...source, mediaIds: ['photo-a'] }, state: 'queued', snapshotAt: '2026-09-12T12:00:00Z', createdAt: '2026-09-12T12:00:00Z', confirmedAt: null, completedAt: null, mediaCount: 1, totalBytes: 2, handedOffCount: 0, unavailableCount: 0, holdExpiresAt: '2026-09-13T12:00:00Z', absoluteExpiresAt: '2026-09-14T12:00:00Z', cancelRequested: false, errorCode: null, attempt: 1 };
@@ -22,6 +22,90 @@ function fixture(options: { paused?: boolean; ackFails?: boolean; retired?: bool
 const props = () => ({ eventId: 'event-a', source: { ...source, mediaIds: ['photo-a'] }, onClose: vi.fn(), onJobChanged: vi.fn() });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); sessionStorage.clear(); Reflect.deleteProperty(navigator, 'share'); Reflect.deleteProperty(navigator, 'canShare'); });
 describe('photo export chooser', () => {
+  it.each(['capabilities', 'error'] as const)('does not carry another event\'s %s into a pending capability read', async previous => {
+    let resolveNext!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(input => String(input).includes('/event-b/')
+      ? new Promise<Response>(resolve => { resolveNext = resolve; })
+      : previous === 'capabilities'
+        ? ok({ enabled: true, destinations: ['device', 'archive'], activeJob: { ...job, ownedByCurrentPrincipal: true } })
+        : Promise.resolve(new Response(JSON.stringify({ code: 'INTERNAL_ERROR', message: 'Event A options unavailable.', requestId: 'r' }), { status: 503 }))));
+    const view = renderHook(({ eventId }) => usePhotoExportCapabilities(eventId), { initialProps: { eventId: 'event-a' } });
+    await waitFor(() => expect(previous === 'capabilities' ? view.result.current.capabilities : view.result.current.error).not.toBeNull());
+    view.rerender({ eventId: 'event-b' });
+    expect(view.result.current.capabilities).toBeNull();
+    expect(view.result.current.error).toBeNull();
+    await act(async () => resolveNext(await ok({ enabled: false, destinations: [], activeJob: null })));
+    expect(view.result.current.capabilities).toEqual({ enabled: false, destinations: [], activeJob: null });
+    expect(view.result.current.error).toBeNull();
+  });
+
+  it.each(['capabilities', 'error'] as const)('clears old %s when returning to event A before event B settles', async previous => {
+    let aReads = 0;
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((input, init) => {
+      signals.push(init?.signal as AbortSignal);
+      if (String(input).includes('/event-a/') && ++aReads === 1) {
+        return previous === 'capabilities'
+          ? ok({ enabled: true, destinations: ['device', 'archive'], activeJob: { ...job, ownedByCurrentPrincipal: true } })
+          : Promise.resolve(new Response(JSON.stringify({ code: 'INTERNAL_ERROR', message: 'Old event A error.', requestId: 'r' }), { status: 503 }));
+      }
+      return new Promise<Response>(() => {});
+    }));
+    const view = renderHook(({ eventId }) => usePhotoExportCapabilities(eventId), { initialProps: { eventId: 'event-a' } });
+    await waitFor(() => expect(previous === 'capabilities' ? view.result.current.capabilities : view.result.current.error).not.toBeNull());
+    view.rerender({ eventId: 'event-b' });
+    expect(signals[0]!.aborted).toBe(true);
+    expect(view.result.current.capabilities).toBeNull();
+    expect(view.result.current.error).toBeNull();
+    view.rerender({ eventId: 'event-a' });
+    expect(signals[1]!.aborted).toBe(true);
+    expect(view.result.current.capabilities).toBeNull();
+    expect(view.result.current.error).toBeNull();
+  });
+
+  it('retains current options during a same-event refresh and replaces them when it settles', async () => {
+    let resolveRefresh!: (response: Response) => void;
+    const current = { enabled: true, destinations: ['device', 'archive'], activeJob: { ...job, ownedByCurrentPrincipal: true } };
+    const fetcher = vi.fn<typeof fetch>().mockImplementationOnce(() => ok(current))
+      .mockImplementationOnce(() => new Promise<Response>(resolve => { resolveRefresh = resolve; }));
+    vi.stubGlobal('fetch', fetcher);
+    const view = renderHook(() => usePhotoExportCapabilities('event-a'));
+    await waitFor(() => expect(view.result.current.capabilities).toEqual(current));
+    act(() => view.result.current.refresh());
+    expect(view.result.current.capabilities).toEqual(current);
+    await act(async () => resolveRefresh(await ok({ enabled: false, destinations: [], activeJob: null })));
+    expect(view.result.current.capabilities).toEqual({ enabled: false, destinations: [], activeJob: null });
+    expect(view.result.current.error).toBeNull();
+  });
+
+  it('ignores a superseded capability response even when the transport does not honor abort', async () => {
+    let resolveOld!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(input => String(input).includes('/event-a/')
+      ? new Promise<Response>(resolve => { resolveOld = resolve; })
+      : ok({ enabled: false, destinations: [], activeJob: null })));
+    const view = renderHook(({ eventId }) => usePhotoExportCapabilities(eventId), { initialProps: { eventId: 'event-a' } });
+    view.rerender({ eventId: 'event-b' });
+    await waitFor(() => expect(view.result.current.capabilities?.enabled).toBe(false));
+    await act(async () => resolveOld(await ok({ enabled: true, destinations: ['device', 'archive'], activeJob: { ...job, ownedByCurrentPrincipal: true } })));
+    expect(view.result.current.capabilities).toEqual({ enabled: false, destinations: [], activeJob: null });
+    expect(view.result.current.error).toBeNull();
+  });
+
+  it('does not promise an existing export when saving is paused without a job', () => {
+    render(<PhotoExportEntryActions
+      capabilities={{ enabled: false, destinations: [], activeJob: null }}
+      error={null}
+      onOpen={vi.fn()}
+      onResume={vi.fn()}
+      onCancel={vi.fn()}
+      onRetry={vi.fn()}
+    />);
+    expect(screen.getByRole('button', { name: 'Save / Share photos' })).toBeDisabled();
+    expect(screen.queryByText(/existing export.*resumed or cancelled/u)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resume photo export' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel photo export' })).not.toBeInTheDocument();
+  });
+
   it('offers ZIP when canShare refuses the actual original Files and never records a device handoff',async () => {
     const fallback=fixture();
     const fetcher=vi.fn<typeof fetch>((input,init) => String(input).endsWith('/archive')

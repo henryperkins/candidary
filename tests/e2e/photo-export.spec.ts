@@ -571,7 +571,7 @@ test('disabled selection capability preserves complete and Album legacy archives
 
   const completeCard = page.getByRole('region', { name: 'Complete export' });
   await expect(page.getByRole('button', { name: 'Save / Share photos' })).toBeDisabled();
-  await expect(completeCard).toContainText('New photo exports are paused.');
+  await expect(completeCard).toContainText('Saving or sharing selected photos is temporarily unavailable.');
   const completeLegacy = page.getByRole('button', { name: 'Download all' });
   await expect(completeLegacy).toBeEnabled();
   await completeLegacy.click();
@@ -585,7 +585,7 @@ test('disabled selection capability preserves complete and Album legacy archives
     .getByRole('button', { name: /^Album, 3$/u }).click();
   const albumCard = page.locator('.album-export');
   await expect(albumCard.getByRole('button', { name: 'Save / Share photos' })).toHaveCount(0);
-  await expect(albumCard).not.toContainText('New photo exports are paused.');
+  await expect(albumCard).not.toContainText('Saving or sharing selected photos is temporarily unavailable.');
   await expect(albumCard).toContainText('Current Album: 3 photos.');
   const albumLegacy = albumCard.getByRole('button', { name: 'Prepare Album ZIP' });
   await expect(albumLegacy).toBeDisabled();

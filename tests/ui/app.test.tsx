@@ -1170,8 +1170,8 @@ async function expandAlbumSettings(): Promise<void> {
 }
 
 async function expandLibraryExports(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-  const summary = await screen.findByText('Exports', { selector: 'summary' });
-  if (!summary.closest('details')?.hasAttribute('open')) await user.click(summary);
+  const trigger = await screen.findByRole('button', { name: 'Exports', exact: true });
+  if (trigger.getAttribute('aria-expanded') !== 'true') await user.click(trigger);
 }
 
 /**
@@ -2562,13 +2562,13 @@ describe('canonical Manager location ownership', () => {
     await router.navigate(-1);
     await screen.findByRole('heading', { name: 'Share your link or QR' });
     await router.navigate(1);
-    const returnedAction = await screen.findByRole('button', { name: 'Download all' });
+    const returnedAction = await screen.findByRole('button', { name: 'Download all', hidden: true });
     expect(returnedAction).not.toHaveFocus();
 
     view.unmount();
     const reload = createAppRouter([`/manage/event/${MANAGED_EVENT.id}?section=gallery`]);
     render(<RouterProvider router={reload} />);
-    expect(await screen.findByRole('button', { name: 'Download all' })).not.toHaveFocus();
+    expect(await screen.findByRole('button', { name: 'Download all', hidden: true })).not.toHaveFocus();
   });
 
   it('commits one canonical clean entry before a complete export intent focuses under StrictMode', async () => {
@@ -4371,6 +4371,7 @@ describe('manager experience', () => {
       'Gallery',
     );
     await user.click(galleryMode('Library'));
+    await expandLibraryExports(user);
     await user.click(await screen.findByRole('button', { name: 'Download all' }));
     expect(await screen.findByRole('alert'), 'export').toHaveTextContent('That photo changed before your update.');
     expect(screen.getByRole('heading', { name: 'Library' }), 'export').toBeVisible();
@@ -4702,6 +4703,7 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
     await user.click(await findGalleryMode('Library'));
+    await expandLibraryExports(user);
     await user.click(screen.getByRole('button', { name: 'Download all' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Another export is already being prepared.');
@@ -6364,6 +6366,7 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await expandLibraryExports(user);
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     await waitFor(() => expect(releaseAExport).toBeTypeOf('function'));
 
@@ -6433,6 +6436,7 @@ describe('manager experience', () => {
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Library' });
     await user.click(screen.getByRole('button', { name: 'Gallery' }));
+    await expandLibraryExports(user);
     await user.click(screen.getByRole('button', { name: 'Download all' }));
     await waitFor(() => expect(releaseAExport).toBeTypeOf('function'));
 
@@ -7949,7 +7953,7 @@ describe('Manager Add photos integration', () => {
 
     await user.click(within(screen.getByRole('navigation', { name: 'Manager sections' }))
       .getByRole('button', { name: /Gallery/ }));
-    await user.click(screen.getByText('Exports', { selector: 'summary' }));
+    await user.click(screen.getByRole('button', { name: 'Exports', exact: true }));
     expect(await screen.findByText('Current collection: 10,000 photos (+1 photo).')).toBeVisible();
 
     const count = (suffix: string) => calls.filter((call) => call.endsWith(suffix)).length;

@@ -339,6 +339,12 @@ Spacing follows a 4px base and the staged 8, 12, 16, 24, 32, 48, 64, and 88px rh
 
 On phones, Library groups its title and count above a single row of Add photos, Trash, and Exports. That action row wraps when counts or enlarged text need more space. Compact spacing around the mode switch, search, and filters brings the Photo Wall into view while preserving 44–48px controls and the reserved arrival-notice row that prevents incoming photos from shifting the collection.
 
+Library Exports expands as a full-width panel in the document flow above the mode switch. Its labelled toggle, Close exports action and Escape handling return focus predictably without covering browsing controls. Download all describes the ZIP of event originals; saving or sharing selected photos has a separate availability message and recovery actions appear only for an actual export. The wall exposes Select/Done labels and pairs confirmed In album state with a visible Remove action.
+
+Library keeps its privacy explanation in About this Gallery view below the content, avoiding a repeated paragraph above search. The desktop title and photo count sit together, followed by the trailing action group. Exports uses one inline band with horizontal rules, action-and-description rows that stack when needed, and a trailing Close exports action. Its action host has no inherited dock padding, surface or blur. Native filter and ordering selects use consistent chevrons; photo groups follow 8px internal gaps, 12px phone columns and 16px rows, with 16px columns and 24px rows on wider screens.
+
+Escape dismisses Exports from its trigger as well as from within the panel. Capability and error snapshots belong to one event, so changing events shows a checking state until that event's read settles. Export messages and actions wrap for long tokens and enlarged text; dismissal alignment follows the text direction.
+
 **The Narrow-First Rule.** Resolve the complete task at 320px before opening columns, rails, or decorative breathing room.
 
 **The One Primary Canvas Rule.** RSVP, before-start, waiting, and photo delivery share one narrow guest frame; secondary gallery, notes, and prior deliveries never compete with the current task.

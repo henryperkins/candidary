@@ -36,3 +36,13 @@ A reserved arrival notice reports the confirmed matching count. Background check
 The viewer exposes authenticated Download original and Move to Trash. Confirmation keeps one modal, initial Keep photo focus, a visible heading/action area and independently scrollable consequence copy. Successful removal advances or returns to Library; the existing single Undo bar uses the body live host and stays keyboard reachable with the viewer. Manager upload chooser and receipt use manager paper/chestnut tokens and bounded portal cards, retaining the established upload/cancellation/recovery lifecycle.
 
 Rendered acceptance uses local intercepted APIs and existing photographic fixtures at 1440×1000, 390×844 and 320×568. It does not establish production transport/download delivery, native camera/picker behavior or screen-reader announcements. Independent integration review is recorded separately in the task report.
+
+## Mobile adaptation and action clarity — 2026-10-12
+
+Exports occupies a full-width inline panel above the mode switch instead of covering modes, search and filters. Its labelled disclosure, Close exports action and Escape handling preserve the mounted action dock and restore focus to Exports. A complete ZIP describes all event originals independently of selected-photo saving/sharing availability; paused copy never invents an existing export. The toolbar displays Select/Done, and confirmed album controls expose In album · Remove while retaining pending feedback, the membership API and Undo. The reserved 44px arrival-notice row remains in place.
+
+Hardening extends Escape to the disclosure trigger and isolates capability/error snapshots by event. Pending availability is announced without blocking the complete-archive path. Long export errors and action labels wrap within the panel, including with enlarged text; dismissal alignment uses logical margins for RTL content.
+
+## Library layout and simplification
+
+The mode-specific privacy explanation remains in About this Gallery view below the content; Library omits the repeated paragraph above search. Desktop title and total share one group, while Add photos and the secondary utilities form the trailing group. Exports is a single inline band with horizontal rules, responsive action/helper rows and a content-sized trailing dismissal. The stable action host drops its inherited dock padding, surface, border and blur, and an empty host contributes no grid gap. Native selects retain their semantics and keyboard behavior while using the shared chevron style. Photo groups use 8px internal gaps, 12px phone columns and 16px rows; wider screens use 16px columns and 24px rows. Existing features and the reserved arrival notice remain available.

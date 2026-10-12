@@ -1,6 +1,7 @@
 import { Download } from 'lucide-react';
 import {
   forwardRef,
+  useId,
   useImperativeHandle,
   useLayoutEffect,
   useRef,
@@ -101,6 +102,7 @@ export const GalleryExportControl = forwardRef<
   const focusRequested = useRef(false);
   const region = useRef<HTMLElement>(null);
   const initialPrepare = useRef<HTMLButtonElement>(null);
+  const prepareDescriptionId = useId();
   const getDownloadLinks = useRef<HTMLButtonElement>(null);
   const manifestDownload = useRef<HTMLAnchorElement>(null);
   const firstPartDownload = useRef<HTMLAnchorElement>(null);
@@ -203,15 +205,16 @@ export const GalleryExportControl = forwardRef<
     {chooser}
     {!normalizedJob
       ? <>
-          {!chooser && !actionAreaOwnsInitialAction && place(<button
+          {!chooser && !actionAreaOwnsInitialAction && place(<><button
             ref={initialPrepare}
             type="button"
             className="button button--primary"
+            aria-describedby={prepareDescriptionId}
             disabled={prepareDisabled}
             onClick={() => run('prepare', onPrepare)}
           >
             <Download aria-hidden="true" /> {pendingAction === 'prepare' ? 'Preparing download…' : 'Download all'}
-          </button>)}
+          </button><p id={prepareDescriptionId} className="gallery-export__copy">All event originals in ZIP files.</p></>)}
           {prepareReason === null ? null : <p className="gallery-export__copy">{prepareReason}</p>}
         </>
       : <div className="export-state">

@@ -14,18 +14,18 @@ function priorHandoffCount(eventId: string, jobId: string): number {
   try { const count = Number(sessionStorage.getItem(fallbackReceiptKey(eventId, jobId))); return Number.isSafeInteger(count) && count >= 0 ? count : 0; } catch { return 0; }
 }
 export function usePhotoExportCapabilities(eventId: string) {
-  const [capabilities, setCapabilities] = useState<PhotoExportCapabilities | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<{ eventId: string; capabilities: PhotoExportCapabilities | null; error: string | null }>({ eventId, capabilities: null, error: null });
   const [revision, setRevision] = useState(0);
   const refresh = useCallback(() => setRevision(value => value + 1), []);
   useEffect(() => {
     const controller = new AbortController();
+    setSnapshot(current => current.eventId === eventId ? current : { eventId, capabilities: null, error: null });
     void api<PhotoExportCapabilities>(`${basePath(eventId)}/capabilities`, { signal: controller.signal })
-      .then(value => { if (!controller.signal.aborted) { setCapabilities(value); setError(null); } })
-      .catch(error => { if (!controller.signal.aborted) { setCapabilities(null); setError(message(error)); } });
+      .then(value => { if (!controller.signal.aborted) setSnapshot({ eventId, capabilities: value, error: null }); })
+      .catch(error => { if (!controller.signal.aborted) setSnapshot({ eventId, capabilities: null, error: message(error) }); });
     return () => controller.abort();
   }, [eventId, revision]);
-  return { capabilities, error, refresh };
+  return { capabilities: snapshot.eventId === eventId ? snapshot.capabilities : null, error: snapshot.eventId === eventId ? snapshot.error : null, refresh };
 }
 
 export function PhotoExportEntryActions({ capabilities, error, onOpen, onResume, onCancel, onRetry, actionDock, recentJob, scope = 'library', chooserOpen = false }: {
@@ -49,7 +49,9 @@ export function PhotoExportEntryActions({ capabilities, error, onOpen, onResume,
       ? <div className="photo-export-actions"><button type="button" className="button button--secondary" data-photo-export-origin="receipt" onClick={event => onResume(event.currentTarget)}>Resume photo export</button><button type="button" className="button button--secondary" onClick={onCancel}>Cancel photo export</button></div>
       : <p>{active.kind === 'selection' ? `${active.destination} photo export` : `${active.kind} archive`}: {active.state}. This operation must finish or expire before another export can start.</p>)}
     {!active && recentJob && <div><p>{recentJob.destination === 'archive' ? 'Photo ZIP' : 'Device photo export'}: {recentJob.state}. {recentJob.mediaCount.toLocaleString()} photos.{recentJob.destination === 'device' && ` Handed to your device: ${recentJob.handedOffCount}.`}</p><button type="button" className="text-button" data-photo-export-origin="receipt" onClick={event => onResume(event.currentTarget)}>View photo export</button></div>}
-    {!album && capabilities && !capabilities.enabled && <p>New photo exports are paused. Your existing export can still be resumed or cancelled.</p>}
+    {!album && capabilities === null && error === null && <p className="gallery-export__copy" role="status">Checking photo export options…</p>}
+    {!album && capabilities?.enabled && !active && <p className="gallery-export__copy">Choose how to save or share selected photos.</p>}
+    {!album && capabilities && !capabilities.enabled && <p>Saving or sharing selected photos is temporarily unavailable.</p>}
     {error && <p role="alert">{error} <button type="button" className="text-button" onClick={onRetry}>Check again</button></p>}
   </div>;
 }
@@ -213,7 +215,7 @@ export function PhotoExportChooser({ eventId, source, onClose, onJobChanged, onP
       ? <div className="photo-export-actions"><button type="button" className="button button--primary" disabled={busy} onClick={() => void run(signal => getJob(active.id, signal))}>Resume photo export</button><button type="button" className="button button--secondary" disabled={busy} onClick={() => void run(async signal => { await mutation(active.id, 'cancel', signal); })}>Cancel photo export</button></div>
       : <p>{active.kind} {active.destination} export: {active.state}. It must finish or expire before a new export can start.</p>)
       : <div className="photo-export-actions"><button type="button" className="button button--primary" disabled={busy || !capabilities?.enabled || !capabilities.destinations.includes('device')} onClick={() => void run(signal => freeze('device', signal))}>Prepare for this device</button><button type="button" className="button button--secondary" disabled={busy || !capabilities?.enabled || !capabilities.destinations.includes('archive')} onClick={() => void run(signal => freeze('archive', signal))}>Prepare photo ZIP</button></div>}
-    {capabilities && !capabilities.enabled && <p>New photo exports are paused. You can resume or cancel your existing export.</p>}
+    {capabilities && !capabilities.enabled && <p>Saving or sharing selected photos is temporarily unavailable.</p>}
   </>;
   else content = <>
     <p>Frozen {new Date(job.snapshotAt).toLocaleString()}: <strong>{job.mediaCount.toLocaleString()} photos · {formatBytes(job.totalBytes)} ({job.totalBytes.toLocaleString()} bytes)</strong></p>

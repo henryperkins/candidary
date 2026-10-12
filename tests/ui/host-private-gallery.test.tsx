@@ -492,6 +492,7 @@ describe('host private gallery', () => {
     const original = managerFetch();
     const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input).endsWith('/photo-exports/capabilities') ? failure('INTERNAL_ERROR', 'Export availability is temporarily unavailable.') : original(input, init));
     const onPrepare = vi.fn(noop); renderGalleryWithFetch(fetcher, { onPrepare });
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports', exact: true }));
     await screen.findByText(/Export availability is temporarily unavailable/);
     expect(screen.getByRole('button', { name: 'Save / Share photos' })).toBeDisabled();
     await userEvent.setup().click(screen.getByRole('button', { name: 'Download all' }));
@@ -522,20 +523,49 @@ describe('host private gallery', () => {
     expect(selectControl).toHaveFocus();
   });
 
+  it('closes Library exports with Escape and returns focus without recreating its download action', async () => {
+    renderGallery();
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: 'Library' });
+    const trigger = screen.getByRole('button', { name: 'Exports', exact: true });
+    await user.click(trigger);
+    expect(screen.getByRole('region', { name: 'Exports', exact: true })).toBeVisible();
+    const download = screen.getByRole('button', { name: 'Download all' });
+    expect(trigger).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('region', { name: 'Exports', exact: true })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    await user.click(trigger);
+    expect(screen.getByRole('button', { name: 'Download all' })).toBe(download);
+    download.focus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('region', { name: 'Exports', exact: true })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await user.click(trigger);
+    expect(screen.getByRole('button', { name: 'Download all' })).toBe(download);
+    await user.click(screen.getByRole('button', { name: 'Close exports' }));
+    expect(trigger).toHaveFocus();
+    expect(screen.queryByRole('region', { name: 'Exports', exact: true })).not.toBeInTheDocument();
+  });
+
   it('names the private workspace once and leaves Download all self-explanatory', async () => {
     renderGallery();
 
     expect(await screen.findByRole('heading', { name: 'Library' })).toBeVisible();
-    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports', exact: true }));
     // The mode's rule is back, but folded and last: a host who wants it opens it, and until they do
     // it costs no words above the photographs.
     const disclosure = document.querySelector('.gallery-context-disclosure')!;
     expect(disclosure).not.toHaveAttribute('open');
     expect(screen.getByText('About this Gallery view')).toBeVisible();
     expect(screen.getByText(/Delivered photos stay private to hosts/u)).not.toBeVisible();
+    expect(screen.queryByText('Originals stay private in Library. Album and Guest gallery are optional ways to share selected photos.')).not.toBeInTheDocument();
     expect(screen.queryByText('What the complete download includes')).not.toBeInTheDocument();
     expect(screen.queryByText(/Every delivered photo, the photo manifest/u)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Download all' })).toBeVisible();
+    await userEvent.setup().click(screen.getByText('About this Gallery view'));
+    expect(screen.getByText(/Delivered photos stay private to hosts/u)).toBeVisible();
   });
 
   it('opens the private timeline with moments, the event total, and no moderation controls', async () => {
@@ -1727,6 +1757,7 @@ describe('host private gallery', () => {
     const { onPrepare } = renderGallery();
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Library' });
+    await user.click(screen.getByRole('button', { name: 'Exports', exact: true }));
 
     expect(screen.queryByText('What the complete download includes')).not.toBeInTheDocument();
     expect(screen.queryByText(/Every delivered photo, the photo manifest/u)).not.toBeInTheDocument();
@@ -1802,7 +1833,7 @@ describe('host private gallery', () => {
       },
     });
     await screen.findByRole('heading', { name: 'Library' });
-    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports', exact: true }));
 
     expect(screen.getByText('Ready')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Get download links' })).toBeVisible();
@@ -1823,7 +1854,7 @@ describe('host private gallery', () => {
       onPrepare,
     });
     await screen.findByRole('heading', { name: 'Library' });
-    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports', exact: true }));
 
     expect(screen.getByRole('button', { name: 'Download all' })).toBeDisabled();
     expect(screen.getByText('When photos arrive, use Exports to download the originals.')).toBeVisible();
@@ -1859,7 +1890,7 @@ describe('host private gallery', () => {
       },
     });
     await screen.findByRole('heading', { name: 'Library' });
-    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports', exact: true }));
 
     expect(screen.getByText('Failed')).toBeVisible();
     expect(screen.getByText(/This prepared export did not finish\./u)).toBeVisible();
@@ -1900,7 +1931,7 @@ describe('host private gallery', () => {
     });
 
     await screen.findByRole('heading', { name: 'Library' });
-    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports', exact: true }));
     expect(screen.getByText(/A photo in this prepared export is no longer available\. Prepare the current collection\./, {
       selector: 'span',
     })).toBeVisible();
@@ -1952,7 +1983,7 @@ describe('host private gallery', () => {
       },
     });
     await screen.findByRole('heading', { name: 'Library' });
-    await userEvent.setup().click(screen.getByText('Exports', { selector: 'summary' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Exports', exact: true }));
 
     // A host planning a multi-gigabyte download needs the size before they start.
     expect(screen.getByText('Frozen size: 3.0 GB · 12 guestbook entries.')).toBeVisible();

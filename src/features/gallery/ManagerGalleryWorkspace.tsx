@@ -2,11 +2,13 @@ import {
   forwardRef,
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
 } from 'react';
+import { ChevronDown } from 'lucide-react';
 
 import type { ExportDownloadView, ExportView, MediaView } from '../../app/types';
 import { api, ClientApiError } from '../../app/api';
@@ -245,6 +247,7 @@ ManagerGalleryWorkspaceProps
       if (outcome?.status !== 'ready') return;
     }
     if (sequence !== photoExportSequence.current || currentPhotoScope.current.eventId !== scope.eventId || currentPhotoScope.current.mode !== scope.mode) return;
+    if (source.scope === 'library') setLibraryToolsOpen(true);
     setPhotoExportTarget({ eventId, mode: source.scope, source, origin, resumeJobId, key: sequence });
   };
   const closePhotoExport = () => {
@@ -895,6 +898,22 @@ ManagerGalleryWorkspaceProps
   // one applicable control here, preserving that control's ref, pending state, and focus.
   const [actionDock, setActionDock] = useState<HTMLDivElement | null>(null);
   const [libraryToolsOpen, setLibraryToolsOpen] = useState(false);
+  const libraryToolsId = useId();
+  const libraryToolsTrigger = useRef<HTMLButtonElement>(null);
+  const libraryToolsFocusReturn = useRef(false);
+  useEffect(() => {
+    if (exports.failure) setLibraryToolsOpen(true);
+  }, [exports.failure]);
+  const closeLibraryTools = () => {
+    libraryToolsFocusReturn.current = true;
+    if (photoExportTarget?.mode === 'library') closePhotoExport();
+    setLibraryToolsOpen(false);
+  };
+  useLayoutEffect(() => {
+    if (libraryToolsOpen || !libraryToolsFocusReturn.current) return;
+    libraryToolsFocusReturn.current = false;
+    libraryToolsTrigger.current?.focus();
+  }, [libraryToolsOpen, photoExportTarget]);
 
   const rootRef = useRef<HTMLElement>(null);
   useGalleryDock(rootRef);
@@ -941,17 +960,43 @@ ManagerGalleryWorkspaceProps
       <p className="gallery-total">{event.storedMediaCount.toLocaleString()} {event.storedMediaCount === 1 ? 'photo' : 'photos'}</p>
       <div className="library-heading-actions">
         {mode === 'library' && <div className="library-add-photos">{libraryActions}</div>}
-        <div className="library-utilities">{mode === 'library' && trashAction}<details
-          className="gallery-export-tools"
-          open={mode !== 'library' || libraryToolsOpen || photoExportTarget?.mode === 'library' || !!exports.failure}
-          onToggle={event => { if (mode === 'library') setLibraryToolsOpen(event.currentTarget.open); }}
-        >
-          <summary data-host-tour-anchor="exports" hidden={mode !== 'library'}>Exports</summary>
-          <div className="gallery-export-tools__body">
-            <div className="gallery-action" ref={setActionDock} />
-            {libraryExportContent}
-          </div>
-        </details></div>
+        <div className="library-utilities">{mode === 'library' && <>
+          {trashAction}
+          <button
+            type="button"
+            className="gallery-export-tools__toggle"
+            ref={libraryToolsTrigger}
+            data-host-tour-anchor="exports"
+            aria-expanded={libraryToolsOpen}
+            aria-controls={libraryToolsId}
+            onClick={() => libraryToolsOpen ? closeLibraryTools() : setLibraryToolsOpen(true)}
+            onKeyDown={event => {
+              if (!libraryToolsOpen || event.key !== 'Escape' || event.defaultPrevented) return;
+              event.preventDefault();
+              event.stopPropagation();
+              closeLibraryTools();
+            }}
+          >Exports <ChevronDown aria-hidden="true" /></button>
+        </>}</div>
+      </div>
+    </div>
+    <div
+      className="gallery-export-tools"
+      id={libraryToolsId}
+      role={mode === 'library' ? 'region' : undefined}
+      aria-label={mode === 'library' ? 'Exports' : undefined}
+      hidden={librarySuspended || (mode === 'library' && !libraryToolsOpen)}
+      onKeyDown={event => {
+        if (mode !== 'library' || event.key !== 'Escape' || event.defaultPrevented) return;
+        event.preventDefault();
+        event.stopPropagation();
+        closeLibraryTools();
+      }}
+    >
+      <div className="gallery-export-tools__body">
+        <div className="gallery-action" ref={setActionDock} />
+        {libraryExportContent}
+        {mode === 'library' && <button type="button" className="text-button gallery-export-tools__close" onClick={closeLibraryTools}>Close exports</button>}
       </div>
     </div>
     <div className="gallery-control-row">
@@ -976,7 +1021,7 @@ ManagerGalleryWorkspaceProps
         })}
       </div>
     </div>
-    <p className="form-note">Originals stay private in Library. Album and Guest gallery are optional ways to share selected photos.</p>
+    {mode !== 'library' && <p className="form-note">Originals stay private in Library. Album and Guest gallery are optional ways to share selected photos.</p>}
     {/* The audience facts are read on arrival, not consulted while scrolling, so they sit in the
         flow below the switch rather than inside the pinned band — the mode is the only thing worth
         pinning, and this line was costing every mode roughly a third of that band.

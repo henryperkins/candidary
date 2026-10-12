@@ -110,11 +110,17 @@ test('mobile section menu stays above Library popovers and selection Undo while 
     ['exports', '.gallery-export-tools', '.gallery-export-tools__body'],
   ] as const) {
     const disclosure = page.locator(root);
-    await disclosure.locator(':scope > summary').click();
+    const trigger = label === 'exports'
+      ? page.getByRole('button', { name: 'Exports', exact: true })
+      : disclosure.locator(':scope > summary');
+    await trigger.click();
     await expect(page.locator(body)).toBeVisible();
     await expectMenuAboveContent(label);
-    if (await disclosure.getAttribute('open') !== null) {
-      await disclosure.locator(':scope > summary').click();
+    const open = label === 'exports'
+      ? await trigger.getAttribute('aria-expanded') === 'true'
+      : await disclosure.getAttribute('open') !== null;
+    if (open) {
+      await trigger.click();
     }
   }
 
